@@ -1,0 +1,55 @@
+"""Tests for athenaeum.isolation.resolve_under."""
+
+import os
+
+import pytest
+
+from athenaeum.isolation import PathEscapeError, UserPaths, resolve_under
+
+
+def test_valid_nested_path(tmp_path):
+    result = resolve_under(tmp_path, "/tables/customers.md")
+    assert result == tmp_path.resolve() / "tables" / "customers.md"
+
+
+def test_relative_form_and_root(tmp_path):
+    assert resolve_under(tmp_path, "a/b.md") == tmp_path.resolve() / "a" / "b.md"
+    assert resolve_under(tmp_path, "/") == tmp_path.resolve()
+
+
+def test_traversal_rejected(tmp_path):
+    with pytest.raises(PathEscapeError):
+        resolve_under(tmp_path, "../evil.md")
+    with pytest.raises(PathEscapeError):
+        resolve_under(tmp_path, "a/../../evil.md")
+    with pytest.raises(PathEscapeError):
+        resolve_under(tmp_path, "..\\evil.md")
+
+
+def test_os_absolute_rejected(tmp_path):
+    with pytest.raises(PathEscapeError):
+        resolve_under(tmp_path, "C:/Windows/evil.md")
+    with pytest.raises(PathEscapeError):
+        resolve_under(tmp_path, "C:\\Windows\\evil.md")
+    with pytest.raises(PathEscapeError):
+        resolve_under(tmp_path, "//server/share/evil.md")
+
+
+def test_symlink_escape_rejected(tmp_path):
+    outside = tmp_path.parent / (tmp_path.name + "_outside")
+    outside.mkdir(exist_ok=True)
+    link = tmp_path / "link"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    with pytest.raises(PathEscapeError):
+        resolve_under(tmp_path, "link/evil.md")
+
+
+def test_user_paths_wrapper(tmp_path):
+    paths = UserPaths(tmp_path)
+    assert paths.root == tmp_path.resolve()
+    assert paths.resolve("/x.md") == tmp_path.resolve() / "x.md"
+    with pytest.raises(PathEscapeError):
+        paths.resolve("../x.md")

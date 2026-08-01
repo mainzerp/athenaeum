@@ -1,0 +1,34 @@
+<ul class="tree">
+  {% for e in entries %}
+  <li>
+    {% if e["is_directory"] %}
+    <button type="button" class="expander"
+            aria-label="Expand {{ e['name'] }}"
+            hx-get="/library/tree/children?path={{ e['path'] | urlencode }}"
+            hx-trigger="click once"
+            hx-target="next ul"
+            hx-swap="innerHTML">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+    </button>
+    <span class="dirname">{{ e["name"] }}/</span>
+    <a class="graph-jump" href="/library/graph?folder={{ e['path'] | urlencode }}" title="Show in graph" aria-label="Show in graph">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/>
+      </svg>
+    </a>
+    <ul></ul>
+    {% else %}
+    <a href="/library/document?path={{ e['path'] | urlencode }}">{{ e["name"] }}</a>
+    <a class="graph-jump" href="/library/graph?focus={{ e['path'][:-3] | urlencode }}" title="Show in graph" aria-label="Show in graph">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/>
+      </svg>
+    </a>
+    {% if e.get("title") %}<span class="muted">- {{ e["title"] }}</span>{% endif %}
+    {% if e.get("type") %}<span class="badge badge-neutral">{{ e["type"] }}</span>{% endif %}
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Server - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Server settings</h1>
+  <p class="subtitle">Process-wide MCP transport options.</p>
+</div>
+{% if saved %}<div class="js-flash" data-type="success" data-message="Saved." hidden></div>{% endif %}
+
+<div class="card">
+  <div class="card-header">MCP transport</div>
+  <div class="card-body">
+    <form method="post" action="/admin/server" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="checkbox-row">
+          <input type="checkbox" name="mcp_stateless_http" value="1" {% if mcp_stateless_http %}checked{% endif %}>
+          Stateless MCP HTTP (no session resumability; takes effect on restart)
+        </label>
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

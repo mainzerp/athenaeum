@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Trace {{ trace["trace_id"] }} - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Trace replay</h1>
+  <p class="subtitle">
+    {{ trace["tool"] }} by {{ trace["agent_label"] or "unknown agent" }}
+    &mdash; {{ trace["started_at"] | dt }},
+    {{ "%.0f ms" | format(trace["duration_ms"]) }}
+    <span class="badge {% if trace['outcome'] == 'ok' %}badge-success{% else %}badge-danger{% endif %}">{{ trace["outcome"] }}</span>
+    {% if trace["error"] %}<span class="badge badge-danger">{{ trace["error"] }}</span>{% endif %}
+  </p>
+</div>
+{% if trace["llm"] %}
+<div class="badges mb-4">
+  <span class="badge badge-info">{{ trace["llm"]["provider"] }} / {{ trace["llm"]["model"] }}</span>
+  <span class="badge badge-neutral">{{ trace["llm"]["iterations"] }} iteration(s)</span>
+  <span class="badge badge-neutral">{{ trace["llm"]["total_tokens"] }} tokens</span>
+</div>
+{% endif %}
+<div class="badges mb-4">
+  <span class="badge badge-neutral"><span class="status-dot" style="background: #f1c40f;"></span>visited hop</span>
+  <span class="badge badge-neutral"><span class="status-dot" style="background: #f1c40f; opacity: 0.45;"></span>search hit</span>
+  <span class="badge badge-neutral"><span class="status-dot" style="background: #95a5a6; opacity: 0.45;"></span>faded</span>
+</div>
+<div class="replay-controls mb-4">
+  <button type="button" id="replay-play" class="btn btn-primary btn-sm">Play</button>
+  <button type="button" id="replay-prev" class="btn btn-secondary btn-sm">Back</button>
+  <button type="button" id="replay-next" class="btn btn-secondary btn-sm">Forward</button>
+  <span id="replay-counter" class="replay-counter muted">Hop 0 of 0</span>
+</div>
+<div class="card mb-4">
+  <div id="graph" class="graph-canvas graph-universe"></div>
+</div>
+<div class="card">
+  <div class="card-body">
+    <h2>Events</h2>
+    {% if trace["events"] %}
+    <ol id="timeline">
+      {% for e in trace["events"] %}
+      <li data-seq="{{ e['seq'] }}">
+        <strong>#{{ e["seq"] }} {{ e["tool"] }}</strong>
+        <span class="muted">{{ "%.1f ms" | format(e["duration_ms"]) }}</span>
+        {% if e["error"] %}<span class="badge badge-danger">{{ e["error"] }}</span>{% endif %}
+        <pre class="log">{{ e["args"] | tojson }} -&gt; {{ e["result"] | tojson }}</pre>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="muted">No tool events recorded.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/graph3d-vendor.min.js"></script>
+<script src="/static/graph3d.js"></script>
+<script src="/static/trace_replay.js"></script>
+<script>
+  TraceReplay.replay("graph", {{ trace["trace_id"] | tojson }});
+</script>
+{% endblock %}

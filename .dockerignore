@@ -1,0 +1,15 @@
+# Build context is only what the image needs: src/, pyproject.toml,
+# requirements.txt (plan section 8.1).
+.git
+.venv
+data
+tests
+docs
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+src/*.egg-info
+Dockerfile
+.dockerignore
+docker-compose.yml

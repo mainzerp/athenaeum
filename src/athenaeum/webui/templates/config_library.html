@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Library settings - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Library settings</h1>
+  <p class="subtitle">Library identity, storage, and maintenance.</p>
+</div>
+{% if saved %}<div class="js-flash" data-type="success" data-message="Saved." hidden></div>{% endif %}
+{% if msg %}<div class="js-flash" data-type="success" data-message="{{ msg }}" hidden></div>{% endif %}
+
+<div class="card">
+  <div class="card-header">Library</div>
+  <div class="card-body">
+    <form method="post" action="/config/library" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="name">Library name</label>
+        <input class="input-field" type="text" id="name" name="name" value="{{ cfg['library_name'] or '' }}">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="description">Description</label>
+        <input class="input-field" type="text" id="description" name="description" value="{{ cfg['library_description'] or '' }}">
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row"><input type="checkbox" name="versioning" value="1" {% if cfg["versioning"] %}checked{% endif %}> Versioning (shadow-copy snapshots)</label>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="snapshot_keep">Snapshots to keep (0 = keep all)</label>
+        <input class="input-field" type="number" id="snapshot_keep" name="snapshot_keep" min="0" value="{{ cfg['snapshot_keep'] }}">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="trace_keep">Traces to keep (0 = keep all)</label>
+        <input class="input-field" type="number" id="trace_keep" name="trace_keep" min="0" value="{{ cfg['trace_keep'] }}">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="activity_keep">Activity rows to keep (0 = keep all)</label>
+        <input class="input-field" type="number" id="activity_keep" name="activity_keep" min="0" value="{{ cfg['activity_keep'] }}">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="library_path">Storage path (read-only)</label>
+        <input class="input-field" type="text" id="library_path" value="{{ library_path }}" disabled>
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Maintenance</div>
+  <div class="card-body">
+    <div class="flex items-center gap-3">
+      <form method="post" action="/config/library/reconcile"
+            data-confirm="Rebuild all index.md files? This rewrites every index in the library.">
+        {{ csrf_input(request) }}
+        <button type="submit" class="btn btn-secondary">Rebuild all index.md</button>
+      </form>
+      <form method="post" action="/config/library/validate">
+        {{ csrf_input(request) }}
+        <button type="submit" class="btn btn-secondary">Validate bundle</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% if validation is not none %}
+<div class="card">
+  <div class="card-header">Validation result</div>
+  <div class="card-body">
+    {% if not validation["errors"] and not validation["warnings"] %}
+    <div class="alert alert-success" role="status">No errors, no warnings.</div>
+    {% endif %}
+    {% if validation["errors"] %}
+    <div class="alert alert-danger" role="alert">
+      <div class="min-w-0">
+        <strong>Errors</strong>
+        <ul>{% for e in validation["errors"] %}<li>{{ e }}</li>{% endfor %}</ul>
+      </div>
+    </div>
+    {% endif %}
+    {% if validation["warnings"] %}
+    <div class="alert alert-warning" role="alert">
+      <div class="min-w-0">
+        <strong>Warnings</strong>
+        <ul>{% for w in validation["warnings"] %}<li>{{ w }}</li>{% endfor %}</ul>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

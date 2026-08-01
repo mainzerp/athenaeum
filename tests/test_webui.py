@@ -1,0 +1,1743 @@
+"""WebUI smoke + isolation tests (self-contained: local app factory, fake backend).
+
+Streams A/B are developed in parallel, so the LibraryBackend and the LLM
+provider layer are replaced here by fakes honoring the pinned contracts
+(plan §3.2 read/versioning surface, §3.4 provider factory).
+"""
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from starlette.middleware.sessions import SessionMiddleware
+
+from athenaeum import db as db_module
+from athenaeum import security
+from athenaeum.config import get_settings
+from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST
+from athenaeum.library.backend import provision_library
+from athenaeum.webui import ROUTERS, deps, routes_auth
+from conftest import CsrfTestClient
+
+SECRET = "test-secret-key"
+
+
+class FakeBackend:
+    """Minimal stand-in for the plan §3.2 read-only/versioning surface."""
+
+    def __init__(self, docs):
+        self.docs = docs
+        self.reconciled = False
+
+    def list_dir(self, path: str = "/") -> list[dict]:
+        prefix = "/" if path == "/" else path.rstrip("/") + "/"
+        if path != "/" and not any(p.startswith(prefix) for p in self.docs):
+            raise FileNotFoundError(path)
+        children: dict[str, bool] = {}
+        for doc_path in self.docs:
+            if not doc_path.startswith(prefix):
+                continue
+            head, _, tail = doc_path[len(prefix) :].partition("/")
+            children.setdefault(head, bool(tail))
+        entries = []
+        for name, is_dir in sorted(children.items()):
+            child_path = prefix + name
+            entry = {"name": name, "path": child_path, "is_directory": is_dir}
+            if not is_dir:
+                fm = self.docs[child_path]["frontmatter"]
+                for key in ("title", "type", "description"):
+                    if key in fm:
+                        entry[key] = fm[key]
+            entries.append(entry)
+        return entries
+
+    def read_document(self, path: str) -> dict:
+        if path not in self.docs:
+            raise FileNotFoundError(path)
+        doc = self.docs[path]
+        return {"path": path, "frontmatter": doc["frontmatter"], "body": doc["body"]}
+
+    def list_versions(self) -> list[dict]:
+        return [
+            {
+                "n": 1,
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "actor": "athenaeum-librarian/0.1.0",
+                "operation": "create",
+                "paths": ["/concepts/alpha.md"],
+            }
+        ]
+
+    def diff_version(self, n: int, path: str) -> str:
+        if path not in self.docs:
+            raise FileNotFoundError(path)
+        return "--- a\n+++ b\n-old\n+new\n"
+
+    def validate(self, scope: str | None = None) -> dict:
+        return {"errors": [], "warnings": ["example warning"]}
+
+    def reconcile(self) -> None:
+        self.reconciled = True
+
+
+def make_docs(username: str) -> dict:
+    return {
+        "/index.md": {"frontmatter": {}, "body": "# Index\n"},
+        "/log.md": {
+            "frontmatter": {},
+            "body": "# Log\n\n## 2026-01-01\n\n* **Initialization** bundle created\n",
+        },
+        f"/user-{username}.md": {
+            "frontmatter": {"title": f"Private to {username}", "type": "Note"},
+            "body": f"Only {username} has this document.\n",
+        },
+        "/concepts/alpha.md": {
+            "frontmatter": {
+                "title": "Alpha",
+                "type": "Concept",
+                "tags": ["x", "y"],
+                "verified": [{"by": "human:alice", "at": "2026-01-01"}],
+            },
+            "body": "See [Beta](/concepts/beta.md).\n",
+        },
+        "/concepts/beta.md": {
+            "frontmatter": {"title": "Beta", "type": "Note", "stale_after": "2000-01-01"},
+            "body": "Beta body.\n",
+        },
+    }
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATHENAEUM_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("ATHENAEUM_SECRET_KEY", SECRET)
+
+    backends: dict[str, FakeBackend] = {}
+
+    def fake_backend_factory(settings, user, conn):
+        user_id = user["id"]
+        if user_id not in backends:
+            backends[user_id] = FakeBackend(make_docs(user["username"]))
+        return backends[user_id]
+
+    monkeypatch.setattr(deps, "get_library_backend", fake_backend_factory)
+
+    class FakeManager:
+        def __init__(self):
+            self.evicted: list[str] = []
+
+        def evict(self, user_id: str) -> None:
+            self.evicted.append(user_id)
+
+    app = FastAPI()
+    app.add_middleware(SessionMiddleware, secret_key=SECRET)
+    for router in ROUTERS:
+        app.include_router(router)
+    app.state.librarian_manager = FakeManager()
+
+    client = CsrfTestClient(app, follow_redirects=False)
+    return client, backends, tmp_path
+
+
+def make_user(data_root, username, password, *, admin=False):
+    db_path = Path(data_root) / "app.db"
+    db_module.init_db(db_path)
+    conn = db_module.connect(db_path)
+    try:
+        user = db_module.create_user(
+            conn, username, security.hash_password(password), is_admin=admin
+        )
+    finally:
+        conn.close()
+    provision_library(data_root, user["id"])
+    return user
+
+
+def read_config(data_root, user_id):
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        return db_module.get_config(conn, user_id)
+    finally:
+        conn.close()
+
+
+def read_connections(data_root, user_id):
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        return db_module.list_provider_configs(conn, user_id)
+    finally:
+        conn.close()
+
+
+def login(client, username, password):
+    response = client.post("/login", data={"username": username, "password": password})
+    assert response.status_code == 303
+    return response
+
+
+# --- first-run setup / auth ---------------------------------------------------
+
+
+def test_first_run_setup_creates_admin(env):
+    client, _, data_root = env
+    # with an empty users table everything funnels into /setup
+    response = client.get("/")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/setup"
+    response = client.get("/login")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/setup"
+
+    assert "First-run setup" in client.get("/setup").text
+
+    # mismatched confirmation re-renders with an error
+    response = client.post(
+        "/setup",
+        data={"username": "owner", "password": "owner-password-1", "confirm": "owner-password-2"},
+    )
+    assert response.status_code == 200
+    assert "do not match" in response.text
+
+    response = client.post(
+        "/setup",
+        data={"username": "owner", "password": "owner-password-1", "confirm": "owner-password-1"},
+    )
+    assert response.status_code == 303
+
+    user = db_module.get_user_by_username(db_module.connect(Path(data_root) / "app.db"), "owner")
+    assert user is not None and user["is_admin"] == 1
+
+    # setup is gone once a user exists; the new session is already logged in
+    response = client.get("/setup")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+    assert client.get("/library/tree").status_code == 200
+
+
+def test_login_logout(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+
+    response = client.post("/login", data={"username": "alice", "password": "wrong"})
+    assert response.status_code == 200
+    assert "Invalid username or password" in response.text
+
+    login(client, "alice", "pw")
+    response = client.get("/library/tree")
+    assert response.status_code == 200
+    assert "concepts/" in response.text
+
+    response = client.post("/logout")
+    assert response.status_code == 303
+    response = client.get("/library/tree")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+# --- CSRF protection (CS-8) ----------------------------------------------------
+
+
+def test_csrf_post_without_token_rejected(env):
+    """Mutating form POSTs without the session CSRF token get 403."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post("/tokens", data={"label": "agent"}, csrf=False)
+    assert response.status_code == 403
+    # the login form is protected too (tokenless POST even with valid creds)
+    response = client.post("/login", data={"username": "alice", "password": "pw"}, csrf=False)
+    assert response.status_code == 403
+
+
+def test_csrf_post_with_wrong_token_rejected(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post("/tokens", data={"label": "agent", "csrf_token": "forged"}, csrf=False)
+    assert response.status_code == 403
+
+
+def test_csrf_post_with_token_accepted(env):
+    """The token rendered into forms (and auto-attached by the test client)
+    passes validation."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # the token is rendered into every mutating form
+    response = client.get("/tokens")
+    assert response.status_code == 200
+    assert 'name="csrf_token"' in response.text
+
+    response = client.post("/tokens", data={"label": "agent"})
+    assert response.status_code == 200
+
+    # htmx partial POSTs are protected the same way
+    response = client.post("/config/provider/some-id/test", data={"api_key": ""}, csrf=False)
+    assert response.status_code == 403
+
+
+def test_login_throttling_locks_out_after_failures(env):
+    """CS-2: per-account lockout with backoff after repeated failures."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "alice-password-1")
+
+    for _ in range(db_module.LOGIN_MAX_FAILURES):
+        response = client.post("/login", data={"username": "alice", "password": "wrong"})
+        assert response.status_code == 200
+        assert "Invalid username or password" in response.text
+
+    # the lockout is active: even the CORRECT password is refused
+    response = client.post("/login", data={"username": "alice", "password": "alice-password-1"})
+    assert response.status_code == 200
+    assert "Too many failed attempts" in response.text
+
+    # exponential backoff: more failures -> longer lockout
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        first = db_module.record_login_failure(conn, "user:alice")
+        second = db_module.record_login_failure(conn, "user:alice")
+        assert second > first
+        # the route resets both the per-account and per-IP keys on success
+        db_module.reset_login_failures(conn, "user:alice")
+        db_module.reset_login_failures(conn, "ip:testclient")
+        assert db_module.login_lockout_seconds(conn, "user:alice") == 0
+        assert db_module.login_lockout_seconds(conn, "ip:testclient") == 0
+    finally:
+        conn.close()
+
+    # after a reset the account logs in normally
+    login(client, "alice", "alice-password-1")
+
+
+def test_login_throttling_resets_on_success(env):
+    """A successful login clears the failure counter (no lockout later)."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "alice-password-1")
+    for _ in range(db_module.LOGIN_MAX_FAILURES - 1):
+        client.post("/login", data={"username": "alice", "password": "wrong"})
+    login(client, "alice", "alice-password-1")
+    client.post("/logout")
+    # the counter was reset: the same number of failures stays below lockout
+    for _ in range(db_module.LOGIN_MAX_FAILURES - 1):
+        response = client.post("/login", data={"username": "alice", "password": "wrong"})
+        assert "Too many failed attempts" not in response.text
+
+
+def test_password_policy_min_length(env):
+    """CS-2: every password-accepting handler enforces the minimum length."""
+    client, _, data_root = env
+
+    # first-run setup
+    response = client.post(
+        "/setup", data={"username": "owner", "password": "short", "confirm": "short"}
+    )
+    assert response.status_code == 200
+    assert "at least 12 characters" in response.text
+    assert db_module.users_empty(db_module.connect(Path(data_root) / "app.db"))
+
+    make_user(data_root, "owner", "owner-password-1", admin=True)
+    login(client, "owner", "owner-password-1")
+
+    # admin creates a user
+    response = client.post("/admin/users", data={"username": "newbie", "password": "short"})
+    assert response.status_code == 400
+    assert "at least 12 characters" in response.text
+    conn = db_module.connect(Path(data_root) / "app.db")
+    assert db_module.get_user_by_username(conn, "newbie") is None
+    conn.close()
+
+    # admin resets a password
+    owner = db_module.get_user_by_username(db_module.connect(Path(data_root) / "app.db"), "owner")
+    response = client.post(
+        f"/admin/users/{owner['id']}/reset-password", data={"new_password": "short"}
+    )
+    assert response.status_code == 400
+
+
+# --- config screens ------------------------------------------------------------
+
+
+def test_config_provider_roundtrip_key_never_rendered(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post(
+        "/config/provider/new",
+        data={
+            "label": "Main",
+            "provider": "openai",
+            "base_url": "https://example.test/v1",
+            "api_key": "sk-secret-123",
+            "max_iterations": "7",
+            "temperature": "0.5",
+            "max_tokens": "256",
+        },
+    )
+    assert response.status_code == 303
+
+    connections = read_connections(data_root, user["id"])
+    assert len(connections) == 1
+    connection = connections[0]
+    assert connection["label"] == "Main"
+    assert connection["provider"] == "openai"
+    assert connection["is_default"] == 1  # first connection is auto-default
+    assert connection["max_iterations"] == 7
+    assert connection["temperature"] == 0.5
+    assert connection["max_tokens"] == 256
+    assert connection["api_key_enc"] != "sk-secret-123"
+    assert security.decrypt_secret(connection["api_key_enc"], SECRET) == "sk-secret-123"
+    # the connection save must not touch the model (owned by the librarian form)
+    assert read_config(data_root, user["id"])["llm_model"] is None
+
+    page = client.get("/config/provider").text
+    assert "sk-secret-123" not in page
+
+    # saving again with an empty key field keeps the stored key
+    client.post(
+        f"/config/provider/{connection['id']}",
+        data={
+            "label": "Main",
+            "provider": "openai",
+            "api_key": "",
+            "max_iterations": "7",
+        },
+    )
+    connection = read_connections(data_root, user["id"])[0]
+    assert security.decrypt_secret(connection["api_key_enc"], SECRET) == "sk-secret-123"
+
+
+def test_config_agents_librarian_model_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post(
+        "/config/agents/librarian",
+        data={"model": "gpt-x", "prompt_addendum": ""},
+    )
+    assert response.status_code == 303
+
+    cfg = read_config(data_root, user["id"])
+    assert cfg["llm_model"] == "gpt-x"
+
+    page = client.get("/config/agents/librarian").text
+    assert 'value="gpt-x"' in page
+    # connection select: empty option ("Default") selected by default
+    assert '<option value="" selected>Default</option>' in page
+
+
+def test_config_llm_openrouter_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # openrouter with no base_url: provider persists, base_url stays empty
+    response = client.post(
+        "/config/provider/new",
+        data={
+            "label": "OR",
+            "provider": "openrouter",
+            "api_key": "or-secret",
+            "max_iterations": "10",
+        },
+    )
+    assert response.status_code == 303
+
+    connection = read_connections(data_root, user["id"])[0]
+    assert connection["provider"] == "openrouter"
+    assert not connection["base_url"]
+
+    page = client.get(f"/config/provider/{connection['id']}").text
+    assert '<option value="openrouter" selected>' in page
+
+    # the model lives on the librarian tab now
+    client.post(
+        "/config/agents/librarian",
+        data={"model": "anthropic/claude-3.5-sonnet", "prompt_addendum": ""},
+    )
+    page = client.get("/config/agents/librarian").text
+    assert 'value="anthropic/claude-3.5-sonnet"' in page
+
+    # second pass with an explicit base_url override (edit keeps the key)
+    client.post(
+        f"/config/provider/{connection['id']}",
+        data={
+            "label": "OR",
+            "provider": "openrouter",
+            "base_url": "http://localhost:9000/v1",
+            "api_key": "",
+            "max_iterations": "10",
+        },
+    )
+    connection = read_connections(data_root, user["id"])[0]
+    assert connection["provider"] == "openrouter"
+    assert connection["base_url"] == "http://localhost:9000/v1"
+    assert security.decrypt_secret(connection["api_key_enc"], SECRET) == "or-secret"
+
+
+def test_config_behavior_and_library_settings(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post(
+        "/config/agents/librarian",
+        data={"model": "", "prompt_addendum": "Custom prompt"},
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["prompt_addendum"] == "Custom prompt"
+
+    # retention knobs and library identity share one form on the library page
+    client.post(
+        "/config/library",
+        data={
+            "name": "My KB",
+            "description": "desc",
+            "snapshot_keep": "5",
+            "trace_keep": "7",
+            "activity_keep": "11",
+        },
+    )
+    cfg = read_config(data_root, user["id"])
+    assert cfg["versioning"] == 0  # checkbox absent -> off
+    assert cfg["snapshot_keep"] == 5
+    assert cfg["trace_keep"] == 7
+    assert cfg["activity_keep"] == 11
+    assert cfg["library_name"] == "My KB"
+    assert cfg["library_description"] == "desc"
+
+    response = client.post("/config/library/reconcile")
+    assert response.status_code == 303
+    assert backends[user["id"]].reconciled
+
+    response = client.post("/config/library/validate")
+    assert response.status_code == 200
+    assert "example warning" in response.text
+
+
+def test_config_library_retention_edge_values(env):
+    """CS-3: negative keeps are clamped to 0 (keep-all); huge keeps are stored."""
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post(
+        "/config/library",
+        data={"snapshot_keep": "-1", "trace_keep": "-100", "activity_keep": "-5"},
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["snapshot_keep"] == 0
+    assert cfg["trace_keep"] == 0
+    assert cfg["activity_keep"] == 0
+
+    response = client.post(
+        "/config/library",
+        data={"snapshot_keep": "1000000", "trace_keep": "99999", "activity_keep": "123456"},
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["snapshot_keep"] == 1000000
+    assert cfg["trace_keep"] == 99999
+    assert cfg["activity_keep"] == 123456
+
+
+def test_config_numeric_fields_invalid_input_400(env):
+    """CS-4: non-numeric form input yields HTTP 400, not a 500."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post(
+        "/config/library",
+        data={"snapshot_keep": "abc", "trace_keep": "1", "activity_keep": "1"},
+    )
+    assert response.status_code == 400
+
+    for field, value in (
+        ("max_iterations", "ten"),
+        ("temperature", "hot"),
+        ("max_tokens", "many"),
+        ("temperature", "nan"),
+        ("temperature", "inf"),
+    ):
+        response = client.post(
+            "/config/provider/new",
+            data={"label": "x", "provider": "openai", field: value},
+        )
+        assert response.status_code == 400, (field, response.status_code)
+
+
+def test_config_agents_librarian_effective_prompt(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # no addendum: the built-in default is shown
+    response = client.get("/config/agents/librarian")
+    assert response.status_code == 200
+    assert "Built-in default" in response.text
+    assert "CREATE vs. ENRICH" in response.text
+
+    # an addendum is appended to the always-present default
+    client.post(
+        "/config/agents/librarian",
+        data={"model": "", "prompt_addendum": "My custom prompt"},
+    )
+    response = client.get("/config/agents/librarian")
+    assert response.status_code == 200
+    assert "With addendum" in response.text
+    assert "My custom prompt" in response.text
+    assert "CREATE vs. ENRICH" in response.text
+
+    # empty addendum -> NULL -> default-only round trip
+    client.post("/config/agents/librarian", data={"model": "", "prompt_addendum": ""})
+    cfg = read_config(data_root, user["id"])
+    assert cfg["prompt_addendum"] is None
+    response = client.get("/config/agents/librarian")
+    assert response.status_code == 200
+    assert "Built-in default" in response.text
+    assert "CREATE vs. ENRICH" in response.text
+
+
+def test_config_agents_curator_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    client.post(
+        "/config/provider/new",
+        data={"label": "Main", "provider": "anthropic", "api_key": "k"},
+    )
+    connection = read_connections(data_root, user["id"])[0]
+
+    # defaults: no binding, "Default" selected
+    page = client.get("/config/agents/curator").text
+    assert 'id="connection_id"' in page
+    assert '<option value="" selected>Default</option>' in page
+    # connection options show the provider name
+    assert "anthropic</option>" in page
+
+    response = client.post(
+        "/config/agents/curator",
+        data={
+            "connection_id": connection["id"],
+            "curator_model": "claude-big",
+            "curate_prompt_addendum": "never create concepts",
+        },
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["curator_connection_id"] == connection["id"]
+    assert cfg["curator_model"] == "claude-big"
+    assert cfg["curate_prompt_addendum"] == "never create concepts"
+    # the separate curator form does not modify any provider_configs row
+    after = read_connections(data_root, user["id"])
+    assert len(after) == 1
+    assert after[0]["provider"] == "anthropic"
+
+    page = client.get("/config/agents/curator").text
+    assert f'<option value="{connection["id"]}" selected>' in page
+    assert 'value="claude-big"' in page
+
+    # empty fields clear the binding back to "Default connection"
+    client.post(
+        "/config/agents/curator",
+        data={"connection_id": "", "curator_model": "", "curate_prompt_addendum": ""},
+    )
+    cfg = read_config(data_root, user["id"])
+    assert cfg["curator_connection_id"] is None
+    assert cfg["curator_model"] is None
+    assert cfg["curate_prompt_addendum"] is None
+
+
+def test_config_agents_curator_schedule_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # new users default to enabled at 03:00 UTC
+    page = client.get("/config/agents/curator").text
+    assert 'name="curate_schedule_enabled"' in page
+    assert "checked" in page
+    assert 'value="03:00"' in page
+
+    response = client.post(
+        "/config/agents/curator/schedule",
+        data={"curate_schedule_enabled": "1", "curate_schedule_time": "22:30"},
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/config/agents/curator?saved=1"
+    cfg = read_config(data_root, user["id"])
+    assert cfg["curate_schedule_enabled"] == 1
+    assert cfg["curate_schedule_time"] == "22:30"
+    page = client.get("/config/agents/curator").text
+    assert 'value="22:30"' in page
+
+    # checkbox absent -> off; empty time -> default
+    response = client.post("/config/agents/curator/schedule", data={"curate_schedule_time": ""})
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["curate_schedule_enabled"] == 0
+    assert cfg["curate_schedule_time"] == "03:00"
+
+
+def test_config_agents_curator_schedule_invalid_time(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    response = client.post(
+        "/config/agents/curator/schedule",
+        data={"curate_schedule_enabled": "1", "curate_schedule_time": "25:99"},
+    )
+    assert response.status_code == 400
+
+
+# --- agents: embeddings tab ----------------------------------------------------
+
+
+def test_config_agents_embeddings_tab_renders(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    client.post("/config/provider/new", data={"label": "Claude", "provider": "anthropic"})
+    client.post("/config/provider/new", data={"label": "GPT", "provider": "openai"})
+
+    page = client.get("/config/agents/embeddings").text
+    assert 'href="/config/agents/embeddings"' in page  # third tab present
+    # shortlist options render with dims in the labels
+    for name, dims in LOCAL_MODEL_SHORTLIST:
+        assert f"{name} ({dims} dims)" in page
+    # anthropic connections are never offered for embeddings
+    assert "anthropic</option>" not in page
+    assert "openai</option>" in page
+    # index status card renders with zero stored vectors
+    assert "Stored vectors: 0" in page
+
+
+def test_config_agents_embeddings_local_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    model = LOCAL_MODEL_SHORTLIST[1][0]
+
+    response = client.post(
+        "/config/agents/embeddings", data={"source": "local", "local_model": model}
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["embedding_source"] == "local"
+    assert cfg["embedding_model"] == model
+    assert cfg["embedding_connection_id"] is None
+
+    page = client.get("/config/agents/embeddings").text
+    assert '<option value="local" selected>' in page
+    assert f'<option value="{model}" selected>' in page
+    assert f"Configured model: {model} (local)" in page
+
+    # empty source clears all three columns
+    client.post("/config/agents/embeddings", data={"source": "", "local_model": model})
+    cfg = read_config(data_root, user["id"])
+    assert cfg["embedding_source"] is None
+    assert cfg["embedding_model"] is None
+    assert cfg["embedding_connection_id"] is None
+
+
+def test_config_agents_embeddings_api_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    client.post("/config/provider/new", data={"label": "GPT", "provider": "openai"})
+    connection = read_connections(data_root, user["id"])[0]
+
+    response = client.post(
+        "/config/agents/embeddings",
+        data={
+            "source": "api",
+            "api_model": "text-embedding-3-small",
+            "connection_id": connection["id"],
+        },
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["embedding_source"] == "api"
+    assert cfg["embedding_model"] == "text-embedding-3-small"
+    assert cfg["embedding_connection_id"] == connection["id"]
+
+    # empty connection follows the default connection
+    response = client.post(
+        "/config/agents/embeddings",
+        data={"source": "api", "api_model": "text-embedding-3-small", "connection_id": ""},
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["embedding_connection_id"] is None
+
+
+def test_config_agents_embeddings_threshold_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    model = LOCAL_MODEL_SHORTLIST[0][0]
+
+    response = client.post(
+        "/config/agents/embeddings",
+        data={"source": "local", "local_model": model, "semantic_threshold": "0.82"},
+    )
+    assert response.status_code == 303
+    assert read_config(data_root, user["id"])["semantic_threshold"] == 0.82
+    page = client.get("/config/agents/embeddings").text
+    assert 'value="0.82"' in page
+
+    response = client.post(
+        "/config/agents/embeddings",
+        data={"source": "local", "local_model": model, "semantic_threshold": ""},
+    )
+    assert response.status_code == 303
+    assert read_config(data_root, user["id"])["semantic_threshold"] is None
+
+
+def test_config_agents_embeddings_threshold_validation(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    base = {"source": "local", "local_model": LOCAL_MODEL_SHORTLIST[0][0]}
+
+    for bad in ("abc", "1.5", "-0.1", "nan"):
+        response = client.post(
+            "/config/agents/embeddings", data={**base, "semantic_threshold": bad}
+        )
+        assert response.status_code == 400
+    for good in ("0.0", "1.0"):
+        response = client.post(
+            "/config/agents/embeddings", data={**base, "semantic_threshold": good}
+        )
+        assert response.status_code == 303
+
+
+def test_config_agents_embeddings_invalid_combos_rejected(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # unknown source
+    response = client.post("/config/agents/embeddings", data={"source": "magic"})
+    assert response.status_code == 400
+    # local with a model outside the shortlist
+    response = client.post(
+        "/config/agents/embeddings", data={"source": "local", "local_model": "made-up/model"}
+    )
+    assert response.status_code == 400
+    # api without a model
+    response = client.post("/config/agents/embeddings", data={"source": "api", "api_model": ""})
+    assert response.status_code == 400
+
+
+def test_config_agents_embeddings_anthropic_connection_rejected(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    client.post("/config/provider/new", data={"label": "Claude", "provider": "anthropic"})
+    connection = read_connections(data_root, user["id"])[0]
+
+    # explicit anthropic connection: rejected defensively
+    response = client.post(
+        "/config/agents/embeddings",
+        data={"source": "api", "api_model": "m", "connection_id": connection["id"]},
+    )
+    assert response.status_code == 400
+    # anthropic as the (implicit) default connection: also rejected
+    response = client.post(
+        "/config/agents/embeddings",
+        data={"source": "api", "api_model": "m", "connection_id": ""},
+    )
+    assert response.status_code == 400
+    cfg = read_config(data_root, user["id"])
+    assert cfg["embedding_source"] is None
+
+
+def test_config_agents_embeddings_test_button(env, monkeypatch):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # nothing saved: clear message, no provider call
+    response = client.post("/config/agents/embeddings/test")
+    assert response.status_code == 200
+    assert "Save an embedding source and model first" in response.text
+
+    client.post(
+        "/config/agents/embeddings",
+        data={"source": "local", "local_model": LOCAL_MODEL_SHORTLIST[0][0]},
+    )
+
+    class FakeEmbedProvider:
+        async def embed(self, texts, config, *, kind="document"):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    monkeypatch.setattr(
+        deps, "create_embedding_provider", lambda config, *, cache_dir=None: FakeEmbedProvider()
+    )
+    response = client.post("/config/agents/embeddings/test")
+    assert response.status_code == 200
+    assert "Embedding OK (3 dims" in response.text
+
+    class DownEmbedProvider:
+        async def embed(self, texts, config, *, kind="document"):
+            raise RuntimeError("embed down")
+
+    monkeypatch.setattr(
+        deps, "create_embedding_provider", lambda config, *, cache_dir=None: DownEmbedProvider()
+    )
+    response = client.post("/config/agents/embeddings/test")
+    assert response.status_code == 200
+    assert "Embedding failed: embed down" in response.text
+
+
+def test_config_agents_embeddings_status_card_renders_run(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    manager = client.app.state.librarian_manager
+    manager.embed_status_for = lambda user_id: {
+        "state": "running",
+        "done": 3,
+        "total": 10,
+        "model": "m",
+        "error": None,
+    }
+
+    page = client.get("/config/agents/embeddings").text
+    assert "State: running" in page
+    assert "3/10" in page
+    assert "Run model: m" in page
+
+
+def test_config_save_evicts_cached_librarian(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    manager = client.app.state.librarian_manager
+
+    response = client.get("/config/provider")
+    assert response.status_code == 200
+    assert manager.evicted == []  # GETs do not evict
+
+    client.post("/config/provider/new", data={"label": "Main", "provider": "openai"})
+    assert manager.evicted == [user["id"]]
+
+    client.post("/config/agents/librarian", data={"model": "gpt-x"})
+    client.post("/config/library", data={"name": "KB"})
+    client.post("/config/agents/curator", data={"curator_model": "big"})
+    client.post("/config/agents/curator/schedule", data={"curate_schedule_enabled": "1"})
+    client.post("/config/agents/embeddings", data={"source": "", "local_model": ""})
+    assert manager.evicted == [user["id"]] * 6
+
+
+def test_llm_test_connection(env, monkeypatch):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # a connection exists but no model yet: clear message, no provider call
+    client.post(
+        "/config/provider/new",
+        data={"label": "Main", "provider": "openai", "api_key": "sk-secret-123"},
+    )
+    connection = read_connections(data_root, user["id"])[0]
+    response = client.post(f"/config/provider/{connection['id']}/test", data={"api_key": ""})
+    assert response.status_code == 200
+    assert "Save a provider and model first" in response.text
+
+    # provider on the Provider page, model on the Librarian tab (cross-page)
+    client.post("/config/agents/librarian", data={"model": "gpt-x"})
+
+    class FakeProvider:
+        async def complete(self, messages, tools, config):
+            return object()
+
+    monkeypatch.setattr(deps, "build_llm_config", lambda conn_row, key, *, model: object())
+    monkeypatch.setattr(deps, "create_llm_provider", lambda config: FakeProvider())
+
+    response = client.post(f"/config/provider/{connection['id']}/test", data={"api_key": ""})
+    assert response.status_code == 200
+    assert "Connection OK" in response.text
+
+
+def test_provider_delete_blocked_while_bound_shows_error(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    client.post("/config/provider/new", data={"label": "A", "provider": "openai"})
+    client.post("/config/provider/new", data={"label": "B", "provider": "gemini"})
+    connections = {c["label"]: c for c in read_connections(data_root, user["id"])}
+    bound = connections["B"]
+
+    # bind the librarian to connection B, then try to delete it
+    client.post(
+        "/config/agents/librarian",
+        data={"connection_id": bound["id"], "model": "m"},
+    )
+    response = client.post(f"/config/provider/{bound['id']}/delete")
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
+    assert len(read_connections(data_root, user["id"])) == 2  # not deleted
+
+    # the follow-up GET renders the danger flash
+    page = client.get(response.headers["location"]).text
+    assert 'data-type="danger"' in page
+    assert "rebind the agent first" in page
+
+    # deleting the default while others exist is blocked too
+    default = connections["A"]
+    response = client.post(f"/config/provider/{default['id']}/delete")
+    assert response.status_code == 303
+    page = client.get(response.headers["location"]).text
+    assert "Set another connection as default first" in page
+
+
+def test_provider_set_default_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    client.post("/config/provider/new", data={"label": "A", "provider": "openai"})
+    client.post("/config/provider/new", data={"label": "B", "provider": "gemini"})
+    connections = {c["label"]: c for c in read_connections(data_root, user["id"])}
+    assert connections["A"]["is_default"] == 1
+
+    response = client.post(f"/config/provider/{connections['B']['id']}/default")
+    assert response.status_code == 303
+
+    connections = {c["label"]: c for c in read_connections(data_root, user["id"])}
+    assert connections["A"]["is_default"] == 0
+    assert connections["B"]["is_default"] == 1
+
+    page = client.get("/config/provider").text
+    assert '<span class="badge badge-info">Default</span>' in page
+    # only one Default badge rendered (for B)
+    assert page.count('<span class="badge badge-info">Default</span>') == 1
+
+
+def test_config_old_routes_redirect(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.get("/config/llm")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/config/provider"
+
+    response = client.get("/config/behavior")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/config/agents/librarian"
+
+    response = client.get("/config/prompt")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/config/agents/librarian"
+
+
+def test_config_agents_curator_effective_prompt_display(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # no addendum: built-in template with visible placeholders, no owner label
+    response = client.get("/config/agents/curator")
+    assert response.status_code == 200
+    assert "CURATION TASK" in response.text
+    assert "{instructions}" in response.text
+    assert "Built-in template" in response.text
+    assert "Standing curation rules from the library owner:" not in response.text
+
+    # an addendum (even one containing braces) renders verbatim, no crash
+    client.post(
+        "/config/agents/curator",
+        data={
+            "curate_provider": "",
+            "curate_model": "",
+            "curate_prompt_addendum": "always prefer merge {braces}",
+        },
+    )
+    response = client.get("/config/agents/curator")
+    assert response.status_code == 200
+    assert "With addendum" in response.text
+    assert "Standing curation rules from the library owner:" in response.text
+    assert "always prefer merge {braces}" in response.text
+
+
+# --- tokens --------------------------------------------------------------------
+
+
+def _extract_token(html: str) -> str:
+    match = re.search(r'class="token-value">([^<]+)<', html)
+    assert match, "plaintext token not rendered at creation"
+    return match.group(1).strip()
+
+
+def test_tokens_create_revoke(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.post("/tokens", data={"label": "agent-1"})
+    assert response.status_code == 200
+    plaintext = _extract_token(response.text)
+
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        tokens = db_module.list_tokens(conn, user["id"])
+        assert len(tokens) == 1
+        token = db_module.get_token(conn, tokens[0]["id"])
+        # only the hash is persisted; the plaintext is shown once
+        assert (
+            security.hash_token(plaintext)
+            == db_module.lookup_token(conn, security.hash_token(plaintext))["token_hash"]
+        )
+        assert token["token_hash"] != plaintext
+        assert token["label"] == "agent-1"
+
+        # the plaintext is not rendered again on the plain list view
+        assert plaintext not in client.get("/tokens").text
+
+        response = client.post(f"/tokens/{token['id']}/revoke")
+        assert response.status_code == 303
+        assert db_module.get_token(conn, token["id"])["revoked_at"] is not None
+    finally:
+        conn.close()
+
+
+# --- library browsing ----------------------------------------------------------
+
+
+def test_tree_document_versions_log_pages(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.get("/library/tree")
+    assert response.status_code == 200
+    assert "concepts/" in response.text
+    assert "/library/graph?folder=" in response.text  # tree -> graph jump (0.10.2)
+
+    response = client.get("/library/tree/children", params={"path": "/concepts"})
+    assert response.status_code == 200
+    assert "alpha.md" in response.text
+    assert "/library/graph?focus=" in response.text
+
+    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert "Alpha" in response.text
+    assert "Concept" in response.text
+    assert "human-reviewed" in response.text
+
+    response = client.get("/library/document", params={"path": "/concepts/beta.md"})
+    assert "stale" in response.text
+
+    response = client.get("/library/versions")
+    assert response.status_code == 200
+    assert "create" in response.text
+    assert "2026-01-01 00:00 UTC" in response.text
+    assert "2026-01-01T00:00:00+00:00" not in response.text
+
+    response = client.get("/library/versions/diff", params={"n": 1, "path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert "+new" in response.text
+
+    assert client.get("/library/log").status_code == 200
+    response = client.get("/library/log/content")
+    assert response.status_code == 200
+    assert "Initialization" in response.text
+
+
+def test_version_rollback_route_with_real_backend(env, monkeypatch, tmp_path):
+    """CS-12: POST /library/versions/{n}/rollback through the REAL VersionStore."""
+    from athenaeum.library.backend import LibraryBackend
+
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    lib = tmp_path / "library"
+    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
+    backend.init_bundle()
+    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "v1\n")
+    backend.edit_concept("/concepts/alpha.md", new_body="v2\n")
+    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
+
+    # the button is offered on the LATEST row only
+    response = client.get("/library/versions")
+    assert response.status_code == 200
+    assert response.text.count("/rollback") == 1
+    assert "/library/versions/2/rollback" in response.text
+
+    # an older snapshot is rejected (latest-only contract)
+    response = client.post("/library/versions/1/rollback")
+    assert response.status_code == 400
+    assert "latest" in response.text.lower()
+
+    # a missing snapshot is a 404
+    assert client.post("/library/versions/99/rollback").status_code == 404
+
+    # rolling back the latest restores its pre-image
+    response = client.post("/library/versions/2/rollback")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/library/versions"
+    assert backend.read_document("/concepts/alpha.md")["body"] == "v1\n"
+
+
+def test_version_diff_traversal_rejected_with_real_backend(env, monkeypatch, tmp_path):
+    """CS-1: /library/versions/diff through the REAL VersionStore — no FakeBackend."""
+    from athenaeum.library.backend import LibraryBackend
+
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("leak\n", encoding="utf-8")
+    lib = tmp_path / "library"
+    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
+    backend.init_bundle()
+    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "body\n")
+    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
+
+    for evil in ("../../secret.txt", "..\\..\\secret.txt", "/concepts/../../../secret.txt"):
+        response = client.get("/library/versions/diff", params={"n": 1, "path": evil})
+        assert response.status_code == 400
+        assert "leak" not in response.text
+
+    # a legitimate diff through the real store still works
+    response = client.get("/library/versions/diff", params={"n": 1, "path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert "+body" in response.text
+
+
+def test_graph_endpoint(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    assert client.get("/library/graph").status_code == 200
+    response = client.get("/api/graph")
+    assert response.status_code == 200
+    data = response.json()
+
+    nodes = {node["id"]: node for node in data["nodes"]}
+    assert "/concepts/alpha" in nodes
+    assert nodes["/concepts/alpha"]["group"] == "Concept"
+    assert nodes["/concepts/alpha"]["color"] == "#27ae60"  # human-reviewed
+    assert nodes["/concepts/alpha"]["title"] == "x, y"  # tooltip <- tags
+    assert nodes["/concepts/beta"]["color"] == "#e67e22"  # stale overrides trust
+
+    alpha = nodes["/concepts/alpha"]
+    assert alpha["folder"] == "/concepts"
+    assert alpha["depth"] == 1
+    assert alpha["kind"] == "planet"
+    assert alpha["trust_tier"] == "human-reviewed"
+    assert alpha["stale"] is False
+
+    beta = nodes["/concepts/beta"]
+    assert beta["stale"] is True
+    assert beta["trust_tier"] == "unverified"  # tier kept even on the stale branch
+
+    root_doc = nodes["/user-alice"]
+    assert root_doc["folder"] == "/"
+    assert root_doc["depth"] == 0
+    assert root_doc["kind"] == "planet"
+
+    assert data["folders"] == [
+        {"id": "/concepts", "name": "concepts", "parent": "/", "depth": 1, "kind": "galaxy"}
+    ]
+
+    edges = {(e["from"], e["to"]) for e in data["edges"]}
+    assert ("/concepts/alpha", "/concepts/beta") in edges
+    assert all("arrows" not in e for e in data["edges"])  # vis vocabulary dropped
+
+
+def test_graph_pages_use_vendored_3d_stack(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    backends[user["id"]] = FakeBackend({})
+    make_trace(data_root, user["id"], trace_id="t1")
+
+    graph_page = client.get("/library/graph")
+    assert graph_page.status_code == 200
+    assert "/static/vendor/graph3d-vendor.min.js" in graph_page.text
+    assert "/static/graph3d.js" in graph_page.text
+    assert "vis-network" not in graph_page.text
+    assert "cdn.jsdelivr.net/npm/vis-network" not in graph_page.text
+    # structural toggles instead of type filters (0.9.1)
+    for toggle in ("galaxies", "systems", "planets", "moons"):
+        assert f'id="graph-show-{toggle}"' in graph_page.text
+    assert "graph-type-filters" not in graph_page.text
+    assert 'id="graph-search"' in graph_page.text  # search-to-fly (0.10.0)
+    assert 'id="graph-zoom"' not in graph_page.text  # zoom select removed (0.10.2)
+
+    trace_page = client.get("/library/traces/t1")
+    assert trace_page.status_code == 200
+    assert "/static/vendor/graph3d-vendor.min.js" in trace_page.text
+    assert "/static/trace_replay.js" in trace_page.text
+    assert "vis-network" not in trace_page.text
+
+
+def test_graph_endpoint_systems_and_moons(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    backends[user["id"]] = FakeBackend(
+        {
+            "/concepts/alpha.md": {
+                "frontmatter": {"title": "Alpha", "type": "Concept"},
+                "body": "See [Deep](/a/b/c/deep.md).\n",
+            },
+            "/a/b/c/deep.md": {
+                "frontmatter": {"title": "Deep", "type": "Concept"},
+                "body": "Deep body.\n",
+            },
+        }
+    )
+
+    response = client.get("/api/graph")
+    assert response.status_code == 200
+    data = response.json()
+
+    folders = {f["id"]: f for f in data["folders"]}
+    assert folders["/concepts"] == {
+        "id": "/concepts",
+        "name": "concepts",
+        "parent": "/",
+        "depth": 1,
+        "kind": "galaxy",
+    }
+    assert folders["/a"] == {"id": "/a", "name": "a", "parent": "/", "depth": 1, "kind": "galaxy"}
+    assert folders["/a/b"] == {
+        "id": "/a/b",
+        "name": "b",
+        "parent": "/a",
+        "depth": 2,
+        "kind": "system",
+    }
+    assert "/a/b/c" not in folders  # depth >=3 folders are not nodes
+
+    nodes = {node["id"]: node for node in data["nodes"]}
+    deep = nodes["/a/b/c/deep"]
+    assert deep["kind"] == "moon"
+    assert deep["depth"] == 3
+    assert deep["folder"] == "/a/b/c"
+
+    edges = {(e["from"], e["to"]) for e in data["edges"]}
+    assert ("/concepts/alpha", "/a/b/c/deep") in edges
+
+
+def test_graph_walk_depth_bounded(env, monkeypatch):
+    """CS-17: a pathologically deep tree gets a clear 400, not RecursionError -> 500."""
+    from athenaeum.webui import graph
+
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    monkeypatch.setattr(graph, "MAX_WALK_DEPTH", 3)
+    backends[user["id"]] = FakeBackend(
+        {"/a/b/c/d/deep.md": {"frontmatter": {"title": "Deep"}, "body": "body\n"}}
+    )
+    response = client.get("/api/graph")
+    assert response.status_code == 400
+    assert "depth" in response.json()["detail"].lower()
+
+    # a tree exactly at the limit still walks fine
+    backends[user["id"]] = FakeBackend(
+        {"/a/b/c/deep.md": {"frontmatter": {"title": "Deep"}, "body": "body\n"}}
+    )
+    assert client.get("/api/graph").status_code == 200
+
+
+# --- traces / activity (phase 4) -----------------------------------------------
+
+
+def make_trace(data_root, user_id, trace_id="20260728T180036Z-a1b2c3d4", **overrides):
+    """Persist one trace file under the user's own library root (.traces/)."""
+    trace = {
+        "trace_id": trace_id,
+        "tool": "request_knowledge",
+        "agent_label": "agent-a",
+        "started_at": "2026-07-28T18:00:36+00:00",
+        "ended_at": "2026-07-28T18:00:38+00:00",
+        "duration_ms": 2000.0,
+        "outcome": "ok",
+        "error": None,
+        "llm": {
+            "provider": "openai",
+            "model": "m",
+            "iterations": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        },
+        "events": [
+            {
+                "seq": 1,
+                "ts": "2026-07-28T18:00:37+00:00",
+                "tool": "read_document",
+                "args": {"path": "/concepts/alpha.md"},
+                "duration_ms": 0.5,
+                "result": {"path": "/concepts/alpha.md", "title": "Alpha", "type": "Concept"},
+                "error": None,
+            },
+            {
+                "seq": 2,
+                "ts": "2026-07-28T18:00:37+00:00",
+                "tool": "list_dir",
+                "args": {"path": "/concepts"},
+                "duration_ms": 0.3,
+                "result": {"path": "/concepts", "entries": ["alpha.md"], "count": 1},
+                "error": None,
+            },
+        ],
+    }
+    trace.update(overrides)
+    store = Path(data_root) / "users" / user_id / "library" / ".traces"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / f"{trace_id}.json").write_text(json.dumps(trace), encoding="utf-8")
+    return trace
+
+
+def test_traces_pages_and_api(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    make_trace(data_root, user["id"])
+    login(client, "alice", "pw")
+
+    assert client.get("/library/traces").status_code == 200
+
+    response = client.get("/library/traces/rows")
+    assert response.status_code == 200
+    assert "request_knowledge" in response.text
+    assert "/library/traces/20260728T180036Z-a1b2c3d4" in response.text
+
+    response = client.get("/library/traces/20260728T180036Z-a1b2c3d4")
+    assert response.status_code == 200
+    assert "Trace replay" in response.text
+    assert "read_document" in response.text  # timeline events
+    assert "list_dir" in response.text
+    assert "openai / m" in response.text  # llm badge
+    assert "15 tokens" in response.text
+
+    response = client.get("/api/traces/20260728T180036Z-a1b2c3d4")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["trace_id"] == "20260728T180036Z-a1b2c3d4"
+    assert data["tool"] == "request_knowledge"
+    assert data["outcome"] == "ok"
+    assert data["llm"]["total_tokens"] == 15
+    assert [event["tool"] for event in data["events"]] == ["read_document", "list_dir"]
+
+
+def test_traces_missing_and_invalid_id_404(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    assert client.get("/library/traces/no-such-trace").status_code == 404
+    assert client.get("/api/traces/no-such-trace").status_code == 404
+    # invalid id characters are rejected by the traversal guard, same 404
+    assert client.get("/api/traces/bad%20id").status_code == 404
+
+
+def test_cross_user_trace_access_404(env):
+    client, _, data_root = env
+    alice = make_user(data_root, "alice", "pw")
+    make_user(data_root, "bob", "pw")
+    make_trace(data_root, alice["id"])
+    login(client, "bob", "pw")
+
+    # alice's trace id does not exist in bob's own .traces store
+    assert client.get("/library/traces/20260728T180036Z-a1b2c3d4").status_code == 404
+    assert client.get("/api/traces/20260728T180036Z-a1b2c3d4").status_code == 404
+    assert "20260728T180036Z-a1b2c3d4" not in client.get("/library/traces/rows").text
+
+
+def insert_journal_row(data_root, user_id, *, tool, trace_id, outcome="ok"):
+    db_path = Path(data_root) / "app.db"
+    conn = db_module.connect(db_path)
+    try:
+        db_module.insert_activity(
+            conn,
+            trace_id=trace_id,
+            user_id=user_id,
+            token_label="agent-a",
+            tool=tool,
+            arguments='{"query": "hi"}',
+            started_at="2026-07-28T18:00:36+00:00",
+            duration_ms=12.5,
+            outcome=outcome,
+            error=None if outcome == "ok" else "boom",
+            iterations=1,
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+        )
+    finally:
+        conn.close()
+
+
+def write_trace_file(data_root, user_id, trace_id, tool):
+    """Minimal trace JSON on disk so the journal row earns a Replay link."""
+    store = Path(data_root) / "users" / user_id / "library" / ".traces"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / f"{trace_id}.json").write_text(
+        json.dumps({"trace_id": trace_id, "tool": tool, "outcome": "ok", "events": []}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_activity_page_and_rows(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    assert client.get("/activity").status_code == 200
+
+    write_trace_file(data_root, user["id"], "t-ok", "request_knowledge")
+    write_trace_file(data_root, user["id"], "t-curate", "library_curate")
+    insert_journal_row(data_root, user["id"], tool="request_knowledge", trace_id="t-ok")
+    insert_journal_row(data_root, user["id"], tool="library_curate", trace_id="t-curate")
+    insert_journal_row(data_root, user["id"], tool="library_maintain", trace_id="t-noop")
+    insert_journal_row(
+        data_root, user["id"], tool="library_status", trace_id="t-status", outcome="error"
+    )
+    response = client.get("/activity/rows")
+    assert response.status_code == 200
+    assert "request_knowledge" in response.text
+    assert "library_curate" in response.text
+    assert "library_status" in response.text
+    # trace links only for agent-backed tools with an existing trace file
+    assert "/library/traces/t-ok" in response.text
+    assert "/library/traces/t-curate" in response.text
+    # traced tool but no trace file on disk (no-op run): no dead Replay link
+    assert "/library/traces/t-noop" not in response.text
+    assert "/library/traces/t-status" not in response.text
+    assert "boom" in response.text
+    # registry absent on the test app: empty in-flight section, no crash
+    assert "No calls in flight." in response.text
+
+
+def test_activity_rows_render_in_flight_registry(env):
+    client, _, data_root = env
+    alice = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    class FakeRegistry:
+        def snapshot(self):
+            return [
+                {
+                    "trace_id": "t-live",
+                    "user_id": alice["id"],
+                    "token_label": "agent-live",
+                    "tool": "store_knowledge",
+                    "arguments": '{"content": "x"}',
+                    "started_at": "2026-07-28T18:00:36+00:00",
+                },
+                {
+                    "trace_id": "t-other",
+                    "user_id": "someone-else",
+                    "token_label": "agent-other",
+                    "tool": "store_knowledge",
+                    "arguments": '{"content": "secret"}',
+                    "started_at": "2026-07-28T18:00:37+00:00",
+                },
+            ]
+
+    client.app.state.activity_registry = FakeRegistry()
+    response = client.get("/activity/rows")
+    assert response.status_code == 200
+    assert "agent-live" in response.text
+    assert "store_knowledge" in response.text
+    assert "No calls in flight." not in response.text
+    # in-flight rows are owner-scoped: the other user's call never renders
+    assert "agent-other" not in response.text
+    assert "secret" not in response.text
+
+
+# --- multi-user isolation -------------------------------------------------------
+
+
+def test_cross_user_document_access_404(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    make_user(data_root, "bob", "pw")
+    login(client, "bob", "pw")
+
+    # bob's own library works
+    response = client.get("/library/document", params={"path": "/user-bob.md"})
+    assert response.status_code == 200
+    assert "Private to bob" in response.text
+
+    # alice's document path does not exist in bob's bundle
+    response = client.get("/library/document", params={"path": "/user-alice.md"})
+    assert response.status_code == 404
+
+    # ...and never appears in bob's tree
+    assert "user-alice.md" not in client.get("/library/tree").text
+
+
+def test_cross_user_token_revoke_404(env):
+    client, _, data_root = env
+    alice = make_user(data_root, "alice", "pw")
+    make_user(data_root, "bob", "pw")
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        _, token_hash = security.generate_token()
+        token = db_module.create_token(conn, alice["id"], "alice-agent", token_hash)
+    finally:
+        conn.close()
+
+    login(client, "bob", "pw")
+    response = client.post(f"/tokens/{token['id']}/revoke")
+    assert response.status_code == 404
+
+
+# --- admin ----------------------------------------------------------------------
+
+
+def test_admin_pages_require_admin(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    assert client.get("/admin/users").status_code == 403
+    assert client.get("/admin/server").status_code == 403
+    assert client.post("/admin/server", data={}).status_code == 403
+
+
+def test_admin_server_stateless_http_roundtrip(env):
+    client, _, data_root = env
+    make_user(data_root, "owner", "pw", admin=True)
+    login(client, "owner", "pw")
+
+    page = client.get("/admin/server")
+    assert page.status_code == 200
+    assert "Stateless MCP HTTP" in page.text
+
+    db_path = Path(data_root) / "app.db"
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.get_app_setting(conn, "mcp_stateless_http", "0") == "0"
+    finally:
+        conn.close()
+
+    response = client.post("/admin/server", data={"mcp_stateless_http": "1"})
+    assert response.status_code == 303
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.get_app_setting(conn, "mcp_stateless_http") == "1"
+    finally:
+        conn.close()
+    assert "checked" in client.get("/admin/server").text
+
+    # an unchecked checkbox submits no field: back to off
+    response = client.post("/admin/server", data={})
+    assert response.status_code == 303
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.get_app_setting(conn, "mcp_stateless_http") == "0"
+    finally:
+        conn.close()
+
+
+def test_create_app_passes_stateless_http_flag(env, monkeypatch):
+    from fastmcp import FastMCP
+
+    from athenaeum.app import create_app
+
+    _, _, data_root = env
+    captured: list[dict] = []
+    real_http_app = FastMCP.http_app
+
+    def spy(self, **kwargs):
+        captured.append(kwargs)
+        return real_http_app(self, **kwargs)
+
+    monkeypatch.setattr(FastMCP, "http_app", spy)
+    create_app()
+    assert captured[-1]["stateless_http"] is False
+
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        db_module.set_app_setting(conn, "mcp_stateless_http", "1")
+    finally:
+        conn.close()
+    create_app()
+    assert captured[-1]["stateless_http"] is True
+
+
+def test_settings_dep_serves_one_cached_settings(app):
+    """A15: create_app caches one Settings on app.state; the dependency serves
+    that instance instead of re-parsing the environment on every request."""
+    from starlette.requests import Request
+
+    scope = {"type": "http", "method": "GET", "path": "/", "headers": [], "app": app}
+    assert deps.settings_dep(Request(scope)) is app.state.settings
+
+
+def test_admin_create_and_reset_user(env):
+    client, _, data_root = env
+    make_user(data_root, "owner", "pw", admin=True)
+    login(client, "owner", "pw")
+
+    assert "User management" in client.get("/admin/users").text
+
+    response = client.post(
+        "/admin/users", data={"username": "newbie", "password": "newbie-password-1"}
+    )
+    assert response.status_code == 303
+
+    # the new user can log in
+    client.post("/logout")
+    login(client, "newbie", "newbie-password-1")
+
+    # admin resets the password
+    client.post("/logout")
+    login(client, "owner", "pw")
+    newbie = db_module.get_user_by_username(db_module.connect(Path(data_root) / "app.db"), "newbie")
+    response = client.post(
+        f"/admin/users/{newbie['id']}/reset-password", data={"new_password": "newbie-password-2"}
+    )
+    assert response.status_code == 303
+    client.post("/logout")
+    login(client, "newbie", "newbie-password-2")
+
+
+# --- bootstrap env pre-seed ------------------------------------------------------
+
+
+def test_bootstrap_admin_if_configured(env, monkeypatch):
+    client, _, data_root = env
+    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_USERNAME", "owner")
+    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD", "boot-pw")
+
+    settings = get_settings()
+    assert routes_auth.bootstrap_admin_if_configured(settings)
+    # ignored once a user exists
+    assert not routes_auth.bootstrap_admin_if_configured(settings)
+
+    # setup page is gone; the pre-seeded owner can log in
+    response = client.get("/setup")
+    assert response.status_code == 303
+    login(client, "owner", "boot-pw")
+
+
+def test_format_datetime():
+    assert deps.format_datetime(None) == ""
+    assert deps.format_datetime("") == ""
+    assert deps.format_datetime("2026-01-01T00:00:00+00:00") == "2026-01-01 00:00 UTC"
+    assert deps.format_datetime("2026-07-28T12:01:19.149973+00:00") == "2026-07-28 12:01 UTC"
+    assert deps.format_datetime("not-a-date") == "not-a-date"

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Edit connection - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Edit connection</h1>
+  <p class="subtitle">{{ c["label"] }}</p>
+</div>
+
+<div class="card">
+  <div class="card-header">Connection settings</div>
+  <div class="card-body">
+    <form method="post" action="/config/provider/{{ c['id'] }}" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="label">Label</label>
+        <input class="input-field" type="text" id="label" name="label" value="{{ c['label'] }}" required>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="provider">Provider</label>
+        <select class="input-field" id="provider" name="provider">
+          {% for p in providers %}
+          <option value="{{ p }}" {% if c["provider"] == p %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="base_url">Base URL</label>
+        <input class="input-field" type="text" id="base_url" name="base_url" value="{{ c['base_url'] or '' }}">
+        <p class="muted text-sm mt-1">Optional override; required for openai-compatible; openrouter defaults to https://openrouter.ai/api/v1.</p>
+        <p class="muted text-sm mt-1">Trust boundary: the server sends your API key to this URL and the agent consumes everything the endpoint returns. Point it only at providers you trust.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="api_key">API key{% if key_set %} (configured; leave empty to keep){% endif %}</label>
+        <input class="input-field" type="password" id="api_key" name="api_key" value="" autocomplete="new-password">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="max_iterations">Max iterations</label>
+        <input class="input-field" type="number" id="max_iterations" name="max_iterations" min="1" value="{{ c['max_iterations'] }}">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="temperature">Temperature</label>
+        <input class="input-field" type="text" id="temperature" name="temperature" value="{{ c['temperature'] if c['temperature'] is not none else '' }}" placeholder="provider default">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="max_tokens">Max tokens</label>
+        <input class="input-field" type="text" id="max_tokens" name="max_tokens" value="{{ c['max_tokens'] if c['max_tokens'] is not none else '' }}" placeholder="provider default">
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+      <a class="btn btn-secondary" href="/config/provider">Cancel</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

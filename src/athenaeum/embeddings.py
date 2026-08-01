@@ -1,0 +1,350 @@
+"""Embedding store and service: app.db CRUD over the ``embeddings`` table.
+
+One ``EmbeddingService`` per user bundles store access + provider. Vectors are
+stored as float32 BLOBs keyed by ``(user_id, concept_path)`` with the source
+text's SHA-256 for drift detection. The service is the only writer; consumers
+(F1 search, F2 duplicates, F3 related-injection) read through it or through
+``load()``.
+
+Local-provider inference offloads internally; API providers are async httpx,
+so the async high-level methods never block the event loop beyond short-lived
+sqlite I/O (same posture as db.py).
+
+Keys are canonical: ``concept_path`` values are always stored without a
+leading slash (``x.md``), regardless of whether callers pass backend-style
+ids (``/x``) or bundle paths (``/x.md``). Normalization happens once at the
+service boundary (``upsert``/``delete``/``load``), so the table never holds
+mixed key shapes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import math
+import os
+import socket
+import struct
+from contextlib import closing
+from pathlib import Path
+from typing import TYPE_CHECKING
+from uuid import uuid4
+
+from athenaeum import db
+from athenaeum.librarian.embed import (
+    KIND_DOCUMENT,
+    KIND_QUERY,
+    EmbeddingConfig,
+    EmbeddingProvider,
+)
+
+if TYPE_CHECKING:
+    from athenaeum.library.backend import LibraryBackend
+
+logger = logging.getLogger(__name__)
+
+RECONCILE_BATCH = 32
+
+# A reconcile holding its DB claim longer than this is presumed crashed and
+# the slot becomes reclaimable; generous because batches are provider-paced.
+RECONCILE_CLAIM_TTL = 3600.0  # seconds
+
+
+def concept_text(frontmatter: dict, body: str) -> str:
+    """Canonical embedded text: title + description + body (empty-tolerant)."""
+    title = frontmatter.get("title") or ""
+    description = frontmatter.get("description") or ""
+    return f"{title}\n{description}\n\n{body}"
+
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def canonical_path(concept_path: str) -> str:
+    """Canonical embeddings-table key: relative path, no leading slash."""
+    return concept_path.lstrip("/")
+
+
+def _pack(vector: list[float]) -> bytes:
+    return struct.pack(f"{len(vector)}f", *vector)
+
+
+def _unpack(blob: bytes) -> list[float]:
+    dims = len(blob) // 4
+    return list(struct.unpack(f"{dims}f", blob))
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """Stdlib cosine similarity (no numpy; a few ms at <1000 concepts)."""
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+class EmbedStatusRegistry:
+    """In-memory per-user reconcile status (single-worker deployment)."""
+
+    def __init__(self) -> None:
+        self._status: dict[str, dict] = {}
+
+    def get(self, user_id: str) -> dict | None:
+        return self._status.get(user_id)
+
+    def begin(self, user_id: str, total: int, model: str) -> None:
+        self._status[user_id] = {
+            "state": "running",
+            "total": total,
+            "done": 0,
+            "model": model,
+            "error": None,
+            "started_at": db.utcnow(),
+        }
+
+    def progress(self, user_id: str, done: int) -> None:
+        status = self._status.get(user_id)
+        if status is not None:
+            status["done"] = done
+
+    def finish(self, user_id: str, error: str | None = None) -> None:
+        status = self._status.get(user_id)
+        if status is None:
+            return
+        status["state"] = "failed" if error else "idle"
+        status["error"] = error
+        status["finished_at"] = db.utcnow()
+
+
+class EmbeddingService:
+    """Per-user embedding store + provider bundle."""
+
+    def __init__(
+        self,
+        db_path: str | Path,
+        user_id: str,
+        config: EmbeddingConfig,
+        provider: EmbeddingProvider,
+        *,
+        status: EmbedStatusRegistry | None = None,
+    ) -> None:
+        self.db_path = Path(db_path)
+        self.user_id = user_id
+        self.config = config
+        self.provider = provider
+        self._status = status
+
+    # --- CRUD (sync sqlite3, short-lived connections) -------------------
+
+    def upsert(self, concept_path: str, model: str, vector: list[float], hash_: str) -> None:
+        concept_path = canonical_path(concept_path)
+        with closing(db.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO embeddings"
+                    " (user_id, concept_path, model, dims, vector, content_hash, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT (user_id, concept_path) DO UPDATE SET"
+                    " model = excluded.model, dims = excluded.dims,"
+                    " vector = excluded.vector, content_hash = excluded.content_hash,"
+                    " updated_at = excluded.updated_at",
+                    (
+                        self.user_id,
+                        concept_path,
+                        model,
+                        len(vector),
+                        _pack(vector),
+                        hash_,
+                        db.utcnow(),
+                    ),
+                )
+
+    def delete(self, concept_path: str) -> None:
+        concept_path = canonical_path(concept_path)
+        with closing(db.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "DELETE FROM embeddings WHERE user_id = ? AND concept_path = ?",
+                    (self.user_id, concept_path),
+                )
+
+    def load(self) -> dict[str, dict]:
+        """All stored rows: concept_path -> {model, dims, vector, content_hash}."""
+        with closing(db.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT concept_path, model, dims, vector, content_hash"
+                " FROM embeddings WHERE user_id = ?",
+                (self.user_id,),
+            ).fetchall()
+        return {
+            canonical_path(row["concept_path"]): {
+                "model": row["model"],
+                "dims": row["dims"],
+                "vector": _unpack(row["vector"]),
+                "content_hash": row["content_hash"],
+            }
+            for row in rows
+        }
+
+    def stats(self) -> dict:
+        """Row count + stored model(s)/dims for the WebUI status card."""
+        with closing(db.connect(self.db_path)) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM embeddings WHERE user_id = ?", (self.user_id,)
+            ).fetchone()["n"]
+            models = [
+                row["model"]
+                for row in conn.execute(
+                    "SELECT DISTINCT model FROM embeddings WHERE user_id = ?", (self.user_id,)
+                ).fetchall()
+            ]
+            dims = [
+                row["dims"]
+                for row in conn.execute(
+                    "SELECT DISTINCT dims FROM embeddings WHERE user_id = ?", (self.user_id,)
+                ).fetchall()
+            ]
+        return {"rows": count, "models": models, "dims": dims}
+
+    # --- math ------------------------------------------------------------
+
+    def top_k(self, query_vector: list[float], k: int) -> list[tuple[str, float]]:
+        """(concept_path, score) pairs over stored vectors, sorted desc.
+
+        Rows with mismatched dims (model transition, reconcile pending) are
+        skipped rather than crashing the whole ranking.
+        """
+        scored = [
+            (concept_path, cosine(query_vector, row["vector"]))
+            for concept_path, row in self.load().items()
+            if row["dims"] == len(query_vector)
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:k]
+
+    # --- async high-level --------------------------------------------------
+
+    async def embed_query(self, text: str) -> list[float]:
+        vectors = await self.provider.embed([text], self.config, kind=KIND_QUERY)
+        return vectors[0]
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return await self.provider.embed(texts, self.config, kind=KIND_DOCUMENT)
+
+    async def search_ids(self, query: str, limit: int) -> list[tuple[str, float]]:
+        """(concept_id, score) pairs; concept ids are paths minus ``.md``.
+
+        Raises on any embedding-pipeline failure (callers own fallback policy).
+        """
+        query_vector = await self.embed_query(query)
+        return [
+            (path[: -len(".md")] if path.endswith(".md") else path, score)
+            for path, score in self.top_k(query_vector, limit)
+        ]
+
+    async def related(self, text: str, k: int) -> list[tuple[str, float]]:
+        """Same ranking as ``search_ids`` for raw text (F3 injection)."""
+        return await self.search_ids(text, k)
+
+    async def sync_writes(self, backend: LibraryBackend, writes: list[dict]) -> None:
+        """Best-effort write-through index update; NEVER raises.
+
+        Actions are collapsed per concept path (last one wins) before any I/O:
+        ``deleted`` removes the row, a ``moved`` write's ``from_id`` removes
+        the OLD path's row, and everything else re-reads the concept through
+        the backend (A10) and re-embeds (L8 — a create-then-delete in one run
+        must not resurrect a row, and a move must not leak the stale old-path
+        row). All surviving writes embed in ONE batched call.
+        """
+        # backend result ids are "/x"-shaped; the store key is "x.md".
+        by_path: dict[str, dict] = {}
+        moved_from: list[str] = []
+        for write in writes:
+            by_path[canonical_path(f"{write['id']}.md")] = write
+            if write.get("action") == "moved" and write.get("from_id"):
+                moved_from.append(canonical_path(f"{write['from_id']}.md"))
+        for concept_path in moved_from:
+            # Delete the OLD path's row so it cannot leak into top_k ranking
+            # (L8); a same-run re-create of that path is upserted below.
+            self.delete(concept_path)
+        pending: list[tuple[str, str, str]] = []  # (concept_path, text, hash)
+        for concept_path, write in by_path.items():
+            try:
+                if write.get("action") == "deleted":
+                    self.delete(concept_path)
+                    continue
+                doc = backend.read_document(concept_path)
+                assembled = concept_text(doc["frontmatter"], doc["body"])
+                pending.append((concept_path, assembled, content_hash(assembled)))
+            except Exception as exc:
+                logger.warning("embedding sync skipped %s: %s", concept_path, exc)
+        if not pending:
+            return
+        try:
+            vectors = await self.embed_documents([text for _, text, _ in pending])
+            for (concept_path, _, hash_), vector in zip(pending, vectors, strict=True):
+                self.upsert(concept_path, self.config.model, vector, hash_)
+        except Exception as exc:
+            logger.warning("embedding sync failed: %s", exc)
+
+    async def reconcile(self, backend: LibraryBackend) -> None:
+        """Full drift pass: embed missing/changed concepts, drop vanished rows.
+
+        Model mismatch forces a full re-embed (locked decision g). Guarded
+        against concurrent runs by a DB claim row (cross-instance safe, TTL
+        covers crashed owners); the status registry only reports progress.
+        The tree scan runs through the backend (A10).
+        """
+        owner = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex}"
+        with closing(db.connect(self.db_path)) as conn:
+            claimed = db.try_claim_embed_reconcile(conn, self.user_id, owner, RECONCILE_CLAIM_TTL)
+        if not claimed:
+            return
+        try:
+            await self._reconcile_inner(backend)
+        except Exception as exc:
+            if self._status is not None:
+                self._status.finish(self.user_id, error=str(exc))
+                raise
+            logger.warning("embedding reconcile failed: %s", exc)
+        finally:
+            with closing(db.connect(self.db_path)) as conn:
+                db.release_embed_reclaim(conn, self.user_id, owner)
+
+    async def _reconcile_inner(self, backend: LibraryBackend) -> None:
+        stored = self.load()
+        on_disk: dict[str, tuple[str, str]] = {}  # concept_path -> (text, hash)
+        for bundle_path, _abs_path in backend.iter_concept_files():
+            concept_path = canonical_path(bundle_path)
+            try:
+                doc = backend.read_document(bundle_path)
+            except Exception as exc:
+                logger.warning("embedding reconcile skipped %s: %s", concept_path, exc)
+                continue
+            text = concept_text(doc["frontmatter"], doc["body"])
+            on_disk[concept_path] = (text, content_hash(text))
+        stale = [
+            concept_path
+            for concept_path, (_, hash_) in on_disk.items()
+            if concept_path not in stored
+            or stored[concept_path]["content_hash"] != hash_
+            or stored[concept_path]["model"] != self.config.model
+        ]
+        for concept_path in stored:
+            if concept_path not in on_disk:
+                self.delete(concept_path)
+        if self._status is not None:
+            self._status.begin(self.user_id, len(stale), self.config.model)
+        done = 0
+        for offset in range(0, len(stale), RECONCILE_BATCH):
+            batch = stale[offset : offset + RECONCILE_BATCH]
+            vectors = await self.embed_documents([on_disk[path][0] for path in batch])
+            for concept_path, vector in zip(batch, vectors, strict=True):
+                self.upsert(concept_path, self.config.model, vector, on_disk[concept_path][1])
+            done += len(batch)
+            if self._status is not None:
+                self._status.progress(self.user_id, done)
+        if self._status is not None:
+            self._status.finish(self.user_id)

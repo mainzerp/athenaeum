@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Activity - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Activity</h1>
+  <p class="subtitle">In-flight and journaled MCP tool calls, refreshed every 5 seconds.</p>
+</div>
+<div hx-get="/activity/rows"
+     hx-trigger="load, every 5s"
+     hx-swap="innerHTML">
+  <div class="skeleton skeleton-text"></div>
+  <div class="skeleton skeleton-text"></div>
+  <div class="skeleton skeleton-text" style="width: 60%;"></div>
+</div>
+{% endblock %}

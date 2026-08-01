@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}Agents - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Agents</h1>
+  <p class="subtitle">Model and prompt per agent.</p>
+</div>
+{% if saved %}<div class="js-flash" data-type="success" data-message="Saved." hidden></div>{% endif %}
+
+<div class="tab-nav">
+  <a class="tab-btn {% if tab == 'librarian' %}tab-btn-active{% endif %}" href="/config/agents/librarian">Librarian</a>
+  <a class="tab-btn {% if tab == 'curator' %}tab-btn-active{% endif %}" href="/config/agents/curator">Curator</a>
+  <a class="tab-btn {% if tab == 'embeddings' %}tab-btn-active{% endif %}" href="/config/agents/embeddings">Embeddings</a>
+</div>
+
+{% if tab == 'librarian' %}
+<div class="card">
+  <div class="card-header">Librarian settings</div>
+  <div class="card-body">
+    <form method="post" action="/config/agents/librarian" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="connection_id">Connection</label>
+        <select class="input-field" id="connection_id" name="connection_id">
+          <option value="" {% if not cfg["librarian_connection_id"] %}selected{% endif %}>Default</option>
+          {% for c in connections %}
+          <option value="{{ c['id'] }}" {% if cfg["librarian_connection_id"] == c["id"] %}selected{% endif %}>{{ c["provider"] }}</option>
+          {% endfor %}
+        </select>
+        <p class="muted text-sm mt-1">Connection this agent uses; 'Default' follows the default set on the Provider page.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="model">Model</label>
+        <input class="input-field" type="text" id="model" name="model" value="{{ cfg['llm_model'] or '' }}">
+        <p class="muted text-sm mt-1">OpenRouter models use vendor/model slugs (e.g. anthropic/claude-3.5-sonnet).</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="prompt_addendum">Prompt addendum (appended to the built-in librarian prompt; empty = none)</label>
+        <textarea class="input-field" id="prompt_addendum" name="prompt_addendum" rows="6">{{ cfg["prompt_addendum"] or "" }}</textarea>
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    {% if addendum_set %}
+    <span class="badge badge-info">With addendum</span>
+    {% else %}
+    <span class="badge badge-neutral">Built-in default</span>
+    {% endif %}
+  </div>
+  <div class="card-body">
+    <pre class="log">{{ prompt }}</pre>
+  </div>
+</div>
+<p class="muted mt-2">The built-in librarian prompt always applies; your addendum is appended to it.</p>
+{% endif %}
+
+{% if tab == 'curator' %}
+<div class="card">
+  <div class="card-header">Curator settings</div>
+  <div class="card-body">
+    <form method="post" action="/config/agents/curator" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="connection_id">Connection</label>
+        <select class="input-field" id="connection_id" name="connection_id">
+          <option value="" {% if not cfg["curator_connection_id"] %}selected{% endif %}>Default</option>
+          {% for c in connections %}
+          <option value="{{ c['id'] }}" {% if cfg["curator_connection_id"] == c["id"] %}selected{% endif %}>{{ c["provider"] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="curator_model">Curate model</label>
+        <input class="input-field" type="text" id="curator_model" name="curator_model" value="{{ cfg['curator_model'] or '' }}" placeholder="librarian model">
+        <p class="muted text-sm mt-1">Used only for library_curate runs. Empty fields use the default connection and the librarian model.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="curate_prompt_addendum">Prompt addendum (appended to the built-in curation template; empty = none)</label>
+        <textarea class="input-field" id="curate_prompt_addendum" name="curate_prompt_addendum" rows="6">{{ cfg["curate_prompt_addendum"] or "" }}</textarea>
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Scheduled curation</div>
+  <div class="card-body">
+    <form method="post" action="/config/agents/curator/schedule" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="checkbox-row"><input type="checkbox" name="curate_schedule_enabled"
+          value="1" {% if cfg["curate_schedule_enabled"] %}checked{% endif %}>
+          Run library_maintain + library_curate automatically every day</label>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="curate_schedule_time">Run at
+          (<span data-utc-time-hint>UTC</span>)</label>
+        <input class="input-field" type="time" id="curate_schedule_time"
+          name="curate_schedule_time" data-utc-time
+          value="{{ cfg['curate_schedule_time'] or '03:00' }}">
+        <p class="muted text-sm mt-1">Fixed daily time; missed runs are skipped,
+          never caught up. Every run is journaled on the Activity page.</p>
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    {% if addendum_set %}
+    <span class="badge badge-info">With addendum</span>
+    {% else %}
+    <span class="badge badge-neutral">Built-in template</span>
+    {% endif %}
+  </div>
+  <div class="card-body">
+    <pre class="log">{{ curator_prompt }}</pre>
+  </div>
+</div>
+{% endif %}
+
+{% if tab == 'embeddings' %}
+<div class="card">
+  <div class="card-header">Embedding settings</div>
+  <div class="card-body">
+    <form method="post" action="/config/agents/embeddings" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="source">Source</label>
+        <select class="input-field" id="source" name="source">
+          <option value="" {% if not cfg["embedding_source"] %}selected{% endif %}>Off</option>
+          <option value="local" {% if cfg["embedding_source"] == "local" %}selected{% endif %}>Local model</option>
+          <option value="api" {% if cfg["embedding_source"] == "api" %}selected{% endif %}>API connection</option>
+        </select>
+        <p class="muted text-sm mt-1">Embeddings power semantic search, semantic duplicate
+          candidates in curation, and related-concept suggestions on store/update.
+          'Off' disables all of them. Saving evicts the cached librarian; a model
+          switch re-embeds the library in the background.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="local_model">Local model (local source only)</label>
+        <select class="input-field" id="local_model" name="local_model">
+          {% for name, dims in local_models %}
+          <option value="{{ name }}" {% if cfg["embedding_source"] == "local" and cfg["embedding_model"] == name %}selected{% endif %}>{{ name }} ({{ dims }} dims)</option>
+          {% endfor %}
+        </select>
+        <p class="muted text-sm mt-1">Runs locally via fastembed (ONNX); the model
+          downloads to the data root on first use.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="api_model">API model (API source only)</label>
+        <input class="input-field" type="text" id="api_model" name="api_model"
+               value="{{ cfg['embedding_model'] if cfg['embedding_source'] == 'api' else '' }}"
+               placeholder="text-embedding-3-small">
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="connection_id">Connection</label>
+        <select class="input-field" id="connection_id" name="connection_id">
+          <option value="" {% if not cfg["embedding_connection_id"] %}selected{% endif %}>Default</option>
+          {% for c in connections %}
+          <option value="{{ c['id'] }}" {% if cfg["embedding_connection_id"] == c["id"] %}selected{% endif %}>{{ c["provider"] }}</option>
+          {% endfor %}
+        </select>
+        <p class="muted text-sm mt-1">API source only; anthropic connections have no embeddings endpoint.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="semantic_threshold">Semantic duplicate threshold (optional)</label>
+        <input class="input-field" type="text" id="semantic_threshold" name="semantic_threshold"
+               value="{{ cfg['semantic_threshold'] if cfg['semantic_threshold'] is not none else '' }}"
+               placeholder="{{ threshold_default }}">
+        <p class="muted text-sm mt-1">Cosine threshold for semantic duplicate candidates
+          in curation (0.0-1.0). Empty = model default ({{ threshold_default }} for the
+          configured model).</p>
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+      <button type="button" class="btn btn-secondary" data-loading
+              hx-post="/config/agents/embeddings/test" hx-target="#embed-test-result"
+              hx-swap="innerHTML">Test</button>
+    </form>
+    <div id="embed-test-result" class="mt-2"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Index status</div>
+  <div class="card-body">
+    {% if embed_status %}
+    <p>State: {{ embed_status["state"] }}{% if embed_status["state"] == "running" %}
+      ({{ embed_status["done"] }}/{{ embed_status["total"] }}){% endif %}</p>
+    {% if embed_status.get("model") %}<p>Run model: {{ embed_status["model"] }}</p>{% endif %}
+    {% if embed_status.get("error") %}<p>Last error: {{ embed_status["error"] }}</p>{% endif %}
+    {% else %}
+    <p class="muted">No index run yet. The index builds in the background after the
+      first agent request.</p>
+    {% endif %}
+    <p>Stored vectors: {{ embed_stats["rows"] }}</p>
+    {% if embed_stats["models"] %}
+    <p>Stored model(s): {{ embed_stats["models"] | join(", ") }}
+      ({{ embed_stats["dims"] | join(", ") }} dims)</p>
+    {% endif %}
+    {% if cfg["embedding_model"] %}
+    <p>Configured model: {{ cfg["embedding_model"] }} ({{ cfg["embedding_source"] }})</p>
+    {% endif %}
+    <p class="muted text-sm mt-1">Status advances on page reload.</p>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

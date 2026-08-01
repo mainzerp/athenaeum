@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Users - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>User management</h1>
+  <p class="subtitle">Create accounts and reset passwords.</p>
+</div>
+{% if error %}
+<div class="alert alert-danger" role="alert">
+  <div class="min-w-0">{{ error }}</div>
+  <button type="button" class="alert-dismiss" data-dismiss-click aria-label="Dismiss">&times;</button>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">Create user</div>
+  <div class="card-body">
+    <form method="post" action="/admin/users" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="username">Username</label>
+        <input class="input-field" type="text" id="username" name="username" required>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="password">Password</label>
+        <input class="input-field" type="password" id="password" name="password" required>
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row"><input type="checkbox" name="is_admin" value="1"> Admin</label>
+      </div>
+      <button type="submit" class="btn btn-primary">Create user</button>
+    </form>
+  </div>
+</div>
+
+<div class="card table-wrap">
+  <div class="card-header">Existing users</div>
+  <div class="overflow-x-auto">
+    <table>
+      <thead>
+        <tr><th>Username</th><th>Admin</th><th>Created</th><th>Reset password</th></tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>{{ u["username"] }}</td>
+          <td>
+            {% if u["is_admin"] %}
+            <span class="badge badge-info">admin</span>
+            {% else %}
+            <span class="badge badge-neutral">member</span>
+            {% endif %}
+          </td>
+          <td>{{ u["created_at"] | dt }}</td>
+          <td>
+            <form method="post" action="/admin/users/{{ u['id'] }}/reset-password"
+                  class="flex items-center gap-2"
+                  data-confirm="Reset password for {{ u['username'] }}?">
+              {{ csrf_input(request) }}
+              <input class="input-field" type="password" name="new_password" placeholder="New password" required>
+              <button type="submit" class="btn btn-sm btn-secondary">Reset</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

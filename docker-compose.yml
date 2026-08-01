@@ -1,0 +1,22 @@
+# Reference deployment (plan section 8.2). Secrets come from a local .env
+# file or the shell, never from the image or this file.
+services:
+  athenaeum:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      ATHENAEUM_DATA_ROOT: /data
+      ATHENAEUM_HOST: 0.0.0.0
+      ATHENAEUM_PORT: "8000"
+      ATHENAEUM_SECRET_KEY: ${ATHENAEUM_SECRET_KEY:?set in .env or shell}
+      ATHENAEUM_LOG_LEVEL: ${ATHENAEUM_LOG_LEVEL:-INFO}
+      # optional first-run pre-seed (ignored once a user exists):
+      # ATHENAEUM_BOOTSTRAP_ADMIN_USERNAME: ${ATHENAEUM_BOOTSTRAP_ADMIN_USERNAME:-}
+      # ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD: ${ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD:-}
+    volumes:
+      - athenaeum-data:/data # named volume; a bind mount (./data:/data) is a documented alternative
+    restart: unless-stopped
+
+volumes:
+  athenaeum-data:

@@ -1,0 +1,64 @@
+<div class="card table-wrap mb-4">
+  <div class="overflow-x-auto">
+    <table>
+      <thead>
+        <tr><th>In flight</th><th>Tool</th><th>Agent</th><th>Arguments</th></tr>
+      </thead>
+      <tbody>
+        {% if not in_flight %}
+        <tr><td colspan="4" class="muted">No calls in flight.</td></tr>
+        {% else %}
+        {% for e in in_flight %}
+        <tr>
+          <td>{{ e["started_at"] | dt }}</td>
+          <td>{{ e["tool"] }}</td>
+          <td>{{ e["token_label"] or "" }}</td>
+          <td><code>{{ e["arguments"] }}</code></td>
+        </tr>
+        {% endfor %}
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% if journal %}
+<div class="card table-wrap">
+  <div class="overflow-x-auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Started</th><th>Tool</th><th>Agent</th><th>Outcome</th><th>Duration</th>
+          <th>Iterations</th><th>Tokens</th><th>Error</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in journal %}
+        <tr>
+          <td>{{ row["started_at"] | dt }}</td>
+          <td>{{ row["tool"] }}</td>
+          <td>{{ row["token_label"] or "" }}</td>
+          <td>
+            <span class="badge {% if row['outcome'] == 'ok' %}badge-success{% else %}badge-danger{% endif %}">{{ row["outcome"] }}</span>
+          </td>
+          <td>{% if row["duration_ms"] is not none %}{{ "%.0f ms" | format(row["duration_ms"]) }}{% endif %}</td>
+          <td>{{ row["iterations"] if row["iterations"] is not none else "" }}</td>
+          <td>{{ row["total_tokens"] if row["total_tokens"] is not none else "" }}</td>
+          <td class="muted">{{ row["error"] or "" }}</td>
+          <td>
+            {% if row["tool"] in traced_tools and row["trace_id"] in existing_traces %}
+            <a class="text-accent" href="/library/traces/{{ row['trace_id'] }}">Replay</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="card-body">
+    <p class="muted">No journaled calls yet.</p>
+  </div>
+</div>
+{% endif %}

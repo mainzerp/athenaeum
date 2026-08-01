@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <title>Log in - Athenaeum</title>
+  <script>
+    /* Anti-FOUC: remove dark default before the stylesheet loads when the
+       user previously chose the light theme. */
+    (function () {
+      try {
+        if (localStorage.getItem("athenaeum_theme") === "light") {
+          document.documentElement.classList.remove("dark");
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/app.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+<div class="login-bg">
+  <div class="card login-card">
+    <div class="card-body">
+      <div class="login-brand">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
+        </svg>
+        <span>Athenaeum</span>
+      </div>
+      <h1 class="mb-4">Log in</h1>
+      {% if error %}
+      <div class="alert alert-danger" role="alert">
+        <div class="min-w-0">{{ error }}</div>
+        <button type="button" class="alert-dismiss" data-dismiss-click aria-label="Dismiss">&times;</button>
+      </div>
+      {% endif %}
+      <form method="post" action="/login" data-loading>
+        {{ csrf_input(request) }}
+        <div class="form-row">
+          <label class="input-label" for="username">Username</label>
+          <input class="input-field" type="text" id="username" name="username" required>
+        </div>
+        <div class="form-row">
+          <label class="input-label" for="password">Password</label>
+          <input class="input-field" type="password" id="password" name="password" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg w-full">Log in</button>
+      </form>
+    </div>
+  </div>
+</div>
+</body>
+</html>

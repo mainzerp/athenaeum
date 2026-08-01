@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Diff v{{ n }} - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <p class="mb-2"><a href="/library/versions">Back to versions</a></p>
+  <h1>Version {{ n }} diff</h1>
+  <p class="subtitle">{{ path }}</p>
+</div>
+{% if diff %}
+<div class="card">
+  <div class="card-body">
+    <pre class="diff">{{ diff }}</pre>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="card-body">
+    <p class="muted">No differences recorded for this path.</p>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

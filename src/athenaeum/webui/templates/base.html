@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <title>{% block title %}Athenaeum{% endblock %}</title>
+  <script>
+    /* Anti-FOUC: remove dark default before the stylesheet loads when the
+       user previously chose the light theme. */
+    (function () {
+      try {
+        if (localStorage.getItem("athenaeum_theme") === "light") {
+          document.documentElement.classList.remove("dark");
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+  <script defer src="/static/app.js"></script>
+  {% block head %}{% endblock %}
+</head>
+<body{% if not user %} class="no-sidebar"{% endif %}>
+{% if user %}
+{% set current_path = request.url.path %}
+<div id="sidebar-overlay" class="sidebar-overlay"></div>
+<aside id="sidebar" class="sidebar">
+  <div class="sidebar-brand">
+    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
+    </svg>
+    <span>Athenaeum</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="sidebar-group-label">Library</div>
+    <a href="/library/tree" class="sidebar-link {% if current_path.startswith('/library/tree') or current_path.startswith('/library/document') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+      </svg>
+      Tree
+    </a>
+    <a href="/library/graph" class="sidebar-link {% if current_path.startswith('/library/graph') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>
+        <path d="M8.5 7.5l7 8M15.5 7.5l-7 8M8.8 5.3l6.4 0"/>
+      </svg>
+      Graph
+    </a>
+    <a href="/library/versions" class="sidebar-link {% if current_path.startswith('/library/versions') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
+      </svg>
+      Versions
+    </a>
+    <a href="/library/log" class="sidebar-link {% if current_path.startswith('/library/log') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+      </svg>
+      Log
+    </a>
+    <a href="/library/traces" class="sidebar-link {% if current_path.startswith('/library/traces') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 17l6-6-6-6M12 19h8"/>
+      </svg>
+      Traces
+    </a>
+    <a href="/activity" class="sidebar-link {% if current_path.startswith('/activity') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+      </svg>
+      Activity
+    </a>
+    <div class="sidebar-group-label">Configuration</div>
+    <a href="/config/provider" class="sidebar-link {% if current_path.startswith('/config/provider') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM12 2v3M12 19v3M2 12h3M19 12h3"/>
+      </svg>
+      Provider
+    </a>
+    <a href="/config/agents/librarian" class="sidebar-link {% if current_path.startswith('/config/agents') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>
+      </svg>
+      Agents
+    </a>
+    <a href="/config/library" class="sidebar-link {% if current_path.startswith('/config/library') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+      </svg>
+      Library
+    </a>
+    <div class="sidebar-group-label">Account</div>
+    <a href="/tokens" class="sidebar-link {% if current_path.startswith('/tokens') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+      </svg>
+      Tokens
+    </a>
+    {% if user["is_admin"] %}
+    <div class="sidebar-group-label">Administration</div>
+    <a href="/admin/users" class="sidebar-link {% if current_path.startswith('/admin/users') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>
+        <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>
+      </svg>
+      Users
+    </a>
+    <a href="/admin/server" class="sidebar-link {% if current_path.startswith('/admin/server') %}sidebar-link-active{% endif %}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
+        <path d="M6 6h.01M6 18h.01"/>
+      </svg>
+      Server
+    </a>
+    {% endif %}
+    <form method="post" action="/logout" class="sidebar-logout">
+      {{ csrf_input(request) }}
+      <button type="submit" class="sidebar-link sidebar-link-danger">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
+        </svg>
+        Log out
+      </button>
+    </form>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="sidebar-user">
+      <div class="sidebar-avatar">{{ user["username"][0] | upper }}</div>
+      <div class="sidebar-user-meta">
+        <div class="sidebar-username">{{ user["username"] }}</div>
+        <div class="sidebar-userrole">{{ "Admin" if user["is_admin"] else "Member" }}</div>
+      </div>
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle theme" title="Toggle theme">
+        <svg class="icon-moon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+        </svg>
+        <svg class="icon-sun" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</aside>
+<button type="button" id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle navigation">
+  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M3 12h18M3 6h18M3 18h18"/>
+  </svg>
+</button>
+{% endif %}
+<div class="main-col">
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="page-footer">Athenaeum &mdash; self-hosted knowledge librarian</footer>
+</div>
+<div id="toast-container" class="toast-container"></div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

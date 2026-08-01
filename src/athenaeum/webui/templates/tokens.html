@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}MCP tokens - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>MCP access tokens</h1>
+  <p class="subtitle">Tokens authenticate MCP clients (agents) against this Athenaeum instance.</p>
+</div>
+
+{% if new_token %}
+<div class="card card-elevated">
+  <div class="card-body">
+    <div class="alert alert-warning">This token is shown only once and stored as a hash. Copy it now.</div>
+    <p class="mb-3">Token for "{{ new_label }}" created.</p>
+    <div class="flex items-center gap-2">
+      <code class="token-value">{{ new_token }}</code>
+      <button type="button" class="btn btn-secondary btn-sm" data-copy>Copy</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-header">Create token</div>
+  <div class="card-body">
+    <form method="post" action="/tokens" data-loading>
+      {{ csrf_input(request) }}
+      <label class="input-label" for="token-label">Label (agent name, used for attribution)</label>
+      <div class="flex gap-2">
+        <input type="text" id="token-label" name="label" class="input-field flex-1" required>
+        <button type="submit" class="btn btn-primary">Create token</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Existing tokens</div>
+  {% if tokens %}
+  <table>
+    <thead>
+      <tr><th>Label</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for t in tokens %}
+      <tr>
+        <td>{{ t["label"] }}</td>
+        <td>{{ t["created_at"] | dt }}</td>
+        <td>{{ t["last_used_at"] | dt or "-" }}</td>
+        <td>
+          {% if t["revoked_at"] %}
+          <span class="badge badge-danger">Revoked</span>
+          {% else %}
+          <span class="badge badge-success">Active</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if not t["revoked_at"] %}
+          <form method="post" action="/tokens/{{ t['id'] }}/revoke" class="inline" data-confirm="Revoke token '{{ t['label'] }}'? Agents using it will lose access immediately.">
+            {{ csrf_input(request) }}
+            <button type="submit" class="btn btn-sm btn-danger">Revoke</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    <h3>No tokens yet</h3>
+    <p class="muted">Create a token above to connect an MCP agent.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

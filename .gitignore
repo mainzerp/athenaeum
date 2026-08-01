@@ -1,0 +1,40 @@
+# Runtime data (single persistence root)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# Playwright MCP dev artifacts (screenshots, traces)
+.playwright-mcp/
+
+# Local secrets / env files
+.env
+
+# SubAgent working files (ephemeral, see AGENTS.md)
+docs/SubAgent/
+
+# Test / coverage artifacts
+.coverage
+htmlcov/
+
+# Type checker caches
+.mypy_cache/
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/

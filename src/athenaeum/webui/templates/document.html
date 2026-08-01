@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ fm.get("title") or doc["path"] }} - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header page-header-sticky">
+  <p class="mb-2"><a href="/library/tree">Back to tree</a></p>
+  <h1>{{ fm.get("title") or doc["path"] }}</h1>
+  <div class="badges mt-2">
+    <span class="badge badge-info">{{ fm.get("type") or "unknown" }}</span>
+    {% for tag in tags %}<span class="badge badge-neutral">{{ tag }}</span>{% endfor %}
+    <span class="badge badge-success">{{ fm.get("status") or "stable" }}</span>
+    <span class="badge badge-trust badge-{{ trust }}">{{ trust }}</span>
+    {% if stale %}<span class="badge badge-warning">stale</span>{% endif %}
+  </div>
+  {% if fm.get("description") %}<p class="subtitle mt-2">{{ fm["description"] }}</p>{% endif %}
+</div>
+<div class="card">
+  <div class="card-body">
+    <div id="md-source" hidden>{{ doc["body"] }}</div>
+    <div id="md-rendered" class="doc-body"></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked@18.0.7/lib/marked.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.12/dist/purify.min.js"></script>
+<script>
+  document.getElementById("md-rendered").innerHTML =
+    DOMPurify.sanitize(marked.parse(document.getElementById("md-source").textContent));
+</script>
+{% endblock %}

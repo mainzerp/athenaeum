@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Library - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Document tree</h1>
+  <p class="subtitle">Browse the library by folder. Select a folder to expand it.</p>
+</div>
+<div class="card">
+  <div class="card-body">
+    {% include "tree_children.html" %}
+  </div>
+</div>
+{% endblock %}
