@@ -1303,6 +1303,10 @@ def test_graph_endpoint_systems_and_moons(env):
                 "frontmatter": {"title": "Deep", "type": "Concept"},
                 "body": "Deep body.\n",
             },
+            "/a/b/c/d/deeper.md": {
+                "frontmatter": {"title": "Deeper", "type": "Concept"},
+                "body": "body\n",
+            },
         }
     )
 
@@ -1326,13 +1330,32 @@ def test_graph_endpoint_systems_and_moons(env):
         "depth": 2,
         "kind": "system",
     }
-    assert "/a/b/c" not in folders  # depth >=3 folders are not nodes
+    assert folders["/a/b/c"] == {
+        "id": "/a/b/c",
+        "name": "c",
+        "parent": "/a/b",
+        "depth": 3,
+        "kind": "system",
+    }
+    # arbitrary folder depth is emitted, not just depth 3
+    assert folders["/a/b/c/d"] == {
+        "id": "/a/b/c/d",
+        "name": "d",
+        "parent": "/a/b/c",
+        "depth": 4,
+        "kind": "system",
+    }
 
     nodes = {node["id"]: node for node in data["nodes"]}
     deep = nodes["/a/b/c/deep"]
     assert deep["kind"] == "moon"
     assert deep["depth"] == 3
     assert deep["folder"] == "/a/b/c"
+
+    deeper = nodes["/a/b/c/d/deeper"]
+    assert deeper["kind"] == "moon"
+    assert deeper["depth"] == 4
+    assert deeper["folder"] == "/a/b/c/d"
 
     edges = {(e["from"], e["to"]) for e in data["edges"]}
     assert ("/concepts/alpha", "/a/b/c/deep") in edges

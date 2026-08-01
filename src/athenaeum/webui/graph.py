@@ -1,13 +1,14 @@
 """Relations graph: /api/graph feeds the 3D universe (vendored 3d-force-graph).
 
-Phase 5: one endpoint returning ``{nodes, folders, edges}`` — folders at
-depth 1/2 are emitted as galaxy/system nodes, concepts become planets
-(folder depth <= 2) or moons (depth >= 3). Concept ``color`` comes from
-trust/staleness, ``group`` from frontmatter ``type``, tooltip (``title``)
-from tags; ``trust_tier`` and ``stale`` are emitted for every node. Only
-absolute bundle-relative links (``/path/to/concept.md``) become edges;
-broken links are tolerated (skipped), per OKF §6. Containment edges are
-synthesized client-side from the ``folder``/``parent`` fields.
+Phase 5: one endpoint returning ``{nodes, folders, edges}`` — folders of
+every depth are emitted (depth 1 = galaxy, depth >= 2 = system), concepts
+become planets (folder depth <= 2) or moons (depth >= 3). Concept ``color``
+comes from trust/staleness, ``group`` from frontmatter ``type``, tooltip
+(``title``) from tags; ``trust_tier`` and ``stale`` are emitted for every
+node. Only absolute bundle-relative links (``/path/to/concept.md``) become
+edges; broken links are tolerated (skipped), per OKF §6. Containment edges
+are synthesized client-side from the ``folder``/``parent`` fields, and node
+positions are computed client-side (deterministic orbit layout).
 """
 
 from __future__ import annotations
@@ -36,10 +37,9 @@ COLOR_TRUST = {
 
 _RESERVED = {"index.md", "log.md"}
 
-# CS-17: bound on folder nesting accepted by the graph walk. OKF libraries
-# are shallow (folders at depth 1/2 render as galaxies/systems); a tree
-# deeper than this is pathological and rejected with a clear 400 instead of
-# failing with RecursionError -> 500.
+# CS-17: bound on folder nesting accepted by the graph walk. A tree deeper
+# than this is pathological and rejected with a clear 400 instead of failing
+# with RecursionError -> 500.
 MAX_WALK_DEPTH = 100
 
 
@@ -124,8 +124,6 @@ def build_graph(backend: object) -> dict:
     folder_nodes = []
     for entry in folders:
         depth = len([seg for seg in entry["path"].split("/") if seg])
-        if depth >= 3:
-            continue  # deep folders are not nodes; their concepts hang as moons
         parent, _ = _folder_of(entry["path"])
         folder_nodes.append(
             {

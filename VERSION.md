@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.15.0**
+Current version: **0.16.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,21 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.16.0
+
+Deterministic orbit layout for the 3D relations universe. The force-directed
+simulation on the graph page is replaced by a pure, deterministic
+`computeOrbitLayout` (graph3d.js): every body is pinned (`fx`/`fy`/`fz`) to a
+ring in a shared ecliptic plane — folders orbit their parent folder,
+depth-1 folders orbit the universe center, root-level documents sit on an
+outer rogue ring, and wikilinked siblings are placed in adjacent orbit slots
+(stable FNV-1a hash ordering, so positions never reshuffle across reloads).
+The default d3 forces are removed, node drag is disabled, and the engine
+settles immediately (`warmupTicks: 0`, `cooldownTime: 300`). The
+depth-2 folder cap in `/api/graph` is lifted: folder nodes are now emitted
+for arbitrary depth (depth 1 = galaxy, depth >= 2 = system). No payload
+schema changes otherwise; templates and trace replay are untouched.
 
 ### 0.15.0
 

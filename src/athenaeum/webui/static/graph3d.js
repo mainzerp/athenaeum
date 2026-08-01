@@ -28,18 +28,12 @@
     particlesPerLink: 2,
     particleSpeed: 0.005,
     particleWidth: 1.1,
-    chargePlanet: -40,
-    chargeMoon: -10,
-    chargeGalaxy: -160,
-    chargeSystem: -120,
-    strengthContainment: 2.5,
-    strengthLink: 0.25,
-    distMoonContainment: 4,
-    distPlanetContainment: 13,
-    distSystemContainment: 22,
-    distLink: 45,
-    warmupTicks: 100,
-    cooldownTime: 5000,
+    orbitRadiusMin: 18,
+    orbitRadiusMinGalaxy: 90,
+    orbitSlotArc: 16,
+    rogueRingOffset: 30,
+    warmupTicks: 0,
+    cooldownTime: 300,
     fitMs: 1000,
     focusMs: 800,
     flyMs: 1200,
@@ -148,7 +142,176 @@
       links.push({ source: e.from, target: e.to, linkType: "link" });
     });
 
-    return { nodes: nodes, links: links };
+    var universe = { nodes: nodes, links: links };
+    computeOrbitLayout(universe);
+    return universe;
+  }
+
+  // FNV-1a 32-bit hash of a node id as an unsigned number. Stable across
+  // reloads, so orbit slot angles never reshuffle for an unchanged library.
+  function hash(id) {
+    var h = 0x811c9dc5;
+    var s = String(id);
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+
+  // Deterministic orbit layout (pure function of the full node/link set;
+  // no Math.random, no time input). Every body is pinned to a ring in the
+  // shared ecliptic plane (y = 0): folders orbit their parent folder,
+  // depth-1 folders orbit the virtual universe center, root-level documents
+  // sit on one outer "rogue" ring. Wikilinked siblings are ordered into
+  // adjacent slots. Mutates nodes in place (x/y/z and fx/fy/fz) and returns
+  // the universe.
+  function computeOrbitLayout(universe) {
+    var nodes = (universe && universe.nodes) || [];
+    var links = (universe && universe.links) || [];
+
+    var byId = {};
+    nodes.forEach(function (n) {
+      byId[n.id] = n;
+    });
+
+    // Undirected wikilink adjacency (link edges only) for sibling ordering.
+    var adjacency = {};
+    links.forEach(function (l) {
+      if (l.linkType !== "link") return;
+      var s = endId(l.source);
+      var t = endId(l.target);
+      if (!adjacency[s]) adjacency[s] = {};
+      adjacency[s][t] = true;
+      if (!adjacency[t]) adjacency[t] = {};
+      adjacency[t][s] = true;
+    });
+
+    // Children per parent folder. Folder nodes parent to their parent
+    // folder, documents to their own folder; only folders act as parents
+    // (documents are always leaves). Depth-1 folders and root-level
+    // documents are collected separately (center rings).
+    var childrenOf = {};
+    var galaxyIds = [];
+    var rogueIds = [];
+    nodes.forEach(function (n) {
+      var parent;
+      if (n.isFolder) {
+        parent = parentFolder(n.id);
+        if (parent === "/" || !byId[parent]) {
+          galaxyIds.push(n.id);
+          return;
+        }
+      } else {
+        parent = n.folder;
+        if (!parent || parent === "/" || !byId[parent]) {
+          rogueIds.push(n.id); // also the defensive fallback for missing folders
+          return;
+        }
+      }
+      if (!childrenOf[parent]) childrenOf[parent] = [];
+      childrenOf[parent].push(n.id);
+    });
+
+    // Order a sibling set so wikilinked siblings occupy adjacent slots:
+    // connected components under the link adjacency (sibling edges only),
+    // components ordered by smallest member hash, members by hash.
+    function orderSiblings(ids) {
+      var siblingSet = {};
+      ids.forEach(function (id) {
+        siblingSet[id] = true;
+      });
+      var seen = {};
+      var components = [];
+      ids.forEach(function (id) {
+        if (seen[id]) return;
+        var component = [];
+        var queue = [id];
+        seen[id] = true;
+        while (queue.length) {
+          var cur = queue.pop();
+          component.push(cur);
+          var neighbors = adjacency[cur] || {};
+          for (var other in neighbors) {
+            if (siblingSet[other] && !seen[other]) {
+              seen[other] = true;
+              queue.push(other);
+            }
+          }
+        }
+        components.push(component);
+      });
+      components.forEach(function (component) {
+        component.sort(function (a, b) {
+          return hash(a) - hash(b);
+        });
+      });
+      components.sort(function (a, b) {
+        return hash(a[0]) - hash(b[0]);
+      });
+      var out = [];
+      components.forEach(function (component) {
+        out = out.concat(component);
+      });
+      return out;
+    }
+
+    function pin(node, x, z) {
+      node.x = node.fx = x;
+      node.y = node.fy = 0;
+      node.z = node.fz = z;
+    }
+
+    // Constant arc length per slot: the radius grows deterministically with
+    // the child count, so slots never crowd.
+    function ringRadius(m, minRadius) {
+      return Math.max(minRadius, (CONFIG.orbitSlotArc * m) / (2 * Math.PI));
+    }
+
+    // Place the children of one parent on a ring around it, then recurse
+    // into folder children. Returns the ring radius.
+    function placeRing(parentId, px, pz, childIds, minRadius) {
+      var ordered = orderSiblings(childIds);
+      var m = ordered.length;
+      var r = ringRadius(m, minRadius);
+      if (!m) return r;
+      // Stable, id-dependent ring phase; the virtual center uses phi = 0.
+      var phi = parentId ? (hash(parentId) % 6283) / 1000 : 0;
+      ordered.forEach(function (id, i) {
+        var node = byId[id];
+        if (!node) return;
+        var theta = phi + (2 * Math.PI * i) / m;
+        var x = px + r * Math.cos(theta);
+        var z = pz + r * Math.sin(theta);
+        pin(node, x, z);
+        if (node.isFolder) {
+          placeRing(node.id, x, z, childrenOf[node.id] || [], CONFIG.orbitRadiusMin);
+        }
+      });
+      return r;
+    }
+
+    // Galaxy ring: depth-1 folders around the virtual center at the origin.
+    var galaxyR = placeRing(null, 0, 0, galaxyIds, CONFIG.orbitRadiusMinGalaxy);
+
+    // Rogue ring: root-level documents on one ring outside the galaxy ring.
+    var rogueOrdered = orderSiblings(rogueIds);
+    var rm = rogueOrdered.length;
+    if (rm) {
+      var rogueR = Math.max(galaxyR + CONFIG.rogueRingOffset, ringRadius(rm, 0));
+      rogueOrdered.forEach(function (id, i) {
+        var theta = (2 * Math.PI * i) / rm;
+        pin(byId[id], rogueR * Math.cos(theta), rogueR * Math.sin(theta));
+      });
+    }
+
+    // Defensive: anything the tree walk never reached is pinned to the
+    // origin rather than left for the simulation to place randomly.
+    nodes.forEach(function (n) {
+      if (n.fx == null) pin(n, 0, 0);
+    });
+
+    return universe;
   }
 
   function computeNeighbors(universe, id) {
@@ -423,6 +586,7 @@
       })
       .warmupTicks(CONFIG.warmupTicks)
       .cooldownTime(CONFIG.cooldownTime)
+      .enableNodeDrag(false)
       .onEngineStop(function () {
         state.engineSettled = true;
         if (!state.initialFitDone) {
@@ -473,26 +637,12 @@
       });
     }
 
-    graph.d3Force("link").distance(function (l) {
-      if (l.linkType === "link") return CONFIG.distLink;
-      var s = l.source;
-      var t = l.target;
-      var kinds = [s && s.kind, t && t.kind];
-      if (kinds.indexOf("system") !== -1 && kinds.indexOf("galaxy") !== -1) {
-        return CONFIG.distSystemContainment;
-      }
-      if (kinds.indexOf("moon") !== -1) return CONFIG.distMoonContainment;
-      return CONFIG.distPlanetContainment;
-    });
-    graph.d3Force("link").strength(function (l) {
-      return l.linkType === "link" ? CONFIG.strengthLink : CONFIG.strengthContainment;
-    });
-    graph.d3Force("charge").strength(function (n) {
-      if (n.kind === "galaxy") return CONFIG.chargeGalaxy;
-      if (n.kind === "system") return CONFIG.chargeSystem;
-      if (n.kind === "moon") return CONFIG.chargeMoon;
-      return CONFIG.chargePlanet;
-    });
+    // Deterministic orbit layout: computeOrbitLayout pinned every node
+    // (fx/fy/fz), so the force simulation has nothing to do. Drop the
+    // default forces entirely instead of tuning them.
+    graph.d3Force("link", null);
+    graph.d3Force("charge", null);
+    graph.d3Force("center", null);
 
     function selectNode(id) {
       state.selectedId = id;
@@ -641,6 +791,7 @@
   var api = {
     CONFIG: CONFIG,
     buildUniverse: buildUniverse,
+    computeOrbitLayout: computeOrbitLayout,
     computeNeighbors: computeNeighbors,
     nearestEmittedFolder: nearestEmittedFolder,
     parentFolder: parentFolder,
