@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.16.0**
+Current version: **0.17.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,26 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.17.0
+
+Orbit-layout radius budget and star/planet/moon kind remap for the 3D
+relations universe.
+
+- `computeOrbitLayout` (graph3d.js) now computes ring radii with a recursive
+  two-pass radius budget instead of a pure child-count rule: pass 1 derives
+  each folder's subtree extent bottom-up, pass 2 places bodies top-down. A
+  child subtree always stays inside its parent's orbit budget (`ringGap: 8`
+  clearance, `maxChildRingFraction: 0.75` extent cap), so subtrees no longer
+  cross parent rings, collide with siblings, or overshoot the rogue ring —
+  the guaranteed invariant is a minimum pairwise distance of 8 units between
+  any two bodies, verified numerically.
+- Kind vocabulary remapped `galaxy/system/planet/moon` -> `star/planet/moon`:
+  top-level folder = star, every deeper folder = planet, every file = moon
+  (the depth-<=2-planet / depth->=3-moon document split is gone). The graph
+  page now has three filter toggles (Stars/Planets/Moons), and all documents
+  are sized uniformly by link degree (`starScaleBase + degree *
+  starScalePerDegree`) instead of the two-tier planet/moon sizing.
 
 ### 0.16.0
 

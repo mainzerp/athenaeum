@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-header">
   <h1>Relations graph</h1>
-  <p class="subtitle">The library universe: galaxies and systems are folders, planets and moons are documents.</p>
+  <p class="subtitle">The library universe: stars and planets are folders, moons are documents.</p>
 </div>
 <div class="badges mb-4">
   <span class="badge badge-neutral"><span class="status-dot" style="background: #27ae60;"></span>human-reviewed</span>
@@ -12,9 +12,8 @@
   <span class="badge badge-neutral"><span class="status-dot" style="background: #e67e22;"></span>stale</span>
 </div>
 <div class="graph-controls mb-4" id="graph-controls">
-  <input type="search" id="graph-search" class="input-field" placeholder="Find a planet..." aria-label="Find a planet">
-  <label class="checkbox-row"><input type="checkbox" id="graph-show-galaxies" checked> Galaxies</label>
-  <label class="checkbox-row"><input type="checkbox" id="graph-show-systems" checked> Systems</label>
+  <input type="search" id="graph-search" class="input-field" placeholder="Find a moon..." aria-label="Find a moon">
+  <label class="checkbox-row"><input type="checkbox" id="graph-show-stars" checked> Stars</label>
   <label class="checkbox-row"><input type="checkbox" id="graph-show-planets" checked> Planets</label>
   <label class="checkbox-row"><input type="checkbox" id="graph-show-moons" checked> Moons</label>
   <button type="button" id="graph-fit" class="btn btn-secondary btn-sm">Fit view</button>
@@ -56,11 +55,8 @@
         }, 300);
       }
 
-      document.getElementById("graph-show-galaxies").addEventListener("change", function (e) {
-        ctrl.setShowGalaxies(e.target.checked);
-      });
-      document.getElementById("graph-show-systems").addEventListener("change", function (e) {
-        ctrl.setShowSystems(e.target.checked);
+      document.getElementById("graph-show-stars").addEventListener("change", function (e) {
+        ctrl.setShowStars(e.target.checked);
       });
       document.getElementById("graph-show-planets").addEventListener("change", function (e) {
         ctrl.setShowPlanets(e.target.checked);

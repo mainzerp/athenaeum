@@ -1,8 +1,8 @@
 """Relations graph: /api/graph feeds the 3D universe (vendored 3d-force-graph).
 
 Phase 5: one endpoint returning ``{nodes, folders, edges}`` — folders of
-every depth are emitted (depth 1 = galaxy, depth >= 2 = system), concepts
-become planets (folder depth <= 2) or moons (depth >= 3). Concept ``color``
+every depth are emitted (depth 1 = star, depth >= 2 = planet), concepts
+become moons at any depth. Concept ``color``
 comes from trust/staleness, ``group`` from frontmatter ``type``, tooltip
 (``title``) from tags; ``trust_tier`` and ``stale`` are emitted for every
 node. Only absolute bundle-relative links (``/path/to/concept.md``) become
@@ -108,7 +108,7 @@ def build_graph(backend: object) -> dict:
                 "title": ", ".join(str(t) for t in tags),  # tooltip <- tags
                 "folder": folder,
                 "depth": depth,
-                "kind": "planet" if depth <= 2 else "moon",
+                "kind": "moon",
                 "trust_tier": tier,
                 "stale": stale,
             }
@@ -131,7 +131,7 @@ def build_graph(backend: object) -> dict:
                 "name": entry["name"],
                 "parent": parent,
                 "depth": depth,
-                "kind": "galaxy" if depth == 1 else "system",
+                "kind": "star" if depth == 1 else "planet",
             }
         )
     return {"nodes": nodes, "folders": folder_nodes, "edges": edges}

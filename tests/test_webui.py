@@ -1238,7 +1238,7 @@ def test_graph_endpoint(env):
     alpha = nodes["/concepts/alpha"]
     assert alpha["folder"] == "/concepts"
     assert alpha["depth"] == 1
-    assert alpha["kind"] == "planet"
+    assert alpha["kind"] == "moon"
     assert alpha["trust_tier"] == "human-reviewed"
     assert alpha["stale"] is False
 
@@ -1249,10 +1249,10 @@ def test_graph_endpoint(env):
     root_doc = nodes["/user-alice"]
     assert root_doc["folder"] == "/"
     assert root_doc["depth"] == 0
-    assert root_doc["kind"] == "planet"
+    assert root_doc["kind"] == "moon"
 
     assert data["folders"] == [
-        {"id": "/concepts", "name": "concepts", "parent": "/", "depth": 1, "kind": "galaxy"}
+        {"id": "/concepts", "name": "concepts", "parent": "/", "depth": 1, "kind": "star"}
     ]
 
     edges = {(e["from"], e["to"]) for e in data["edges"]}
@@ -1274,9 +1274,11 @@ def test_graph_pages_use_vendored_3d_stack(env):
     assert "/static/graph3d.js" in graph_page.text
     assert "vis-network" not in graph_page.text
     assert "cdn.jsdelivr.net/npm/vis-network" not in graph_page.text
-    # structural toggles instead of type filters (0.9.1)
-    for toggle in ("galaxies", "systems", "planets", "moons"):
+    # structural toggles instead of type filters (0.9.1); star/planet/moon vocabulary (0.17.0)
+    for toggle in ("stars", "planets", "moons"):
         assert f'id="graph-show-{toggle}"' in graph_page.text
+    assert 'id="graph-show-galaxies"' not in graph_page.text
+    assert 'id="graph-show-systems"' not in graph_page.text
     assert "graph-type-filters" not in graph_page.text
     assert 'id="graph-search"' in graph_page.text  # search-to-fly (0.10.0)
     assert 'id="graph-zoom"' not in graph_page.text  # zoom select removed (0.10.2)
@@ -1288,7 +1290,7 @@ def test_graph_pages_use_vendored_3d_stack(env):
     assert "vis-network" not in trace_page.text
 
 
-def test_graph_endpoint_systems_and_moons(env):
+def test_graph_endpoint_deep_hierarchy(env):
     client, backends, data_root = env
     user = make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
@@ -1320,30 +1322,30 @@ def test_graph_endpoint_systems_and_moons(env):
         "name": "concepts",
         "parent": "/",
         "depth": 1,
-        "kind": "galaxy",
+        "kind": "star",
     }
-    assert folders["/a"] == {"id": "/a", "name": "a", "parent": "/", "depth": 1, "kind": "galaxy"}
+    assert folders["/a"] == {"id": "/a", "name": "a", "parent": "/", "depth": 1, "kind": "star"}
     assert folders["/a/b"] == {
         "id": "/a/b",
         "name": "b",
         "parent": "/a",
         "depth": 2,
-        "kind": "system",
+        "kind": "planet",
     }
     assert folders["/a/b/c"] == {
         "id": "/a/b/c",
         "name": "c",
         "parent": "/a/b",
         "depth": 3,
-        "kind": "system",
+        "kind": "planet",
     }
-    # arbitrary folder depth is emitted, not just depth 3
+    # arbitrary folder depth is emitted, not just depth 3: any deeper folder is a planet
     assert folders["/a/b/c/d"] == {
         "id": "/a/b/c/d",
         "name": "d",
         "parent": "/a/b/c",
         "depth": 4,
-        "kind": "system",
+        "kind": "planet",
     }
 
     nodes = {node["id"]: node for node in data["nodes"]}

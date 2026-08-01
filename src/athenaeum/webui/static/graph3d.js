@@ -2,11 +2,10 @@
   "use strict";
 
   var CONFIG = {
-    starScalePlanet: 7,
+    starScaleBase: 5,
     starScalePerDegree: 1.2,
-    starScaleMoon: 3.5,
-    labelGalaxyHeight: 9,
-    labelSystemHeight: 5,
+    labelStarHeight: 9,
+    labelPlanetHeight: 5,
     bloomStrength: 0.7,
     bloomRadius: 0.4,
     bloomThreshold: 0.3,
@@ -23,15 +22,17 @@
     dimLinkAlpha: 0.05,
     linkEdgeAlpha: 0.35,
     linkEdgeColor: "#5a6a8a",
-    galaxyColor: "#e8b45a",
-    systemColor: "#b8a37a",
+    starColor: "#e8b45a",
+    planetColor: "#b8a37a",
     particlesPerLink: 2,
     particleSpeed: 0.005,
     particleWidth: 1.1,
     orbitRadiusMin: 18,
-    orbitRadiusMinGalaxy: 90,
+    orbitRadiusMinStar: 90,
     orbitSlotArc: 16,
     rogueRingOffset: 30,
+    ringGap: 8,
+    maxChildRingFraction: 0.75,
     warmupTicks: 0,
     cooldownTime: 300,
     fitMs: 1000,
@@ -106,7 +107,7 @@
         kind: f.kind,
         isFolder: true,
         depth: f.depth,
-        baseColor: f.kind === "galaxy" ? CONFIG.galaxyColor : CONFIG.systemColor
+        baseColor: f.kind === "star" ? CONFIG.starColor : CONFIG.planetColor
       });
     });
 
@@ -128,7 +129,7 @@
     });
 
     apiFolders.forEach(function (f) {
-      if (f.kind === "system" && folderIds[f.parent]) {
+      if (f.kind === "planet" && folderIds[f.parent]) {
         links.push({ source: f.id, target: f.parent, linkType: "containment" });
       }
     });
@@ -164,8 +165,11 @@
   // shared ecliptic plane (y = 0): folders orbit their parent folder,
   // depth-1 folders orbit the virtual universe center, root-level documents
   // sit on one outer "rogue" ring. Wikilinked siblings are ordered into
-  // adjacent slots. Mutates nodes in place (x/y/z and fx/fy/fz) and returns
-  // the universe.
+  // adjacent slots. Ring radii come from a recursive two-pass radius budget
+  // (pass 1: bottom-up subtree extents and ring radii; pass 2: top-down
+  // placement), so a child subtree always stays inside its parent's orbit
+  // budget and any two bodies are at least CONFIG.ringGap apart. Mutates
+  // nodes in place (x/y/z and fx/fy/fz) and returns the universe.
   function computeOrbitLayout(universe) {
     var nodes = (universe && universe.nodes) || [];
     var links = (universe && universe.links) || [];
@@ -192,14 +196,14 @@
     // (documents are always leaves). Depth-1 folders and root-level
     // documents are collected separately (center rings).
     var childrenOf = {};
-    var galaxyIds = [];
+    var starIds = [];
     var rogueIds = [];
     nodes.forEach(function (n) {
       var parent;
       if (n.isFolder) {
         parent = parentFolder(n.id);
         if (parent === "/" || !byId[parent]) {
-          galaxyIds.push(n.id);
+          starIds.push(n.id);
           return;
         }
       } else {
@@ -262,18 +266,74 @@
       node.z = node.fz = z;
     }
 
-    // Constant arc length per slot: the radius grows deterministically with
-    // the child count, so slots never crowd.
-    function ringRadius(m, minRadius) {
-      return Math.max(minRadius, (CONFIG.orbitSlotArc * m) / (2 * Math.PI));
+    // Pass 1 — bottom-up ring radii and subtree extents. extent(F) is the
+    // max distance from folder F's center to any body in F's subtree
+    // (documents have extent 0); ringR(F) is the radius of F's child ring.
+    // Children are processed before parents (depth descending). The radius
+    // is the max of four budgets:
+    //   rArc     — constant arc length per slot (slots never crowd);
+    //   rSibling — worst-case adjacent-sibling chord 2*r*sin(PI/m) fits both
+    //              subtree discs plus ringGap (sibling separation);
+    //   rInner   — a child subtree never reaches the parent center and stays
+    //              under maxChildRingFraction of its orbit radius;
+    //   orbitRadiusMin — absolute floor.
+    var ringR = {};
+    var extent = {};
+    var folderNodes = nodes.filter(function (n) {
+      return n.isFolder;
+    });
+    folderNodes.sort(function (a, b) {
+      return (b.depth || 0) - (a.depth || 0);
+    });
+    folderNodes.forEach(function (p) {
+      var childIds = childrenOf[p.id] || [];
+      var m = childIds.length;
+      if (!m) {
+        ringR[p.id] = 0;
+        extent[p.id] = 0;
+        return;
+      }
+      var eMax = 0;
+      childIds.forEach(function (cid) {
+        var c = byId[cid];
+        if (c && c.isFolder) eMax = Math.max(eMax, extent[cid] || 0);
+      });
+      var rArc = (CONFIG.orbitSlotArc * m) / (2 * Math.PI);
+      var rSibling = m >= 2 ? (2 * eMax + CONFIG.ringGap) / (2 * Math.sin(Math.PI / m)) : 0;
+      var rInner =
+        eMax > 0 ? Math.max(eMax + CONFIG.ringGap, eMax / CONFIG.maxChildRingFraction) : 0;
+      ringR[p.id] = Math.max(CONFIG.orbitRadiusMin, rArc, rSibling, rInner);
+      extent[p.id] = ringR[p.id] + eMax;
+    });
+
+    // Virtual universe center (not a node): children are the depth-1
+    // folders (stars), floor radius orbitRadiusMinStar, same budget rules.
+    var centerEMax = 0;
+    starIds.forEach(function (id) {
+      centerEMax = Math.max(centerEMax, extent[id] || 0);
+    });
+    var centerR = 0;
+    var centerExtent = 0;
+    var cm = starIds.length;
+    if (cm) {
+      var cArc = (CONFIG.orbitSlotArc * cm) / (2 * Math.PI);
+      var cSibling =
+        cm >= 2 ? (2 * centerEMax + CONFIG.ringGap) / (2 * Math.sin(Math.PI / cm)) : 0;
+      var cInner =
+        centerEMax > 0
+          ? Math.max(centerEMax + CONFIG.ringGap, centerEMax / CONFIG.maxChildRingFraction)
+          : 0;
+      centerR = Math.max(CONFIG.orbitRadiusMinStar, cArc, cSibling, cInner);
+      centerExtent = centerR + centerEMax;
     }
 
-    // Place the children of one parent on a ring around it, then recurse
-    // into folder children. Returns the ring radius.
-    function placeRing(parentId, px, pz, childIds, minRadius) {
+    // Pass 2 — top-down placement. The radius is precomputed (center ring
+    // for parentId == null); order siblings, apply the hash phase, pin each
+    // child, recurse into folder children. Returns the ring radius.
+    function placeRing(parentId, px, pz, childIds) {
       var ordered = orderSiblings(childIds);
       var m = ordered.length;
-      var r = ringRadius(m, minRadius);
+      var r = parentId ? ringR[parentId] || 0 : centerR;
       if (!m) return r;
       // Stable, id-dependent ring phase; the virtual center uses phi = 0.
       var phi = parentId ? (hash(parentId) % 6283) / 1000 : 0;
@@ -285,20 +345,25 @@
         var z = pz + r * Math.sin(theta);
         pin(node, x, z);
         if (node.isFolder) {
-          placeRing(node.id, x, z, childrenOf[node.id] || [], CONFIG.orbitRadiusMin);
+          placeRing(node.id, x, z, childrenOf[node.id] || []);
         }
       });
       return r;
     }
 
-    // Galaxy ring: depth-1 folders around the virtual center at the origin.
-    var galaxyR = placeRing(null, 0, 0, galaxyIds, CONFIG.orbitRadiusMinGalaxy);
+    // Star ring: depth-1 folders around the virtual center at the origin.
+    placeRing(null, 0, 0, starIds);
 
-    // Rogue ring: root-level documents on one ring outside the galaxy ring.
+    // Rogue ring: root-level documents on one ring outside the largest
+    // star subtree (centerExtent covers the full extent of every star, not
+    // just the star ring radius; rogueRingOffset > ringGap).
     var rogueOrdered = orderSiblings(rogueIds);
     var rm = rogueOrdered.length;
     if (rm) {
-      var rogueR = Math.max(galaxyR + CONFIG.rogueRingOffset, ringRadius(rm, 0));
+      var rogueR = Math.max(
+        centerExtent + CONFIG.rogueRingOffset,
+        (CONFIG.orbitSlotArc * rm) / (2 * Math.PI)
+      );
       rogueOrdered.forEach(function (id, i) {
         var theta = (2 * Math.PI * i) / rm;
         pin(byId[id], rogueR * Math.cos(theta), rogueR * Math.sin(theta));
@@ -390,7 +455,7 @@
       universe: universe,
       selectedId: null,
       keepSet: null,
-      filters: { showGalaxies: true, showSystems: true, showPlanets: true, showMoons: true },
+      filters: { showStars: true, showPlanets: true, showMoons: true },
       navigate: opts.navigate !== false,
       interactive: opts.interactive !== false,
       autoRotate: opts.autoRotate !== false,
@@ -415,9 +480,8 @@
     }
 
     function nodeScaleOf(node) {
-      var base;
-      if (node.kind === "moon") base = CONFIG.starScaleMoon;
-      else base = CONFIG.starScalePlanet + (node.degree || 0) * CONFIG.starScalePerDegree;
+      // All documents are moons; size scales uniformly with link degree.
+      var base = CONFIG.starScaleBase + (node.degree || 0) * CONFIG.starScalePerDegree;
       var st = node.__style;
       if (st && st.scale) base *= st.scale;
       return base;
@@ -460,8 +524,8 @@
       var obj;
       if (node.isFolder) {
         obj = new SpriteText(node.label);
-        obj.color = node.kind === "galaxy" ? CONFIG.galaxyColor : CONFIG.systemColor;
-        obj.textHeight = node.kind === "galaxy" ? CONFIG.labelGalaxyHeight : CONFIG.labelSystemHeight;
+        obj.color = node.kind === "star" ? CONFIG.starColor : CONFIG.planetColor;
+        obj.textHeight = node.kind === "star" ? CONFIG.labelStarHeight : CONFIG.labelPlanetHeight;
         if (obj.material) obj.material.depthWrite = false;
       } else {
         obj = new THREE.Sprite(
@@ -501,11 +565,11 @@
       var f = state.filters;
       var nodes = state.universe.nodes.filter(function (n) {
         if (n.isFolder) {
-          if (n.kind === "galaxy") return f.showGalaxies;
-          return f.showSystems;
+          if (n.kind === "star") return f.showStars;
+          return f.showPlanets;
         }
-        if (n.kind === "moon") return f.showMoons;
-        return f.showPlanets;
+        // every document is a moon
+        return f.showMoons;
       });
       var keep = {};
       nodes.forEach(function (n) {
@@ -751,12 +815,8 @@
           return n.isFolder;
         });
       },
-      setShowGalaxies: function (v) {
-        state.filters.showGalaxies = !!v;
-        applyFilters();
-      },
-      setShowSystems: function (v) {
-        state.filters.showSystems = !!v;
+      setShowStars: function (v) {
+        state.filters.showStars = !!v;
         applyFilters();
       },
       setShowPlanets: function (v) {
