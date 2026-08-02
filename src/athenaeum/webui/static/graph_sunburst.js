@@ -652,16 +652,15 @@
       }
 
       // Root-document ring: same visibility as the top-level dividers so the
-      // center circle reads as a structural element, not decoration. It
-      // lights up when a root document is hovered/selected.
-      if (layout.rootCount > 0) {
-        var rootHot = active >= 0 && nodesIn[active].cluster === "root";
-        ctx.strokeStyle = rootHot ? "rgba(255,255,255,0.45)" : CONFIG.dividerColor;
-        ctx.lineWidth = CONFIG.lineWidthPx * px;
-        ctx.beginPath();
-        ctx.arc(0, 0, CONFIG.centerRingR, 0, Math.PI * 2);
-        ctx.stroke();
-      }
+      // center circle reads as a structural element, not decoration. Always
+      // drawn — the center boundary stays visible even with zero root
+      // documents. It lights up when a root document is hovered/selected.
+      var rootHot = active >= 0 && nodesIn[active].cluster === "root";
+      ctx.strokeStyle = rootHot ? "rgba(255,255,255,0.45)" : CONFIG.dividerColor;
+      ctx.lineWidth = CONFIG.lineWidthPx * px;
+      ctx.beginPath();
+      ctx.arc(0, 0, CONFIG.centerRingR, 0, Math.PI * 2);
+      ctx.stroke();
 
       // Radial sector dividers + subfolder sub-dividers. Dividers start
       // OUTSIDE the root ring (plus a small margin) and never cross it.

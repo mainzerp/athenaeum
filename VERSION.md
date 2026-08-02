@@ -49,6 +49,9 @@ rerank pass (inspired by github.com/tobi/qmd).
 - No new MCP tool: name, parameters, 10-tool count, result shape, and the
   unconfigured-error contract are unchanged. Curate duplicate detection and
   related-concept injection stay pure-semantic.
+- Fix (graph): the sunburst root ring is now drawn even when the library has
+  no root-level documents (previously the center boundary was only rendered
+  with `rootCount > 0`, leaving the sector dividers visually unanchored).
 
 ### 0.18.0
 
