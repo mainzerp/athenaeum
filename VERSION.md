@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.17.0**
+Current version: **0.18.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,60 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.18.0
+
+Sunburst library view: the orbit/universe graph is fully replaced by a 2D
+sunburst (user decision; the 0.16.x–0.17.x orbit lineage and the particle
+nebula intermediate step are both gone).
+
+- `/library/graph` is a pure 2D `<canvas>` view (no WebGL on the page;
+  the vendored ForceGraph3D stack now serves trace replay only): root-level
+  documents fill a ring disc around a glowing center anchor, top-level
+  folders dock outward as sectors (angle proportional to file count), every
+  file is exactly one dot, and the radial position encodes sqrt-scaled link
+  density — the only metric, served by the new
+  `GET /api/graph/universe` endpoint (flat payload: clusters, nodes with
+  normalized radius, edges).
+- Files directly in a top-level folder fill an (undrawn) folder circle at
+  the sector bisector; subfolders nest hierarchically — every folder
+  subdivides its parent's angular span (direct files by count, child
+  folders by recursive total). Each folder gets a cluster-colored bracket
+  arc on its own level ring plus a curved name label that stands on the
+  line; hovering/selecting a dot lights its entire folder path (brackets,
+  folder and sector labels).
+- Document links render as subtle center-bowed arcs; clicking a dot zooms
+  in with an edge/neighbor highlight and tooltip (second click opens the
+  document), sectors and folder circles zoom on click, Esc/Fit view resets,
+  `?folder=`/`?focus=` deep links and the minimap (with viewport rectangle)
+  work throughout.
+- Removed: `computeOrbitLayout`, `computeFolderBodySizes`, the orbit
+  CONFIG, the particle nebula (`graph_particles.js`,
+  `graph_viewstate.js`), legacy graph controls (Stars/Planets/Moons,
+  search, trust legend). Trace replay keeps working on the live force
+  layout (`mount`/`buildUniverse` signatures unchanged).
+- Demo seed: 80 concepts across 6 clusters with deterministic cross-links
+  (hubs up to degree 26, isolates) and a 320-day `generated.at` spread so
+  both metric candidates produce visible radial structure.
+
+### 0.17.1
+
+Folder bodies for the 3D relations universe.
+
+- Folder nodes now render as real bodies instead of bare labels: a star is a
+  large additive glow sprite, a planet is a matte lit sphere mesh
+  (`MeshLambertMaterial`). The SpriteText label sits offset above the body
+  inside a shared `THREE.Group`, so hover tooltips, click-to-focus, and the
+  Stars/Planets/Moons toggles work on the whole node.
+- Body sizes are derived deterministically from the loaded universe via the
+  new `computeFolderBodySizes` helper (graph3d.js): planet diameter =
+  max moon scale + `folderBodyPlanetGap`, star diameter = planet diameter ×
+  `folderBodyStarRatio` (with absolute minimums). The invariant
+  star > planet > max moon scale holds for any universe, including one with
+  zero moons.
+- Folder bodies now honor `__style.color` (tint) and `__style.alpha`
+  (dim) in trace replay; folder `__style.scale` is intentionally ignored —
+  scaling a folder body would break the size invariant.
 
 ### 0.17.0
 

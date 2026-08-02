@@ -1260,7 +1260,7 @@ def test_graph_endpoint(env):
     assert all("arrows" not in e for e in data["edges"])  # vis vocabulary dropped
 
 
-def test_graph_pages_use_vendored_3d_stack(env):
+def test_graph_pages_script_stack(env):
     client, backends, data_root = env
     user = make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
@@ -1270,17 +1270,26 @@ def test_graph_pages_use_vendored_3d_stack(env):
 
     graph_page = client.get("/library/graph")
     assert graph_page.status_code == 200
-    assert "/static/vendor/graph3d-vendor.min.js" in graph_page.text
-    assert "/static/graph3d.js" in graph_page.text
+    # sunburst-only graph page (SUNBURST-ONLY rework): pure 2D canvas, no
+    # vendored 3D stack — ForceGraph3D stays on the trace pages only
+    assert "/static/graph_sunburst.js" in graph_page.text
+    assert "/static/minimap.js" in graph_page.text
+    assert "/static/vendor/graph3d-vendor.min.js" not in graph_page.text
+    assert "/static/graph3d.js" not in graph_page.text
+    assert "/static/graph_particles.js" not in graph_page.text
+    assert "/static/graph_viewstate.js" not in graph_page.text
     assert "vis-network" not in graph_page.text
     assert "cdn.jsdelivr.net/npm/vis-network" not in graph_page.text
-    # structural toggles instead of type filters (0.9.1); star/planet/moon vocabulary (0.17.0)
-    for toggle in ("stars", "planets", "moons"):
-        assert f'id="graph-show-{toggle}"' in graph_page.text
-    assert 'id="graph-show-galaxies"' not in graph_page.text
-    assert 'id="graph-show-systems"' not in graph_page.text
+    # link_density is fixed (no metric select), the nebula/sunburst mode
+    # toggle is gone; Fit view (zoom reset) remains
+    assert 'id="graph-metric"' not in graph_page.text
+    assert 'id="graph-mode-nebula"' not in graph_page.text
+    assert 'id="graph-mode-sunburst"' not in graph_page.text
+    assert 'id="graph-fit"' in graph_page.text
+    assert 'id="graph-search"' not in graph_page.text
+    for toggle in ("stars", "planets", "moons", "galaxies", "systems"):
+        assert f'id="graph-show-{toggle}"' not in graph_page.text
     assert "graph-type-filters" not in graph_page.text
-    assert 'id="graph-search"' in graph_page.text  # search-to-fly (0.10.0)
     assert 'id="graph-zoom"' not in graph_page.text  # zoom select removed (0.10.2)
 
     trace_page = client.get("/library/traces/t1")
@@ -1384,6 +1393,154 @@ def test_graph_walk_depth_bounded(env, monkeypatch):
         {"/a/b/c/deep.md": {"frontmatter": {"title": "Deep"}, "body": "body\n"}}
     )
     assert client.get("/api/graph").status_code == 200
+
+
+def _universe_docs():
+    return {
+        "/atlas/one.md": {
+            "frontmatter": {
+                "title": "One",
+                "type": "Concept",
+                "generated": {"at": "2026-07-01T00:00:00+00:00"},
+            },
+            "body": "See [Two](/atlas/two.md).\n",
+        },
+        "/atlas/two.md": {
+            "frontmatter": {
+                "title": "Two",
+                "type": "Concept",
+                "generated": {"at": "2026-07-30T10:12:00+00:00"},
+            },
+            "body": "Two body.\n",
+        },
+        "/helix/three.md": {
+            "frontmatter": {"title": "Three", "type": "Concept"},  # no generated -> oldest
+            "body": "Three body.\n",
+        },
+        "/root-doc.md": {
+            "frontmatter": {"title": "Root Doc", "type": "Note", "generated": {"at": "2026-07-15"}},
+            "body": "Root body.\n",
+        },
+    }
+
+
+def test_graph_universe_endpoint(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(_universe_docs())
+
+    for metric in ("recency", "link_density"):
+        response = client.get("/api/graph/universe", params={"metric": metric})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["metric"] == metric
+        counts = {c["id"]: c["count"] for c in data["clusters"]}
+        assert counts == {"atlas": 2, "helix": 1, "root": 1}
+        for node in data["nodes"]:
+            for key in (
+                "id",
+                "label",
+                "cluster",
+                "parent_folder",
+                "radius",
+                "size",
+                "metric_value",
+                "trust_tier",
+                "stale",
+            ):
+                assert key in node
+            assert 0.0 <= node["radius"] <= 1.0
+            assert node["size"] > 0
+        nodes = {n["id"]: n for n in data["nodes"]}
+        assert nodes["/atlas/one"]["cluster"] == "atlas"  # first path segment
+        assert nodes["/atlas/one"]["parent_folder"] == "/atlas"
+        assert nodes["/root-doc"]["cluster"] == "root"
+        assert nodes["/root-doc"]["parent_folder"] == "/"
+
+    # recency: newest doc at radius 1, missing timestamp treated as oldest
+    data = client.get("/api/graph/universe", params={"metric": "recency"}).json()
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert nodes["/atlas/two"]["radius"] == 1.0
+    assert nodes["/atlas/two"]["metric_value"] == "2026-07-30T10:12:00+00:00"
+    assert nodes["/helix/three"]["radius"] == 0.0
+    assert nodes["/helix/three"]["metric_value"] is None
+
+    # link_density: the linked pair scores highest, unlinked docs lowest
+    data = client.get("/api/graph/universe", params={"metric": "link_density"}).json()
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert nodes["/atlas/one"]["metric_value"] == 1  # out-degree
+    assert nodes["/atlas/two"]["metric_value"] == 1  # in-degree
+    assert nodes["/helix/three"]["metric_value"] == 0
+    assert nodes["/atlas/one"]["radius"] == 1.0
+    assert nodes["/helix/three"]["radius"] == 0.0
+
+    # edges: document-to-document links (same extraction as /api/graph),
+    # every endpoint a node id, deterministic order
+    node_ids = set(nodes)
+    assert data["edges"] == [{"source": "/atlas/one", "target": "/atlas/two"}]
+    assert all(e["source"] in node_ids and e["target"] in node_ids for e in data["edges"])
+
+
+def test_graph_universe_link_density_sqrt_scale(env):
+    """sqrt scaling before normalization spreads the skewed degree distribution."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    # hub links to four targets (degree 4), each target has in-degree 1,
+    # the isolate has degree 0 -> sqrt values 2 / 1 / 0 -> radii 1 / 0.5 / 0
+    # (raw min-max would put the targets at 0.25).
+    docs = {
+        "/atlas/hub.md": {
+            "frontmatter": {"title": "Hub"},
+            "body": "".join(f"[T{i}](/atlas/t{i}.md)\n" for i in range(4)),
+        },
+        "/atlas/isolate.md": {"frontmatter": {"title": "Isolate"}, "body": "No links.\n"},
+    }
+    for i in range(4):
+        docs[f"/atlas/t{i}.md"] = {"frontmatter": {"title": f"T{i}"}, "body": f"Target {i}.\n"}
+    backends[user["id"]] = FakeBackend(docs)
+
+    data = client.get("/api/graph/universe", params={"metric": "link_density"}).json()
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert nodes["/atlas/hub"]["metric_value"] == 4
+    assert nodes["/atlas/hub"]["radius"] == 1.0
+    for i in range(4):
+        assert nodes[f"/atlas/t{i}"]["metric_value"] == 1
+        assert nodes[f"/atlas/t{i}"]["radius"] == 0.5  # sqrt(1)/sqrt(4), not 1/4
+    assert nodes["/atlas/isolate"]["radius"] == 0.0
+    edges = {(e["source"], e["target"]) for e in data["edges"]}
+    assert edges == {("/atlas/hub", f"/atlas/t{i}") for i in range(4)}
+
+
+def test_graph_universe_metric_param(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    # default metric is link_density (the graph page always uses it)
+    response = client.get("/api/graph/universe")
+    assert response.status_code == 200
+    assert response.json()["metric"] == "link_density"
+
+    # explicit recency echoes in the payload
+    response = client.get("/api/graph/universe", params={"metric": "recency"})
+    assert response.status_code == 200
+    assert response.json()["metric"] == "recency"
+
+    # unknown metric is a clear 400
+    response = client.get("/api/graph/universe", params={"metric": "bogus"})
+    assert response.status_code == 400
+    assert "bogus" in response.json()["detail"]
+
+
+def test_graph_universe_requires_login(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+
+    response = client.get("/api/graph/universe")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
 
 
 # --- traces / activity (phase 4) -----------------------------------------------

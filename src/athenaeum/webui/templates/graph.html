@@ -3,19 +3,9 @@
 {% block content %}
 <div class="page-header">
   <h1>Relations graph</h1>
-  <p class="subtitle">The library universe: stars and planets are folders, moons are documents.</p>
-</div>
-<div class="badges mb-4">
-  <span class="badge badge-neutral"><span class="status-dot" style="background: #27ae60;"></span>human-reviewed</span>
-  <span class="badge badge-neutral"><span class="status-dot" style="background: #2980b9;"></span>machine-confirmed</span>
-  <span class="badge badge-neutral"><span class="status-dot" style="background: #95a5a6;"></span>unverified</span>
-  <span class="badge badge-neutral"><span class="status-dot" style="background: #e67e22;"></span>stale</span>
+  <p class="subtitle">Each document is one dot; top-level folders dock as sectors around the library root. Distance from the center follows link density, thin arcs are document links.</p>
 </div>
 <div class="graph-controls mb-4" id="graph-controls">
-  <input type="search" id="graph-search" class="input-field" placeholder="Find a moon..." aria-label="Find a moon">
-  <label class="checkbox-row"><input type="checkbox" id="graph-show-stars" checked> Stars</label>
-  <label class="checkbox-row"><input type="checkbox" id="graph-show-planets" checked> Planets</label>
-  <label class="checkbox-row"><input type="checkbox" id="graph-show-moons" checked> Moons</label>
   <button type="button" id="graph-fit" class="btn btn-secondary btn-sm">Fit view</button>
 </div>
 <div class="card">
@@ -23,58 +13,46 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/vendor/graph3d-vendor.min.js"></script>
-<script src="/static/graph3d.js"></script>
+<script src="/static/graph_sunburst.js"></script>
+<script src="/static/minimap.js"></script>
 <script>
-  fetch("/api/graph")
+  // Sunburst-only graph view: root documents circle the center anchor, each
+  // top-level folder is a sector of single document dots, payload edges are
+  // thin arcs. Click zooms (dot / sector / center), Esc or Fit view returns
+  // to the overview; the minimap mirrors the scene and the viewport.
+  var params = new URLSearchParams(window.location.search);
+  var graphEl = document.getElementById("graph");
+  var sunburst = null;
+  var minimap = null;
+  fetch("/api/graph/universe?metric=link_density")
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      var universe = Graph3D.buildUniverse(data);
-      var ctrl = Graph3D.mount(document.getElementById("graph"), universe, {});
-      if (!ctrl) {
-        document.getElementById("graph-controls").classList.add("hidden");
-        return;
-      }
-
-      var params = new URLSearchParams(window.location.search);
+      sunburst = GraphSunburst.mount(graphEl, data, {
+        onViewChange: function () {
+          if (minimap) minimap.update();
+        }
+      });
+      if (!sunburst) return;
+      minimap = GraphMinimap.mount(graphEl, {
+        getScene: sunburst.getScene,
+        getViewport: sunburst.getViewport,
+        onSectorClick: function (id) { sunburst.zoomToSector(id, true); },
+        onOverviewClick: function () { sunburst.resetView(true); }
+      });
+      // ?focus= / ?folder= deep links: focus zooms onto the document dot,
+      // folder zooms to the top-level sector of that folder path (deeper
+      // sub-folders are sub-groups inside their top-level sector).
       var focusId = params.get("focus");
       var folderPath = params.get("folder");
-      if (focusId || folderPath) {
-        var poll = setInterval(function () {
-          if (!ctrl.state.engineSettled) return;
-          clearInterval(poll);
-          if (focusId) {
-            var node = ctrl.nodeById(focusId);
-            if (node) {
-              ctrl.selectNode(node.id);
-              ctrl.flyToNode(node);
-            }
-          } else if (folderPath) {
-            ctrl.focusFolder(folderPath);
-          }
-        }, 300);
+      if (focusId) {
+        sunburst.focusNode(focusId, false);
+      } else if (folderPath) {
+        var clusterId = folderPath.replace(/^\/+|\/+$/g, "").split("/")[0];
+        if (clusterId) sunburst.zoomToSector(clusterId, false);
       }
-
-      document.getElementById("graph-show-stars").addEventListener("change", function (e) {
-        ctrl.setShowStars(e.target.checked);
-      });
-      document.getElementById("graph-show-planets").addEventListener("change", function (e) {
-        ctrl.setShowPlanets(e.target.checked);
-      });
-      document.getElementById("graph-show-moons").addEventListener("change", function (e) {
-        ctrl.setShowMoons(e.target.checked);
-      });
-      var searchInput = document.getElementById("graph-search");
-      searchInput.addEventListener("change", function () {
-        ctrl.searchFly(searchInput.value);
-      });
-      searchInput.addEventListener("keydown", function (e) {
-        if (e.key === "Enter") ctrl.searchFly(searchInput.value);
-      });
-      document.getElementById("graph-fit").addEventListener("click", function () {
-        ctrl.clearSelection();
-        ctrl.fitAll();
-      });
     });
+  document.getElementById("graph-fit").addEventListener("click", function () {
+    if (sunburst) sunburst.resetView(true);
+  });
 </script>
 {% endblock %}

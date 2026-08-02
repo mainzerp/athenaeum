@@ -1,5 +1,6 @@
 # Runtime data (single persistence root)
 data/
+.tmp_demo_data/
 
 # Python
 __pycache__/

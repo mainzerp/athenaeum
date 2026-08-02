@@ -6,6 +6,11 @@
     starScalePerDegree: 1.2,
     labelStarHeight: 9,
     labelPlanetHeight: 5,
+    // Fixed folder body sizes; star > planet holds by construction.
+    folderBodyPlanetSize: 14,
+    folderBodyStarSize: 22,
+    planetSphereSegments: 32,
+    labelBodyGap: 3,
     bloomStrength: 0.7,
     bloomRadius: 0.4,
     bloomThreshold: 0.3,
@@ -27,18 +32,12 @@
     particlesPerLink: 2,
     particleSpeed: 0.005,
     particleWidth: 1.1,
-    orbitRadiusMin: 18,
-    orbitRadiusMinStar: 90,
-    orbitSlotArc: 16,
-    rogueRingOffset: 30,
-    ringGap: 8,
-    maxChildRingFraction: 0.75,
-    warmupTicks: 0,
-    cooldownTime: 300,
+    // Live d3 force layout (detail/trace pages): pre-spread nodes with warmup
+    // ticks, then let the engine run the library-default duration.
+    warmupTicks: 100,
+    cooldownTime: 15000,
     fitMs: 1000,
-    focusMs: 800,
-    flyMs: 1200,
-    flyOffset: { x: 30, y: 20, z: 30 }
+    focusMs: 800
   };
 
   function endId(end) {
@@ -143,13 +142,12 @@
       links.push({ source: e.from, target: e.to, linkType: "link" });
     });
 
-    var universe = { nodes: nodes, links: links };
-    computeOrbitLayout(universe);
-    return universe;
+    return { nodes: nodes, links: links };
   }
 
   // FNV-1a 32-bit hash of a node id as an unsigned number. Stable across
-  // reloads, so orbit slot angles never reshuffle for an unchanged library.
+  // reloads (deterministic placement); graph_sunburst.js keeps an identical
+  // local copy — the graph page no longer loads this module.
   function hash(id) {
     var h = 0x811c9dc5;
     var s = String(id);
@@ -158,225 +156,6 @@
       h = Math.imul(h, 0x01000193);
     }
     return h >>> 0;
-  }
-
-  // Deterministic orbit layout (pure function of the full node/link set;
-  // no Math.random, no time input). Every body is pinned to a ring in the
-  // shared ecliptic plane (y = 0): folders orbit their parent folder,
-  // depth-1 folders orbit the virtual universe center, root-level documents
-  // sit on one outer "rogue" ring. Wikilinked siblings are ordered into
-  // adjacent slots. Ring radii come from a recursive two-pass radius budget
-  // (pass 1: bottom-up subtree extents and ring radii; pass 2: top-down
-  // placement), so a child subtree always stays inside its parent's orbit
-  // budget and any two bodies are at least CONFIG.ringGap apart. Mutates
-  // nodes in place (x/y/z and fx/fy/fz) and returns the universe.
-  function computeOrbitLayout(universe) {
-    var nodes = (universe && universe.nodes) || [];
-    var links = (universe && universe.links) || [];
-
-    var byId = {};
-    nodes.forEach(function (n) {
-      byId[n.id] = n;
-    });
-
-    // Undirected wikilink adjacency (link edges only) for sibling ordering.
-    var adjacency = {};
-    links.forEach(function (l) {
-      if (l.linkType !== "link") return;
-      var s = endId(l.source);
-      var t = endId(l.target);
-      if (!adjacency[s]) adjacency[s] = {};
-      adjacency[s][t] = true;
-      if (!adjacency[t]) adjacency[t] = {};
-      adjacency[t][s] = true;
-    });
-
-    // Children per parent folder. Folder nodes parent to their parent
-    // folder, documents to their own folder; only folders act as parents
-    // (documents are always leaves). Depth-1 folders and root-level
-    // documents are collected separately (center rings).
-    var childrenOf = {};
-    var starIds = [];
-    var rogueIds = [];
-    nodes.forEach(function (n) {
-      var parent;
-      if (n.isFolder) {
-        parent = parentFolder(n.id);
-        if (parent === "/" || !byId[parent]) {
-          starIds.push(n.id);
-          return;
-        }
-      } else {
-        parent = n.folder;
-        if (!parent || parent === "/" || !byId[parent]) {
-          rogueIds.push(n.id); // also the defensive fallback for missing folders
-          return;
-        }
-      }
-      if (!childrenOf[parent]) childrenOf[parent] = [];
-      childrenOf[parent].push(n.id);
-    });
-
-    // Order a sibling set so wikilinked siblings occupy adjacent slots:
-    // connected components under the link adjacency (sibling edges only),
-    // components ordered by smallest member hash, members by hash.
-    function orderSiblings(ids) {
-      var siblingSet = {};
-      ids.forEach(function (id) {
-        siblingSet[id] = true;
-      });
-      var seen = {};
-      var components = [];
-      ids.forEach(function (id) {
-        if (seen[id]) return;
-        var component = [];
-        var queue = [id];
-        seen[id] = true;
-        while (queue.length) {
-          var cur = queue.pop();
-          component.push(cur);
-          var neighbors = adjacency[cur] || {};
-          for (var other in neighbors) {
-            if (siblingSet[other] && !seen[other]) {
-              seen[other] = true;
-              queue.push(other);
-            }
-          }
-        }
-        components.push(component);
-      });
-      components.forEach(function (component) {
-        component.sort(function (a, b) {
-          return hash(a) - hash(b);
-        });
-      });
-      components.sort(function (a, b) {
-        return hash(a[0]) - hash(b[0]);
-      });
-      var out = [];
-      components.forEach(function (component) {
-        out = out.concat(component);
-      });
-      return out;
-    }
-
-    function pin(node, x, z) {
-      node.x = node.fx = x;
-      node.y = node.fy = 0;
-      node.z = node.fz = z;
-    }
-
-    // Pass 1 — bottom-up ring radii and subtree extents. extent(F) is the
-    // max distance from folder F's center to any body in F's subtree
-    // (documents have extent 0); ringR(F) is the radius of F's child ring.
-    // Children are processed before parents (depth descending). The radius
-    // is the max of four budgets:
-    //   rArc     — constant arc length per slot (slots never crowd);
-    //   rSibling — worst-case adjacent-sibling chord 2*r*sin(PI/m) fits both
-    //              subtree discs plus ringGap (sibling separation);
-    //   rInner   — a child subtree never reaches the parent center and stays
-    //              under maxChildRingFraction of its orbit radius;
-    //   orbitRadiusMin — absolute floor.
-    var ringR = {};
-    var extent = {};
-    var folderNodes = nodes.filter(function (n) {
-      return n.isFolder;
-    });
-    folderNodes.sort(function (a, b) {
-      return (b.depth || 0) - (a.depth || 0);
-    });
-    folderNodes.forEach(function (p) {
-      var childIds = childrenOf[p.id] || [];
-      var m = childIds.length;
-      if (!m) {
-        ringR[p.id] = 0;
-        extent[p.id] = 0;
-        return;
-      }
-      var eMax = 0;
-      childIds.forEach(function (cid) {
-        var c = byId[cid];
-        if (c && c.isFolder) eMax = Math.max(eMax, extent[cid] || 0);
-      });
-      var rArc = (CONFIG.orbitSlotArc * m) / (2 * Math.PI);
-      var rSibling = m >= 2 ? (2 * eMax + CONFIG.ringGap) / (2 * Math.sin(Math.PI / m)) : 0;
-      var rInner =
-        eMax > 0 ? Math.max(eMax + CONFIG.ringGap, eMax / CONFIG.maxChildRingFraction) : 0;
-      ringR[p.id] = Math.max(CONFIG.orbitRadiusMin, rArc, rSibling, rInner);
-      extent[p.id] = ringR[p.id] + eMax;
-    });
-
-    // Virtual universe center (not a node): children are the depth-1
-    // folders (stars), floor radius orbitRadiusMinStar, same budget rules.
-    var centerEMax = 0;
-    starIds.forEach(function (id) {
-      centerEMax = Math.max(centerEMax, extent[id] || 0);
-    });
-    var centerR = 0;
-    var centerExtent = 0;
-    var cm = starIds.length;
-    if (cm) {
-      var cArc = (CONFIG.orbitSlotArc * cm) / (2 * Math.PI);
-      var cSibling =
-        cm >= 2 ? (2 * centerEMax + CONFIG.ringGap) / (2 * Math.sin(Math.PI / cm)) : 0;
-      var cInner =
-        centerEMax > 0
-          ? Math.max(centerEMax + CONFIG.ringGap, centerEMax / CONFIG.maxChildRingFraction)
-          : 0;
-      centerR = Math.max(CONFIG.orbitRadiusMinStar, cArc, cSibling, cInner);
-      centerExtent = centerR + centerEMax;
-    }
-
-    // Pass 2 — top-down placement. The radius is precomputed (center ring
-    // for parentId == null); order siblings, apply the hash phase, pin each
-    // child, recurse into folder children. Returns the ring radius.
-    function placeRing(parentId, px, pz, childIds) {
-      var ordered = orderSiblings(childIds);
-      var m = ordered.length;
-      var r = parentId ? ringR[parentId] || 0 : centerR;
-      if (!m) return r;
-      // Stable, id-dependent ring phase; the virtual center uses phi = 0.
-      var phi = parentId ? (hash(parentId) % 6283) / 1000 : 0;
-      ordered.forEach(function (id, i) {
-        var node = byId[id];
-        if (!node) return;
-        var theta = phi + (2 * Math.PI * i) / m;
-        var x = px + r * Math.cos(theta);
-        var z = pz + r * Math.sin(theta);
-        pin(node, x, z);
-        if (node.isFolder) {
-          placeRing(node.id, x, z, childrenOf[node.id] || []);
-        }
-      });
-      return r;
-    }
-
-    // Star ring: depth-1 folders around the virtual center at the origin.
-    placeRing(null, 0, 0, starIds);
-
-    // Rogue ring: root-level documents on one ring outside the largest
-    // star subtree (centerExtent covers the full extent of every star, not
-    // just the star ring radius; rogueRingOffset > ringGap).
-    var rogueOrdered = orderSiblings(rogueIds);
-    var rm = rogueOrdered.length;
-    if (rm) {
-      var rogueR = Math.max(
-        centerExtent + CONFIG.rogueRingOffset,
-        (CONFIG.orbitSlotArc * rm) / (2 * Math.PI)
-      );
-      rogueOrdered.forEach(function (id, i) {
-        var theta = (2 * Math.PI * i) / rm;
-        pin(byId[id], rogueR * Math.cos(theta), rogueR * Math.sin(theta));
-      });
-    }
-
-    // Defensive: anything the tree walk never reached is pinned to the
-    // origin rather than left for the simulation to place randomly.
-    nodes.forEach(function (n) {
-      if (n.fx == null) pin(n, 0, 0);
-    });
-
-    return universe;
   }
 
   function computeNeighbors(universe, id) {
@@ -455,7 +234,7 @@
       universe: universe,
       selectedId: null,
       keepSet: null,
-      filters: { showStars: true, showPlanets: true, showMoons: true },
+      filters: { showMoons: true },
       navigate: opts.navigate !== false,
       interactive: opts.interactive !== false,
       autoRotate: opts.autoRotate !== false,
@@ -491,7 +270,18 @@
       var obj = node.__obj;
       if (!obj) return;
       if (node.isFolder) {
-        if (obj.material) obj.material.opacity = nodeAlphaOf(node);
+        // Folders are Groups (body + label). __style.alpha (trace replay
+        // fade/pulse, selection dimming) dims body AND label; __style.color
+        // tints the body only (the label keeps baseColor for readability);
+        // __style.scale stays ignored on folders.
+        var alpha = nodeAlphaOf(node);
+        var body = obj.userData && obj.userData.body;
+        var label = obj.userData && obj.userData.label;
+        if (body && body.material) {
+          body.material.color.set(nodeColorOf(node));
+          body.material.opacity = alpha;
+        }
+        if (label && label.material) label.material.opacity = alpha;
         return;
       }
       if (obj.material) {
@@ -523,10 +313,39 @@
     function makeNodeObject(node) {
       var obj;
       if (node.isFolder) {
-        obj = new SpriteText(node.label);
-        obj.color = node.kind === "star" ? CONFIG.starColor : CONFIG.planetColor;
-        obj.textHeight = node.kind === "star" ? CONFIG.labelStarHeight : CONFIG.labelPlanetHeight;
-        if (obj.material) obj.material.depthWrite = false;
+        // Folder = THREE.Group: a real body (star: additive glow sprite,
+        // planet: matte lit sphere mesh) plus the SpriteText label offset
+        // above the body. Fixed CONFIG sizes; star > planet by construction.
+        var isStar = node.kind === "star";
+        var size = isStar ? CONFIG.folderBodyStarSize : CONFIG.folderBodyPlanetSize;
+        var body;
+        if (isStar) {
+          body = new THREE.Sprite(
+            new THREE.SpriteMaterial({
+              map: state.starTex,
+              color: nodeColorOf(node),
+              transparent: true,
+              depthWrite: false,
+              blending: THREE.AdditiveBlending
+            })
+          );
+          body.scale.set(size, size, 1);
+        } else {
+          body = new THREE.Mesh(
+            new THREE.SphereGeometry(size / 2, CONFIG.planetSphereSegments, CONFIG.planetSphereSegments),
+            new THREE.MeshLambertMaterial({ color: nodeColorOf(node), transparent: true })
+          );
+        }
+        var label = new SpriteText(node.label);
+        label.color = node.baseColor;
+        label.textHeight = isStar ? CONFIG.labelStarHeight : CONFIG.labelPlanetHeight;
+        if (label.material) label.material.depthWrite = false;
+        label.position.y = size / 2 + CONFIG.labelBodyGap + label.textHeight / 2;
+        obj = new THREE.Group();
+        obj.add(body);
+        obj.add(label);
+        obj.userData.body = body;
+        obj.userData.label = label;
       } else {
         obj = new THREE.Sprite(
           new THREE.SpriteMaterial({
@@ -564,12 +383,8 @@
     function visibleData() {
       var f = state.filters;
       var nodes = state.universe.nodes.filter(function (n) {
-        if (n.isFolder) {
-          if (n.kind === "star") return f.showStars;
-          return f.showPlanets;
-        }
-        // every document is a moon
-        return f.showMoons;
+        // folders always show; documents (moons) follow the moon filter
+        return n.isFolder || f.showMoons;
       });
       var keep = {};
       nodes.forEach(function (n) {
@@ -701,13 +516,6 @@
       });
     }
 
-    // Deterministic orbit layout: computeOrbitLayout pinned every node
-    // (fx/fy/fz), so the force simulation has nothing to do. Drop the
-    // default forces entirely instead of tuning them.
-    graph.d3Force("link", null);
-    graph.d3Force("charge", null);
-    graph.d3Force("center", null);
-
     function selectNode(id) {
       state.selectedId = id;
       state.keepSet = computeNeighbors(state.universe, id);
@@ -741,19 +549,6 @@
 
     function applyFilters() {
       graph.graphData(visibleData());
-    }
-
-    function flyToNode(node) {
-      if (!node || node.x == null) return;
-      graph.cameraPosition(
-        {
-          x: node.x + CONFIG.flyOffset.x,
-          y: node.y + CONFIG.flyOffset.y,
-          z: node.z + CONFIG.flyOffset.z
-        },
-        { x: node.x, y: node.y, z: node.z },
-        CONFIG.flyMs
-      );
     }
 
     function nodeById(id) {
@@ -797,12 +592,6 @@
       graph: graph,
       state: state,
       universe: universe,
-      fitAll: function () {
-        fitContent(contentOnly, CONFIG.fitMs, 0.5);
-      },
-      focusFolder: focusFolder,
-      selectNode: selectNode,
-      clearSelection: clearSelection,
       cancelAutoFit: function () {
         state.initialFitDone = true;
       },
@@ -810,39 +599,7 @@
         restyleAll();
         graph.refresh();
       },
-      listFolders: function () {
-        return universe.nodes.filter(function (n) {
-          return n.isFolder;
-        });
-      },
-      setShowStars: function (v) {
-        state.filters.showStars = !!v;
-        applyFilters();
-      },
-      setShowPlanets: function (v) {
-        state.filters.showPlanets = !!v;
-        applyFilters();
-      },
-      setShowMoons: function (v) {
-        state.filters.showMoons = !!v;
-        applyFilters();
-      },
-      nodeById: nodeById,
-      flyToNode: flyToNode,
-      searchFly: function (query) {
-        var q = String(query || "").trim().toLowerCase();
-        if (!q) return null;
-        var found = null;
-        universe.nodes.forEach(function (n) {
-          if (found || n.isFolder) return;
-          if ((n.label || "").toLowerCase().indexOf(q) !== -1) found = n;
-          else if (n.id.toLowerCase().indexOf(q) !== -1) found = n;
-        });
-        if (!found) return null;
-        selectNode(found.id);
-        flyToNode(found);
-        return found;
-      }
+      nodeById: nodeById
     };
     global.__athenaeumGraph = api;
     return api;
@@ -851,11 +608,11 @@
   var api = {
     CONFIG: CONFIG,
     buildUniverse: buildUniverse,
-    computeOrbitLayout: computeOrbitLayout,
     computeNeighbors: computeNeighbors,
     nearestEmittedFolder: nearestEmittedFolder,
     parentFolder: parentFolder,
     withAlpha: withAlpha,
+    hash: hash,
     mount: mount
   };
   global.Graph3D = api;
