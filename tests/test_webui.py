@@ -803,6 +803,44 @@ def test_config_agents_embeddings_threshold_roundtrip(env):
     assert read_config(data_root, user["id"])["semantic_threshold"] is None
 
 
+def test_config_agents_embeddings_hybrid_toggles_roundtrip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    model = LOCAL_MODEL_SHORTLIST[0][0]
+
+    # defaults: both toggles on, both boxes rendered checked
+    page = client.get("/config/agents/embeddings").text
+    assert 'name="hybrid_search"' in page and 'name="hybrid_rerank"' in page
+
+    # unchecked boxes submit nothing -> both off
+    response = client.post(
+        "/config/agents/embeddings", data={"source": "local", "local_model": model}
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["hybrid_search"] == 0
+    assert cfg["hybrid_rerank"] == 0
+
+    # checked boxes submit "1" -> both on, reflected in the form
+    response = client.post(
+        "/config/agents/embeddings",
+        data={
+            "source": "local",
+            "local_model": model,
+            "hybrid_search": "1",
+            "hybrid_rerank": "1",
+        },
+    )
+    assert response.status_code == 303
+    cfg = read_config(data_root, user["id"])
+    assert cfg["hybrid_search"] == 1
+    assert cfg["hybrid_rerank"] == 1
+    page = client.get("/config/agents/embeddings").text
+    assert re.search(r'name="hybrid_search"\s+value="1"\s+checked', page)
+    assert re.search(r'name="hybrid_rerank"\s+value="1"\s+checked', page)
+
+
 def test_config_agents_embeddings_threshold_validation(env):
     client, _, data_root = env
     make_user(data_root, "alice", "pw")

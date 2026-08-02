@@ -542,6 +542,8 @@ def embedding_save(
     api_model: str = Form(""),
     connection_id: str = Form(""),
     semantic_threshold: str = Form(""),
+    hybrid_search: str | None = Form(None),
+    hybrid_rerank: str | None = Form(None),
 ):
     """Embedding binding; the empty source disables embeddings. Saving evicts
     the cached librarian so the next build picks up the new config (a model
@@ -550,6 +552,8 @@ def embedding_save(
     if user is None:
         return deps.login_redirect(conn)
     threshold = _validated_threshold(semantic_threshold)
+    hybrid_on = hybrid_search is not None
+    rerank_on = hybrid_rerank is not None
     source = source.strip()
     if source not in ("", "local", "api"):
         raise HTTPException(status_code=400, detail="Unknown embedding source")
@@ -561,6 +565,8 @@ def embedding_save(
             model=None,
             connection_id=None,
             semantic_threshold=threshold,
+            hybrid_search=hybrid_on,
+            hybrid_rerank=rerank_on,
         )
     elif source == "local":
         model = local_model.strip()
@@ -573,6 +579,8 @@ def embedding_save(
             model=model,
             connection_id=None,
             semantic_threshold=threshold,
+            hybrid_search=hybrid_on,
+            hybrid_rerank=rerank_on,
         )
     else:
         model = api_model.strip()
@@ -600,6 +608,8 @@ def embedding_save(
             model=model,
             connection_id=validated,
             semantic_threshold=threshold,
+            hybrid_search=hybrid_on,
+            hybrid_rerank=rerank_on,
         )
     _evict(manager, user["id"])
     return deps.redirect("/config/agents/embeddings?saved=1")

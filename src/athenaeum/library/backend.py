@@ -27,6 +27,7 @@ from athenaeum import __version__
 
 from ..isolation import resolve_under
 from . import frontmatter as fm_mod
+from . import hybrid as hybrid_mod
 from . import index as index_mod
 from . import links as links_mod
 from . import log as log_mod
@@ -82,6 +83,9 @@ class LibraryBackend:
         versioning: bool = True,
         snapshot_keep: int = 0,
         embedding_service=None,
+        hybrid_search: bool = True,
+        hybrid_rerank: bool = True,
+        reranker=None,
     ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -93,6 +97,12 @@ class LibraryBackend:
         # (log.md mtime_ns, seed); None forces regeneration (own writes below).
         self.seed_cache: tuple[int | None, str] | None = None
         self._embedding_service = embedding_service
+        # Hybrid retrieval knobs (defaults preserve pre-0.19 behavior: the
+        # hybrid branch additionally requires an FTS collaborator, which only
+        # manager-built embedding services carry).
+        self._hybrid_search = hybrid_search
+        self._hybrid_rerank = hybrid_rerank
+        self._reranker = reranker
 
     # ------------------------------------------------------------------ reads
 
@@ -154,12 +164,87 @@ class LibraryBackend:
         return results
 
     async def search_semantic(self, query: str, limit: int = 8) -> list[dict]:
-        """Embedding-similarity search; falls back to search_metadata on failure."""
+        """Hybrid retrieval over concept text; falls back to search_metadata.
+
+        Two legs fuse via reciprocal rank fusion (``library.hybrid``): the
+        semantic leg (embedding cosine) and the lexical leg (FTS5 BM25). When
+        a reranker is configured and available, the fused candidates get a
+        local cross-encoder pass and hits score by its logits (higher =
+        better, may be negative); otherwise hits keep RRF order and score.
+        The hybrid branch needs an FTS collaborator on the embedding service
+        (duck-typed — services without one keep the legacy pure-semantic path
+        with cosine scores). An unavailable FTS5 table likewise degrades to
+        legacy. An embedding-pipeline failure degrades to title/description
+        metadata matches (``fallback: true``), never an error.
+        """
         if self._embedding_service is None:
             raise RuntimeError(
                 "semantic search is not configured: set an embedding source in the "
                 "WebUI (Agents > Embeddings); use search_metadata instead"
             )
+        fts = getattr(self._embedding_service, "fts", None)
+        use_hybrid = self._hybrid_search and fts is not None and fts.available
+        if not use_hybrid:
+            return await self._search_semantic_legacy(query, limit)
+        try:
+            leg_k = max(limit, hybrid_mod.HYBRID_RERANK_CANDIDATES)
+            sem = await self._embedding_service.search_ids(query, leg_k)
+            lex = self._embedding_service.fts_search(query, leg_k)
+        except Exception:
+            logger.warning("semantic search failed; falling back to search_metadata", exc_info=True)
+            return self._metadata_fallback(query, limit)
+        # Normalize keys to the canonical store shape (x.md) before fusion:
+        # semantic ids are "/x"-shaped without .md; FTS keys are already x.md.
+        sem_keys = [f"{concept_id.lstrip('/')}.md" for concept_id, _ in sem]
+        lex_keys = [path for path, _ in lex]
+        fused = hybrid_mod.rrf_merge([sem_keys, lex_keys])[:leg_k]
+        candidates: list[tuple[str, float, dict]] = []  # (path, rrf score, doc)
+        for path, fused_score in fused:
+            try:
+                doc = self.read_document(path)
+            except Exception:
+                continue  # unreadable candidates are skipped, not fatal
+            candidates.append((path, fused_score, doc))
+        rerank_scores = None
+        if self._hybrid_rerank and self._reranker is not None and candidates:
+            from athenaeum.embeddings import concept_text
+
+            texts = [concept_text(doc["frontmatter"], doc["body"]) for _, _, doc in candidates]
+            try:
+                rerank_scores = await self._reranker.rerank(query, texts)
+            except Exception:
+                logger.warning("reranker failed; keeping RRF order", exc_info=True)
+                rerank_scores = None
+        if rerank_scores is not None and len(rerank_scores) == len(candidates):
+            # Cross-encoder logits decide the order and become the hit score.
+            ranked = [
+                (path, logit, doc)
+                for (path, _, doc), logit in sorted(
+                    zip(candidates, rerank_scores, strict=True),
+                    key=lambda pair: pair[1],
+                    reverse=True,
+                )
+            ]
+        else:
+            ranked = candidates  # RRF order, RRF scores
+        hits = []
+        for path, score, doc in ranked[:limit]:
+            fm = doc.get("frontmatter") or {}
+            hits.append(
+                {
+                    "id": f"/{path[:-3]}",
+                    "path": f"/{path}",
+                    "title": fm.get("title"),
+                    "type": fm.get("type"),
+                    "description": fm.get("description"),
+                    "score": round(score, 2),
+                }
+            )
+        return hits
+
+    async def _search_semantic_legacy(self, query: str, limit: int) -> list[dict]:
+        """Pre-hybrid pure-semantic path (cosine scores); the contract every
+        deployment without an FTS index keeps."""
         try:
             ranked = await self._embedding_service.search_ids(query, limit)
         except Exception:

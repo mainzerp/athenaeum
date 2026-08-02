@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING
 
 from athenaeum import db
 from athenaeum.embeddings import EmbeddingService, EmbedStatusRegistry
+from athenaeum.fts import FtsIndex
 from athenaeum.librarian.agent import Librarian, LibrarianConfig
 from athenaeum.librarian.embed import EmbeddingConfig, create_embedding_provider
 from athenaeum.librarian.gate import RunGate
 from athenaeum.librarian.llm import LLMConfig, create_provider
+from athenaeum.library.hybrid import CrossEncoderReranker
 
 if TYPE_CHECKING:
     from athenaeum.librarian.embed import EmbeddingProvider
@@ -35,7 +37,8 @@ _CONFIG_COLUMNS = (
     "snapshot_keep, library_name, library_description, "
     "librarian_connection_id, curator_connection_id, curator_model, "
     "curate_last_run_at, curate_prompt_addendum, "
-    "embedding_source, embedding_model, embedding_connection_id, semantic_threshold"
+    "embedding_source, embedding_model, embedding_connection_id, semantic_threshold, "
+    "hybrid_search, hybrid_rerank"
 )
 
 
@@ -115,6 +118,9 @@ class LibrarianManager:
         embedding_model = row["embedding_model"]
         embedding_connection_id = row["embedding_connection_id"]
         semantic_threshold = row["semantic_threshold"]
+        # NOT NULL DEFAULT 1 columns — never NULL (0.19.0 hybrid toggles).
+        hybrid_search = bool(row["hybrid_search"])
+        hybrid_rerank = bool(row["hybrid_rerank"])
         by_id = {conn_row["id"]: conn_row for conn_row in conn_rows}
         default_row = next((r for r in conn_rows if r["is_default"]), None)
 
@@ -196,6 +202,8 @@ class LibrarianManager:
             curate_prompt_addendum=curate_prompt_addendum,
             embedding=embedding,
             semantic_threshold=semantic_threshold,
+            hybrid_search=hybrid_search,
+            hybrid_rerank=hybrid_rerank,
         )
 
     def _build(self, user_id: str) -> Librarian:
@@ -211,6 +219,8 @@ class LibrarianManager:
             factory = self._provider_factory or (lambda _uid, llm: create_provider(llm))
             provider = factory(user_id, config.llm)
         embedding_service = None
+        fts_index = None
+        reranker = None
         if config.embedding is not None:
             try:
                 embed_factory = self._embedding_provider_factory or (
@@ -218,13 +228,21 @@ class LibrarianManager:
                         cfg, cache_dir=self.data_root / "embedding-models"
                     )
                 )
+                # The FTS index rides the embedding service's flows (hybrid
+                # search lexical leg); it only exists where a service exists.
+                fts_index = FtsIndex(self.db_path, user_id)
                 embedding_service = EmbeddingService(
                     self.db_path,
                     user_id,
                     config.embedding,
                     embed_factory(config.embedding),
                     status=self._embed_status,
+                    fts=fts_index,
                 )
+                if config.hybrid_rerank:
+                    # Construction stores config only; the ONNX model loads
+                    # lazily on first rerank (downloads on first use).
+                    reranker = CrossEncoderReranker(cache_dir=self.data_root / "embedding-models")
             except Exception as exc:
                 # A broken embedding config must never break librarian
                 # construction; the tool-level "unconfigured" path then applies.
@@ -239,6 +257,7 @@ class LibrarianManager:
             provider=provider,
             embedding_service=embedding_service,
             run_gate=self.run_gate,
+            reranker=reranker,
         )
 
     def get(self, user_id: str) -> Librarian:

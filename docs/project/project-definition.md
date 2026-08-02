@@ -30,7 +30,7 @@ Phase 1 ships all of the following together, in a single Python process:
 
 ### Locked user decisions (non-negotiable for phase 1)
 
-1. **OKF-native retrieval first.** Retrieval follows OKF's progressive-disclosure model: `index.md` at every directory, the librarian reads indexes and follows links; a frontmatter/metadata scan covers exact field/value lookups. An optional, additive embedding subsystem (0.12.0) layers semantic similarity search on top without changing the storage or retrieval model — with embeddings off, behavior is unchanged.
+1. **OKF-native retrieval first.** Retrieval follows OKF's progressive-disclosure model: `index.md` at every directory, the librarian reads indexes and follows links; a frontmatter/metadata scan covers exact field/value lookups. An optional, additive embedding subsystem (0.12.0) layers semantic similarity search on top — extended to hybrid retrieval (0.19.0: FTS5 BM25 fused with the semantic leg, optional local rerank) — without changing the storage or retrieval model; with embeddings off, behavior is unchanged.
 2. **Plain-directory storage with git-like structure.** Libraries are ordinary directories (no database, no object store). Versioning uses **shadow-copy snapshots** under `.athenaeum/versions/` — per-operation pre-image copies enabling rollback, audit, and diffs. Real git is a documented upgrade path, not a phase-1 dependency.
 3. **Strict per-user isolation.** Each user has their own library and their own librarian. All filesystem access goes through a path-resolution helper rooted at the user's directory that rejects `..` escapes, absolute paths, and symlink escapes. User IDs in paths are opaque UUIDs, never usernames.
 

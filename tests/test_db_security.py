@@ -430,6 +430,8 @@ def test_ensure_column_idempotent_on_preexisting_db(tmp_path):
         assert "curate_schedule_enabled" in columns
         assert "curate_schedule_time" in columns
         assert "semantic_threshold" in columns
+        assert "hybrid_search" in columns
+        assert "hybrid_rerank" in columns
         cfg = db.get_config(conn, "u1")
         assert cfg["trace_keep"] == 0 and cfg["activity_keep"] == 0
         assert cfg["curate_provider"] is None
@@ -444,6 +446,9 @@ def test_ensure_column_idempotent_on_preexisting_db(tmp_path):
         assert cfg["curate_schedule_enabled"] == 0
         assert cfg["curate_schedule_time"] is None
         assert cfg["semantic_threshold"] is None
+        # pre-existing rows backfill to hybrid-on (NOT NULL DEFAULT 1)
+        assert cfg["hybrid_search"] == 1
+        assert cfg["hybrid_rerank"] == 1
     finally:
         conn.close()
 

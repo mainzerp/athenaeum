@@ -143,7 +143,14 @@ its own Research -> Planning cycle before any work starts.
   freshness, owner sign-off).
 
 
-vector serach erweitern:
-  https://github.com/tobi/qmd
-
 beim anlegen von neuem wissen auf wiedersprüche prüfen
+löschen von wissen erlauben
+rohdaten store_knowledge anfrage mit speichern um beim curatieren fehler ausbesern zu können
+bilder in markdown unterstützen (bei store_knowledge mit übergebbar)
+
+ui tree rework, bessere usability und möglichkeit für den user dateien anzulegen, editieren und löschen
+
+agents rework, librarian und curator split, als eigenstädige agents
+
+
+reasoning effort einstellbar

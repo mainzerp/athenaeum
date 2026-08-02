@@ -540,6 +540,34 @@ def test_update_embedding_config_roundtrip_and_clear(tmp_path):
         assert row["semantic_threshold"] is None
 
 
+def test_update_embedding_config_hybrid_toggles_write_and_keep(tmp_path):
+    """COALESCE semantics: explicit bools write, None keeps the stored value."""
+    db_path = make_connections_db(tmp_path)
+    with closing(db.connect(db_path)) as conn:
+        row = db.get_config(conn, "user-1")
+        assert row["hybrid_search"] == 1 and row["hybrid_rerank"] == 1  # defaults
+        db.update_embedding_config(
+            conn,
+            "user-1",
+            source="api",
+            model="m",
+            connection_id="conn-a",
+            hybrid_search=False,
+            hybrid_rerank=False,
+        )
+        row = db.get_config(conn, "user-1")
+        assert row["hybrid_search"] == 0 and row["hybrid_rerank"] == 0
+        # omitted -> kept, even across an Off save
+        db.update_embedding_config(conn, "user-1", source=None, model=None, connection_id=None)
+        row = db.get_config(conn, "user-1")
+        assert row["hybrid_search"] == 0 and row["hybrid_rerank"] == 0
+        db.update_embedding_config(
+            conn, "user-1", source="local", model="m", connection_id=None, hybrid_rerank=True
+        )
+        row = db.get_config(conn, "user-1")
+        assert row["hybrid_search"] == 0 and row["hybrid_rerank"] == 1
+
+
 # --- search_ids / related ---------------------------------------------------------
 
 

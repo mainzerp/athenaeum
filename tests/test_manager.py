@@ -91,6 +91,23 @@ def test_semantic_threshold_loaded(tmp_path):
     assert manager._load_config("user-1").semantic_threshold == 0.82
 
 
+def test_hybrid_toggles_loaded(tmp_path):
+    db_path = make_db(tmp_path)
+    manager = make_manager(db_path, tmp_path)
+    # NOT NULL DEFAULT 1: hybrid search and rerank default to on
+    config = manager._load_config("user-1")
+    assert config.hybrid_search is True
+    assert config.hybrid_rerank is True
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE librarian_configs SET hybrid_search = 0, hybrid_rerank = 0"
+            " WHERE user_id = 'user-1'"
+        )
+    config = manager._load_config("user-1")
+    assert config.hybrid_search is False
+    assert config.hybrid_rerank is False
+
+
 def test_config_round_trip_preserves_stored_zero(tmp_path):
     """L22: a stored 0 is a legitimate value, not "unset" — no `or default`."""
     db_path = make_db(tmp_path)

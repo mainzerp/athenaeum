@@ -106,6 +106,8 @@ class LibrarianConfig:
     curate_last_run_at: str | None = None  # None = never curated
     embedding: EmbeddingConfig | None = None  # None = embeddings unconfigured
     semantic_threshold: float | None = None  # None = per-model default
+    hybrid_search: bool = True  # fuse semantic with FTS5 BM25 (RRF)
+    hybrid_rerank: bool = True  # local cross-encoder pass over fused candidates
 
 
 @dataclass
@@ -175,10 +177,12 @@ class Librarian:
         provider: LLMProvider | None = None,
         embedding_service: EmbeddingService | None = None,
         run_gate: RunGate | None = None,
+        reranker=None,
     ) -> None:
         self.root = Path(root)
         self.config = config
         self._embed = embedding_service
+        self._reranker = reranker
         self._embed_reconcile_pending = False
         # A5: strong reference to the in-flight reconcile task (GC could
         # otherwise destroy a fire-and-forget task mid-run) plus its owning
@@ -207,6 +211,9 @@ class Librarian:
             versioning=self.config.versioning,
             snapshot_keep=self.config.snapshot_keep,
             embedding_service=self._embed,
+            hybrid_search=self.config.hybrid_search,
+            hybrid_rerank=self.config.hybrid_rerank,
+            reranker=self._reranker,
         )
         if created:
             backend.init_bundle()

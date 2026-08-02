@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.18.0**
+Current version: **0.19.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,35 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.19.0
+
+Hybrid search: `search_semantic` now fuses the embedding leg with a lexical
+FTS5 BM25 leg via reciprocal rank fusion, with an optional local cross-encoder
+rerank pass (inspired by github.com/tobi/qmd).
+
+- New `concepts_fts` FTS5 virtual table in `app.db` (porter tokenizer,
+  plain-content; shadow tables `concepts_fts_*` share the DB). The new
+  `FtsIndex` (`fts.py`) mirrors the embeddings table's keys, text, and content
+  hashes, and rides the existing `EmbeddingService` flows: write-through sync
+  (FTS rows land even when the embed call fails — the lexical leg is the
+  no-provider degradation leg) and the claimed background reconcile, which
+  backfills pre-existing libraries on first agent request after upgrade.
+- Retrieval: semantic + lexical legs merge via RRF (k=60); when enabled, a
+  local fastembed `TextCrossEncoder` (`Xenova/ms-marco-MiniLM-L-6-v2`, ~0.08
+  GB, downloads on first use) reranks the top 30 fused candidates off the
+  event loop. Reranker missing/failing falls back to RRF order; FTS5
+  unavailable falls back to the legacy pure-semantic path; embedding-pipeline
+  failure keeps the `fallback: true` metadata path. Hit scores are reranker
+  logits (may be negative) or RRF scores — relative ranking aids, never trust
+  signals; legacy path keeps cosine.
+- Two per-user config toggles `hybrid_search` / `hybrid_rerank`
+  (`librarian_configs`, `NOT NULL DEFAULT 1` — upgrades are hybrid-on),
+  editable in the WebUI embeddings tab (checkboxes) and stored via
+  `db.update_embedding_config` COALESCE semantics (omitted = keep).
+- No new MCP tool: name, parameters, 10-tool count, result shape, and the
+  unconfigured-error contract are unchanged. Curate duplicate detection and
+  related-concept injection stay pure-semantic.
 
 ### 0.18.0
 

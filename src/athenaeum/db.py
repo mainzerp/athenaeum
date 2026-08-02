@@ -7,12 +7,15 @@ Schema pinned in plan §3.5 (idempotent DDL). One app DB at
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Canonical schema definition (A13): one ordered column list per table is the
 # single source of truth for BOTH fresh CREATE TABLE and the migration of
@@ -95,6 +98,18 @@ _SCHEMA: list[tuple[str, list[tuple[str, str | None, str | None]], list[str]]] =
                 "embedding_connection_id TEXT",
             ),
             ("semantic_threshold", "semantic_threshold REAL", "semantic_threshold REAL"),
+            # Hybrid search toggles (0.19.0): NOT NULL DEFAULT 1 backfills
+            # existing rows, so pre-existing deployments upgrade to hybrid-on.
+            (
+                "hybrid_search",
+                "hybrid_search INTEGER NOT NULL DEFAULT 1",
+                "hybrid_search INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
+                "hybrid_rerank",
+                "hybrid_rerank INTEGER NOT NULL DEFAULT 1",
+                "hybrid_rerank INTEGER NOT NULL DEFAULT 1",
+            ),
             # Dead pre-provider-connections legacy columns: never created
             # fresh, still added to pre-existing databases.
             ("curate_provider", None, "curate_provider TEXT"),
@@ -209,6 +224,19 @@ _SCHEMA_INDEXES: list[str] = [
     " ON provider_configs(user_id) WHERE is_default = 1",
 ]
 
+# FTS5 virtual tables (hybrid search, 0.19.0). Kept separate from _SCHEMA:
+# CREATE VIRTUAL TABLE fails on SQLite builds without FTS5, so init_db wraps
+# each statement and degrades to the legacy pure-semantic path instead of
+# failing. Plain-content mode (the text column lives in the table); only
+# `text` is indexed, tenancy is a plain user_id filter. The shadow tables
+# concepts_fts_{data,idx,content,docsize,config} share app.db — keep the
+# concepts_fts name prefix exclusive to this feature.
+_SCHEMA_VIRTUAL_TABLES: list[str] = [
+    "CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5("
+    "user_id UNINDEXED, concept_path UNINDEXED, text, content_hash UNINDEXED,"
+    " tokenize = 'porter unicode61')",
+]
+
 
 DEFAULT_SCHEDULE_TIME = "03:00"  # UTC HH:MM for newly created users
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -306,6 +334,14 @@ def init_db(db_path: str | Path) -> None:
                     _ensure_column(conn, table, name, migrate_ddl)
         for statement in _SCHEMA_INDEXES:
             conn.execute(statement)
+        for statement in _SCHEMA_VIRTUAL_TABLES:
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError as exc:
+                # FTS5-less SQLite build: lexical search is disabled, the
+                # backend stays on the legacy pure-semantic path. init_db
+                # must never fail over an optional index.
+                logger.warning("FTS5 unavailable; lexical search disabled: %s", exc)
         _migrate_llm_to_provider_configs(conn)
 
 
@@ -734,6 +770,8 @@ def update_embedding_config(
     model: str | None,
     connection_id: str | None,
     semantic_threshold: float | None = None,
+    hybrid_search: bool | None = None,
+    hybrid_rerank: bool | None = None,
 ) -> None:
     """Save the embedding binding; ``source=None`` clears all three columns.
 
@@ -741,6 +779,10 @@ def update_embedding_config(
     ``source=None`` — it is written as passed, so a temporary Off does not
     silently discard an explicit override; the WebUI always submits the form
     field. None = model default.
+
+    The hybrid toggles use COALESCE semantics: None keeps the stored value
+    (overrides survive a save that does not submit them), an explicit bool
+    overwrites. The WebUI always submits explicit values.
     """
     if source is None:
         model = None
@@ -748,8 +790,18 @@ def update_embedding_config(
     with conn:
         conn.execute(
             "UPDATE librarian_configs SET embedding_source = ?, embedding_model = ?,"
-            " embedding_connection_id = ?, semantic_threshold = ? WHERE user_id = ?",
-            (source or None, model or None, connection_id or None, semantic_threshold, user_id),
+            " embedding_connection_id = ?, semantic_threshold = ?,"
+            " hybrid_search = COALESCE(?, hybrid_search),"
+            " hybrid_rerank = COALESCE(?, hybrid_rerank) WHERE user_id = ?",
+            (
+                source or None,
+                model or None,
+                connection_id or None,
+                semantic_threshold,
+                None if hybrid_search is None else int(hybrid_search),
+                None if hybrid_rerank is None else int(hybrid_rerank),
+                user_id,
+            ),
         )
 
 

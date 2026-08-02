@@ -129,12 +129,17 @@ class EmbeddingService:
         provider: EmbeddingProvider,
         *,
         status: EmbedStatusRegistry | None = None,
+        fts=None,
     ) -> None:
         self.db_path = Path(db_path)
         self.user_id = user_id
         self.config = config
         self.provider = provider
         self._status = status
+        # Duck-typed FtsIndex collaborator (hybrid search lexical leg); the
+        # service drives it, it never drives back (fts.py -> embeddings.py is
+        # a one-way edge).
+        self.fts = fts
 
     # --- CRUD (sync sqlite3, short-lived connections) -------------------
 
@@ -259,6 +264,10 @@ class EmbeddingService:
         row). All surviving writes embed in ONE batched call.
         """
         # backend result ids are "/x"-shaped; the store key is "x.md".
+        if self.fts is not None:
+            # FTS rows land FIRST: even when the embed call below fails, the
+            # lexical leg (the no-provider degradation leg) stays current.
+            self.fts.sync_writes(backend, writes)
         by_path: dict[str, dict] = {}
         moved_from: list[str] = []
         for write in writes:
@@ -348,3 +357,17 @@ class EmbeddingService:
                 self._status.progress(self.user_id, done)
         if self._status is not None:
             self._status.finish(self.user_id)
+        if self.fts is not None:
+            # Inside the same claim; FtsIndex.reconcile contains its own
+            # exceptions, so an FTS failure cannot fail the embed reconcile.
+            self.fts.reconcile(backend)
+
+    def fts_search(self, query: str, limit: int) -> list[tuple[str, float]]:
+        """Lexical leg of hybrid search: (concept_path, bm25) best-first.
+
+        Empty without an FTS collaborator — the backend reaches the FTS index
+        only through the service (it owns neither db_path nor user_id).
+        """
+        if self.fts is None:
+            return []
+        return self.fts.search(query, limit)

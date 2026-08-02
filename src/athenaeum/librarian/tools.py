@@ -106,9 +106,12 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "name": "search_semantic",
         "description": (
-            "Semantic similarity search over concept titles, descriptions, and bodies. "
-            "Use it to find concepts by intent or meaning rather than exact metadata. "
-            "Returns ranked hits (score is a relative ranking aid, not a trust signal). "
+            "Hybrid search over concept titles, descriptions, and bodies — semantic "
+            "similarity fused with full-text (BM25) matching via reciprocal rank "
+            "fusion, with an optional local rerank pass. Use it to find concepts by "
+            "intent, meaning, or exact terms. "
+            "Returns ranked hits (score is a relative ranking aid — a reranker or "
+            "fused-rank score, not a trust signal). "
             "On embedding-pipeline failure the result degrades to title/description "
             "metadata matches marked fallback: true (empty when nothing matches). "
             "Requires embeddings to be configured; otherwise it "

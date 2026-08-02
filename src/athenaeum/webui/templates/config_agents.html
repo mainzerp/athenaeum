@@ -178,6 +178,21 @@
           in curation (0.0-1.0). Empty = model default ({{ threshold_default }} for the
           configured model).</p>
       </div>
+      <div class="form-row">
+        <label class="checkbox-row"><input type="checkbox" name="hybrid_search"
+          value="1" {% if cfg["hybrid_search"] %}checked{% endif %}>
+          Hybrid search (semantic + full-text)</label>
+        <p class="muted text-sm mt-1">Fuses semantic similarity with full-text BM25
+          matching via reciprocal rank fusion.</p>
+      </div>
+      <div class="form-row">
+        <label class="checkbox-row"><input type="checkbox" name="hybrid_rerank"
+          value="1" {% if cfg["hybrid_rerank"] %}checked{% endif %}>
+          Rerank search results</label>
+        <p class="muted text-sm mt-1">Local cross-encoder pass over the fused candidates
+          (downloads a small ONNX model on first use; falls back to fusion when
+          unavailable).</p>
+      </div>
       <button type="submit" class="btn btn-primary">Save</button>
       <button type="button" class="btn btn-secondary" data-loading
               hx-post="/config/agents/embeddings/test" hx-target="#embed-test-result"
