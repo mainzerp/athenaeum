@@ -62,6 +62,14 @@ export ATHENAEUM_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_ur
 docker compose up -d
 ```
 
+To skip the local build and use the prebuilt image from GHCR instead
+(published by the `docker` GitHub workflow):
+
+```bash
+docker compose -f docker-compose.prebuilt.yml up -d
+# pin a release: ATHENAEUM_IMAGE_TAG=0.20.0 docker compose -f docker-compose.prebuilt.yml up -d
+```
+
 Then:
 
 1. Open <http://localhost:8000/> and create your owner account.
