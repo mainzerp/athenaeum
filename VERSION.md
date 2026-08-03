@@ -26,7 +26,8 @@ The version must stay in sync across:
 Store-surface extensions: contradiction warnings, deletion-via-deprecate
 with hidden-deprecated semantics, a raw-payload archive for
 `store_knowledge`, and base64 images stored as hidden library assets.
-(Commit hashes filled in at commit time.)
+(Commits: `c9c676f` feat(store), `e251560` ci(docker) — GHCR image build +
+prebuilt compose.)
 
 - **Contradiction warnings (store-only):** when the librarian supersedes
   contradictions in place (write-discipline rule 3), the STORE task now
