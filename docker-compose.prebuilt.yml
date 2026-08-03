@@ -1,5 +1,5 @@
 # Prebuilt deployment: pulls the GHCR image published by
-# .github/workflows/docker.yml instead of building locally. Same runtime
+# .github/workflows/ci.yml instead of building locally. Same runtime
 # contract as docker-compose.yml — secrets come from a local .env file or the
 # shell, never from the image or this file.
 # Pin a release with ATHENAEUM_IMAGE_TAG (e.g. ATHENAEUM_IMAGE_TAG=0.20.0).

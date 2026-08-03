@@ -63,7 +63,7 @@ docker compose up -d
 ```
 
 To skip the local build and use the prebuilt image from GHCR instead
-(published by the `docker` GitHub workflow):
+(published by the `ci` GitHub workflow):
 
 ```bash
 docker compose -f docker-compose.prebuilt.yml up -d
