@@ -129,6 +129,8 @@ stale (past its stale_after date).
 tier is unverified|machine-confirmed|human-reviewed. Never conflate the two \
 vocabularies.
 - Keep answers concise; cite concept IDs for everything you claim.
+- Deprecated concepts are pending removal: never cite them, never enrich \
+them.
 - ANSWER HYGIENE. Answers contain results and citations only — never narrate \
 your own process, your tool calls, iteration limits, or what you could not \
 read. Name unread or missing items as plain coverage gaps, in one sentence.
@@ -204,6 +206,16 @@ meaning though their titles share few tokens. Verify with read_document \
 before merging; the similarity score is a relative ranking aid. The series \
 rule applies with full force here: never merge or deprecate documents that \
 differ only in a version/phase identifier; numbered series are intentional.
+- Deprecated concepts pending cleanup: each listed deprecated concept has \
+no inbound links from non-deprecated concepts. Delete it via delete_concept \
+and repair the inbound links the delete reports. Never delete a deprecated \
+concept that is NOT listed: live inbound links keep it in the library until \
+their owners remove them. Deleting can orphan the concept's targets — the \
+post-run health check and the next maintenance pass are the safety net.
+- Store payload reviews: a store_knowledge request ended in an error or \
+partial state since the previous curate run. Re-store the archived content \
+per your write discipline (search first, enrich in place, back-link); skip \
+content the library already covers.
 
 Convergence rules: respect the existing topic structure; never move \
 well-placed concepts; do not touch concepts that appear in no finding; \
@@ -221,8 +233,14 @@ Current organization report:
 {near_duplicates}
 - semantic duplicate candidates (embedding similarity):
 {semantic_duplicates}
+- deprecated concepts pending cleanup (no live inbound links):
+{deprecated_cleanup}
+- store payloads pending review (failed or partial since the previous run):
+{store_payload_reviews}
 - scope: findings cover the whole library on every run; an unaddressed \
-finding is re-reported until it is actually fixed.
+finding is re-reported until it is actually fixed. Store payload reviews \
+are the exception: each is reported once, after the run that recorded it, \
+and never re-reported.
 {instructions}{addendum}"""
 
 
@@ -282,6 +300,19 @@ def build_curate_preamble(
         )
         or "  - none"
     )
+    cleanup = findings.get("deprecated_cleanup") or []
+    cleanup_lines = (
+        "\n".join(f"  - {c.get('id')} ({c.get('title', '')})" for c in cleanup) or "  - none"
+    )
+    reviews = findings.get("store_payload_reviews") or []
+    review_lines = (
+        "\n".join(
+            f"  - {r.get('request_id')} ({r.get('outcome')}"
+            f"{', ' + r['error'] if r.get('error') else ''}): {r.get('excerpt', '')}"
+            for r in reviews
+        )
+        or "  - none"
+    )
     extra = ""
     if instructions:
         extra = f"\nAdditional instructions from the caller:\n{instructions}\n"
@@ -293,6 +324,8 @@ def build_curate_preamble(
         thin_concepts=thin_lines,
         near_duplicates=duplicate_lines,
         semantic_duplicates=semantic_lines,
+        deprecated_cleanup=cleanup_lines,
+        store_payload_reviews=review_lines,
         instructions=extra,
         addendum=_curate_addendum_section(addendum),
     )

@@ -108,6 +108,20 @@ def test_hybrid_toggles_loaded(tmp_path):
     assert config.hybrid_rerank is False
 
 
+def test_payload_keep_loaded(tmp_path):
+    db_path = make_db(tmp_path)
+    manager = make_manager(db_path, tmp_path)
+    # the raw INSERT names no payload_keep: the create-DDL default applies
+    assert manager._load_config("user-1").payload_keep == db_module.DEFAULT_PAYLOAD_KEEP
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE librarian_configs SET payload_keep = 7 WHERE user_id = 'user-1'")
+    assert manager._load_config("user-1").payload_keep == 7
+    # L22: a stored 0 is a legitimate value, not "unset"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE librarian_configs SET payload_keep = 0 WHERE user_id = 'user-1'")
+    assert manager._load_config("user-1").payload_keep == 0
+
+
 def test_config_round_trip_preserves_stored_zero(tmp_path):
     """L22: a stored 0 is a legitimate value, not "unset" — no `or default`."""
     db_path = make_db(tmp_path)

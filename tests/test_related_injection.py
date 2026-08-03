@@ -6,6 +6,8 @@ failure, and empty paths leave the task text byte-identical to the
 pre-feature shape and cost zero extra loop iterations.
 """
 
+import tempfile
+
 from athenaeum.librarian.agent import STORE_RELATED_TOP_K, Librarian, LibrarianConfig
 from athenaeum.librarian.llm import LLMConfig, LLMResponse, ToolCall
 
@@ -59,8 +61,10 @@ def make_librarian(backend, provider, embedding_service=None) -> Librarian:
         user_id="user-1",
         llm=LLMConfig(provider="openai", model="m", api_key="k", max_iterations=3),
     )
+    # Fresh temp root per librarian: handle_store's payload archive (0.20.0)
+    # writes under <root>/.athenaeum/payloads — never a fixed path.
     return Librarian(
-        "/unused-root",
+        tempfile.mkdtemp(prefix="athenaeum-related-"),
         config,
         backend=backend,
         provider=provider,

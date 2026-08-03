@@ -94,6 +94,8 @@ def _concepts(root: Path) -> list[str]:
             fm, _ = fm_mod.split_document(abs_path.read_text(encoding="utf-8"))
         except (fm_mod.FrontmatterError, OSError, UnicodeDecodeError):
             fm = {}
+        if fm.get("status") == "deprecated":
+            continue  # deprecated concepts are hidden (pending cleanup)
         line = f"- {bundle_path} (type: {fm.get('type', '?')})"
         description = fm.get("description")
         if isinstance(description, str) and description:

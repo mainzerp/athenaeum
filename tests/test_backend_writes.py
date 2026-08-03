@@ -185,6 +185,44 @@ def test_deprecate_sets_status(tmp_path):
     assert "**Deprecation**" in read_log(tmp_path / "lib")
 
 
+# --- write_asset (content-addressed asset store) -------------------------------
+
+
+def test_write_asset_happy_path(tmp_path):
+    backend = make_backend(tmp_path)
+    root = tmp_path / "lib"
+    log_before = read_log(root)
+    data = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+    bundle_path = backend.write_asset("scan.png", data)
+    assert bundle_path.startswith("/.athenaeum/assets/")
+    assert bundle_path.endswith("-scan.png")
+    stored = root / bundle_path.lstrip("/")
+    assert stored.read_bytes() == data
+    # outside the compound write: no log entry, no snapshot, no index drift
+    assert read_log(root) == log_before
+    assert backend.validate()["errors"] == []
+    assert not list(root.rglob("*.tmp"))
+
+
+def test_write_asset_rejects_non_bare_names(tmp_path):
+    backend = make_backend(tmp_path)
+    for bad in ("../evil.png", "sub/dir.png", "/abs.png", "C:\\\\win.png", "..", ""):
+        with pytest.raises(ValueError, match="bare name"):
+            backend.write_asset(bad, b"x")
+
+
+def test_write_asset_content_addressed_idempotent(tmp_path):
+    backend = make_backend(tmp_path)
+    data = b"same bytes"
+    first = backend.write_asset("img.png", data)
+    second = backend.write_asset("img.png", data)
+    assert first == second  # re-store is idempotent
+    other = backend.write_asset("img.png", b"different bytes")
+    assert other != first  # name is content-addressed
+    root = tmp_path / "lib"
+    assert len(list((root / ".athenaeum" / "assets").iterdir())) == 2
+
+
 def test_agent_label_suffix_in_log(tmp_path):
     backend = make_backend(tmp_path)
     backend.create_concept("/a.md", {"type": "Concept"}, "x\n", agent_label="bot-1")

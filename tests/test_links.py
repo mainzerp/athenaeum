@@ -2,6 +2,7 @@
 
 from athenaeum.library.links import (
     broken_links,
+    extract_body_links,
     extract_frontmatter_links,
     inbound_links,
     resolve_target,
@@ -112,3 +113,37 @@ def test_extract_frontmatter_links():
     }
     targets = extract_frontmatter_links(fm)
     assert targets == ["/r.md", "/s1.md", "https://e.com", "/ex.md", "/at.md"]
+
+
+# --- image syntax is not a concept link (LINK_RE lookbehind) -------------------
+
+
+def test_image_syntax_produces_no_extracted_link():
+    assert extract_body_links("![alt](/x.png)\n") == []
+    # concept links around an image are unaffected
+    assert extract_body_links("see [B](/b.md) and ![img](/i.png)\n") == ["/b.md"]
+
+
+def test_image_not_rewritten_on_move(tmp_path):
+    write(tmp_path, "/a.md", FM + "![alt](/x.png) and [B](/b.md).\n")
+    write(tmp_path, "/b.md", FM + "b\n")
+    count = rewrite_links(tmp_path, "/b.md", "/moved/b.md")
+    assert count == 1
+    body = (tmp_path / "a.md").read_text(encoding="utf-8")
+    assert "![alt](/x.png)" in body  # image untouched
+    assert "(/moved/b.md)" in body
+
+
+def test_image_target_move_leaves_image_untouched(tmp_path):
+    """A move of the image's own 'target' rewrites nothing: assets are not
+    graph citizens, so there is no move-rewrite for them."""
+    write(tmp_path, "/a.md", FM + "![alt](/x.png)\n")
+    count = rewrite_links(tmp_path, "/x.png", "/y.png")
+    assert count == 0
+    assert "![alt](/x.png)" in (tmp_path / "a.md").read_text(encoding="utf-8")
+
+
+def test_linked_image_construct_yields_no_page_link():
+    """v1 accepted edge: ``[![a](/i.png)](/a.md)`` — the outer ``[...](...)``
+    match consumes the image part, so no link to the page target is extracted."""
+    assert extract_body_links("[![a](/i.png)](/a.md)") == ["/i.png"]

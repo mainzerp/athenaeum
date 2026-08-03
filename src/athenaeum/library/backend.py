@@ -16,6 +16,7 @@ reconcile's scope. Rollback is constrained to the latest snapshot — only
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import posixpath
 import threading
@@ -35,7 +36,7 @@ from . import organize as organize_mod
 from . import semantic as semantic_mod
 from . import snapshots as snapshots_mod
 from . import validate as validate_mod
-from .frontmatter import write_text_atomic
+from .frontmatter import write_bytes_atomic, write_text_atomic
 from .links import RESERVED_NAMES
 
 logger = logging.getLogger(__name__)
@@ -521,6 +522,22 @@ class LibraryBackend:
             )
             self.seed_cache = None
             return {"id": bundle[:-3], "action": "deleted", "inbound_links": inbound}
+
+    def write_asset(self, filename: str, data: bytes) -> str:
+        """Write an immutable asset blob; return its bundle path.
+
+        The asset name is content-addressed (``<sha256[:12]>-<filename>``),
+        so re-stores of the same bytes are idempotent. Deliberately OUTSIDE
+        the compound write — no snapshot, index regeneration, or log entry:
+        assets are content-addressed immutable blobs under a dot-dir,
+        invisible to every OKF ``.md`` traversal (same posture as `.traces`).
+        """
+        if not filename or filename in (".", "..") or "/" in filename or "\\" in filename:
+            raise ValueError(f"asset filename must be a bare name: {filename!r}")
+        name = f"{hashlib.sha256(data).hexdigest()[:12]}-{filename}"
+        with self._write_lock():
+            write_bytes_atomic(self._resolve(f".athenaeum/assets/{name}"), data)
+        return f"/.athenaeum/assets/{name}"
 
     # ------------------------------------------------------------ maintenance
 

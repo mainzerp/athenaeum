@@ -80,6 +80,14 @@ def test_series_pair_excluded_despite_identical_vectors(tmp_path):
     assert semantic_duplicate_candidates(tmp_path, vectors) == []
 
 
+def test_deprecated_pair_excluded_despite_identical_vectors(tmp_path):
+    """Deprecated concepts are hidden: pairs involving them are not reported."""
+    write_concept(tmp_path, "/a.md", {"type": "Note", "title": "Alpha"})
+    write_concept(tmp_path, "/b.md", {"type": "Note", "title": "Beta", "status": "deprecated"})
+    vectors = {"a.md": [1.0, 0.0], "b.md": [1.0, 0.0]}
+    assert semantic_duplicate_candidates(tmp_path, vectors) == []
+
+
 def test_threshold_boundary_exact_and_below(tmp_path):
     write_concept(tmp_path, "/a.md", {"type": "Note", "title": "Alpha"})
     write_concept(tmp_path, "/b.md", {"type": "Note", "title": "Beta"})

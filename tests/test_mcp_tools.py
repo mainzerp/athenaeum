@@ -6,6 +6,7 @@ middleware is additionally unit-tested against synthetic HTTP requests.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -114,6 +115,14 @@ class FakeBackend:
     def link_check(self, path=None) -> list[dict]:
         self.calls.append(("link_check", path))
         return []
+
+    def write_asset(self, filename: str, data: bytes) -> str:
+        self.calls.append(("write_asset", filename, len(data)))
+        name = f"{hashlib.sha256(data).hexdigest()[:12]}-{filename}"
+        path = self.scan_root / ".athenaeum" / "assets" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return f"/.athenaeum/assets/{name}"
 
     def status(self) -> dict:
         self.calls.append(("status",))
@@ -447,6 +456,39 @@ async def test_update_knowledge_roundtrip(tmp_path, monkeypatch):
             "healthy": False,
         },
     }
+
+
+async def test_store_knowledge_reports_contradictions(tmp_path, monkeypatch):
+    """End-to-end (D1): a tracker-verified '## Contradictions' section in the
+    store summary surfaces as result.data['contradictions'] (store-only)."""
+    server, manager, backends, providers, _ = make_stack(
+        tmp_path,
+        {
+            "user-a": [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="edit_concept",
+                            arguments={"path": "/a.md", "new_body": "fixed"},
+                        )
+                    ]
+                ),
+                LLMResponse(text="updated /a.md\n\n## Contradictions\n- /a: corrected the claim"),
+            ]
+        },
+    )
+    backends["user-a"].docs["/a.md"] = {
+        "frontmatter": {"title": "A", "type": "Note"},
+        "body": "old",
+    }
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        result = await client.call_tool("store_knowledge", {"content": "the corrected claim"})
+    assert result.data["contradictions"] == [{"id": "/a", "note": "corrected the claim"}]
+    assert result.data["summary"].endswith(
+        "Post-run check: 1 contradiction(s) resolved in place: /a."
+    )
 
 
 # --- trace sessions (step 3.1) -----------------------------------------------
@@ -954,6 +996,111 @@ async def test_store_knowledge_passes_topic_hint_to_task(tmp_path, monkeypatch):
     )
     task = providers["user-a"].calls[0][0][1]["content"]
     assert "Topic hint from the caller: home-automation" in task
+
+
+# --- store_knowledge images: validation + asset wiring -------------------------
+
+_B64_PIXEL = base64.b64encode(b"\x89PNG fake").decode("ascii")
+
+
+async def test_store_knowledge_with_image_end_to_end(tmp_path, monkeypatch):
+    server, manager, backends, providers, _ = make_stack(
+        tmp_path,
+        {
+            "user-a": [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="write_concept",
+                            arguments={
+                                "path": "/new.md",
+                                "frontmatter": {"title": "New", "type": "Note"},
+                                "body": "fresh",
+                            },
+                        )
+                    ]
+                ),
+                LLMResponse(text="stored with image"),
+            ]
+        },
+    )
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "store_knowledge",
+            {
+                "content": "fresh",
+                "images": [
+                    {
+                        "filename": "diagram.png",
+                        "media_type": "image/png",
+                        "data_base64": _B64_PIXEL,
+                    }
+                ],
+            },
+        )
+    assert result.data["stored"] == [{"id": "/new", "title": "New", "action": "created"}]
+    # asset landed on disk under the hidden asset store, content-addressed
+    assets = list((manager.library_root("user-a") / ".athenaeum" / "assets").glob("*.png"))
+    assert len(assets) == 1
+    assert assets[0].read_bytes() == b"\x89PNG fake"
+    assert assets[0].name.endswith("-diagram.png")
+    # the task carries the absolute markdown image link, never the base64
+    task = providers["user-a"].calls[0][0][1]["content"]
+    assert f"![diagram.png](/.athenaeum/assets/{assets[0].name})" in task
+    assert _B64_PIXEL not in task
+
+
+@pytest.mark.parametrize(
+    "images,match",
+    [
+        (
+            [
+                {"filename": f"{i}.png", "media_type": "image/png", "data_base64": _B64_PIXEL}
+                for i in range(6)
+            ],
+            "at most 5",
+        ),
+        (
+            [{"filename": "a.tiff", "media_type": "image/tiff", "data_base64": _B64_PIXEL}],
+            "media_type",
+        ),
+        (
+            [{"filename": "a.png", "media_type": "image/png", "data_base64": "not b64 !!!"}],
+            "base64",
+        ),
+    ],
+)
+async def test_store_knowledge_image_validation_tool_errors(tmp_path, monkeypatch, images, match):
+    server, manager, backends, providers, _ = make_stack(
+        tmp_path, {"user-a": [LLMResponse(text="unused")]}
+    )
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match=match):
+            await client.call_tool("store_knowledge", {"content": "c", "images": images})
+    assert providers["user-a"].calls == []  # rejected before the librarian ran
+
+
+async def test_store_knowledge_image_size_limit(tmp_path, monkeypatch):
+    big_b64 = base64.b64encode(b"x" * (5 * 1024 * 1024 + 1)).decode("ascii")
+    server, manager, backends, providers, _ = make_stack(
+        tmp_path, {"user-a": [LLMResponse(text="unused")]}
+    )
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="byte limit"):
+            await client.call_tool(
+                "store_knowledge",
+                {
+                    "content": "c",
+                    "images": [
+                        {"filename": "big.png", "media_type": "image/png", "data_base64": big_b64}
+                    ],
+                },
+            )
+    assert providers["user-a"].calls == []
 
 
 # --- internal tool dispatch: arg coercion (L6) -------------------------------

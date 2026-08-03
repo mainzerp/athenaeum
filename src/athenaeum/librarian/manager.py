@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_IDLE_TIMEOUT = 30 * 60  # 30 minutes, seconds
 
 _CONFIG_COLUMNS = (
-    "llm_model, prompt_addendum, trace_keep, activity_keep, versioning, "
+    "llm_model, prompt_addendum, trace_keep, activity_keep, payload_keep, versioning, "
     "snapshot_keep, library_name, library_description, "
     "librarian_connection_id, curator_connection_id, curator_model, "
     "curate_last_run_at, curate_prompt_addendum, "
@@ -105,6 +105,7 @@ class LibrarianManager:
         prompt_addendum = row["prompt_addendum"]
         trace_keep = row["trace_keep"]
         activity_keep = row["activity_keep"]
+        payload_keep = row["payload_keep"]
         versioning = row["versioning"]
         snapshot_keep = row["snapshot_keep"]
         library_name = row["library_name"]
@@ -194,6 +195,7 @@ class LibrarianManager:
             prompt_addendum=prompt_addendum,
             trace_keep=trace_keep if trace_keep is not None else 0,
             activity_keep=activity_keep if activity_keep is not None else 0,
+            payload_keep=payload_keep if payload_keep is not None else 0,
             versioning=bool(versioning),
             snapshot_keep=snapshot_keep if snapshot_keep is not None else 0,
             library_name=library_name,

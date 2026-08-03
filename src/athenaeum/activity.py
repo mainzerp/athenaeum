@@ -13,6 +13,7 @@ in the outer BearerAuthMiddleware are never journaled (accepted, T7).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 import time
@@ -31,6 +32,29 @@ from athenaeum.librarian.tracing import (
 )
 
 MAX_ARGS = 2000  # journal argument strings are truncated to this length
+
+
+def _sanitize_arguments(tool: str, arguments: dict) -> dict:
+    """Replace bulky argument values with refs before journaling (R20).
+
+    For ``store_knowledge`` each ``images[i].data_base64` is hashed to a
+    ``sha256:<hex16> (<n> chars)`` ref — the journal records the reference,
+    never the base64 payload. All other tools/arguments pass through
+    unchanged.
+    """
+    if tool != "store_knowledge":
+        return arguments
+    images = arguments.get("images")
+    if not isinstance(images, list):
+        return arguments
+    sanitized_images = []
+    for image in images:
+        if isinstance(image, dict) and isinstance(image.get("data_base64"), str):
+            data = image["data_base64"]
+            digest = hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
+            image = {**image, "data_base64": f"sha256:{digest} ({len(data)} chars)"}
+        sanitized_images.append(image)
+    return {**arguments, "images": sanitized_images}
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -136,7 +160,10 @@ class ActivityMiddleware(Middleware):
             "user_id": user_id,
             "token_label": label,
             "tool": context.message.name,
-            "arguments": _truncate(json.dumps(arguments, default=str), MAX_ARGS),
+            "arguments": _truncate(
+                json.dumps(_sanitize_arguments(context.message.name, arguments), default=str),
+                MAX_ARGS,
+            ),
             "started_at": context.timestamp.isoformat(),
         }
         self._registry.add(entry)

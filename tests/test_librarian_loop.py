@@ -7,14 +7,19 @@ LibraryBackend on tmp_path (plan section 5 item 7, plan Step 4).
 """
 
 import dataclasses
+import hashlib
 import json
 import logging
 import re
+import tempfile
 
 import pytest
 
 from athenaeum.librarian.agent import (
     FINAL_ANSWER_REQUEST,
+    KIND_LIBRARIAN,
+    MAX_PAYLOAD_EXCERPT,
+    MAX_STORE_PAYLOAD_REVIEWS,
     TOOL_RESULT_CHAR_LIMIT,
     Librarian,
     LibrarianConfig,
@@ -24,6 +29,7 @@ from athenaeum.librarian.agent import (
     is_stale,
     trust_tier,
 )
+from athenaeum.librarian.gate import AgentRunBusyError
 from athenaeum.librarian.llm import LLMConfig, LLMResponse, ToolCall
 from athenaeum.librarian.prompts import DEFAULT_SYSTEM_PROMPT
 from athenaeum.librarian.tracing import (
@@ -34,6 +40,7 @@ from athenaeum.librarian.tracing import (
 )
 from athenaeum.library import organize as organize_mod
 from athenaeum.library.backend import LibraryBackend
+from athenaeum.library.payloads import PayloadStore
 
 
 class FakeBackend:
@@ -157,12 +164,19 @@ class ScriptedProvider:
         return self.responses.pop(0)
 
 
-def make_librarian(backend, provider, max_iterations=3) -> Librarian:
+def make_librarian(backend, provider, max_iterations=3, *, root=None) -> Librarian:
     config = LibrarianConfig(
         user_id="user-1",
         llm=LLMConfig(provider="openai", model="m", api_key="k", max_iterations=max_iterations),
     )
-    return Librarian("/unused-root", config, backend=backend, provider=provider)
+    # The root defaults to a fresh temp dir: handle_store's payload archive
+    # (0.20.0) writes under <root>/.athenaeum/payloads — never a fixed path.
+    return Librarian(
+        root or tempfile.mkdtemp(prefix="athenaeum-loop-"),
+        config,
+        backend=backend,
+        provider=provider,
+    )
 
 
 def tc(call_id: str, name: str, arguments: dict | None = None) -> ToolCall:
@@ -371,6 +385,26 @@ async def test_handle_update_tracks_writes_and_injects_agent_label():
     task_prompt = provider.calls[0][0][1]["content"]
     assert "UPDATE TASK" in task_prompt
     assert "fix the existing note" in task_prompt
+
+
+async def test_update_task_pins_deprecate_over_delete():
+    """Deletion via update_knowledge ALWAYS routes to deprecate_concept;
+    delete_concept is reserved for curator cleanup (prompt-level pin)."""
+    backend = FakeBackend(
+        docs={"/old.md": {"frontmatter": {"title": "Old", "type": "Note"}, "body": "x"}}
+    )
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "deprecate_concept", {"path": "/old.md"})]),
+            LLMResponse(text="Deprecated the old note."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    await librarian.handle_update("delete the old note")
+    task_prompt = provider.calls[0][0][1]["content"]
+    assert "ALWAYS go through deprecate_concept" in task_prompt
+    assert "NEVER use delete_concept" in task_prompt
+    assert "reserved for curator cleanup" in task_prompt
 
 
 async def test_store_retries_once_on_silent_no_write():
@@ -674,6 +708,377 @@ async def test_links_after_skips_deleted_concepts():
         "orphans": [],
         "healthy": True,
     }
+
+
+# --- payload archive (D3.2, 0.20.0) --------------------------------------------
+#
+# handle_store writes a two-phase record under <root>/.athenaeum/payloads:
+# "received" on entry (busy rejections included), final outcome on exit.
+
+
+def read_payloads(root) -> list[dict]:
+    store = PayloadStore(root)
+    return [store.read(summary["request_id"]) for summary in store.list()]
+
+
+async def test_store_archives_payload_two_phase(tmp_path):
+    """The exit rewrite carries the final outcome + stored entries; the
+    record holds params, identity, and the minted trace_id."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "fresh knowledge",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored /new.md."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, root=tmp_path / "lib")
+
+    result = await librarian.handle_store(
+        "fresh knowledge", kind_hint="note", topic_hint="alpha", agent_label="agent-p"
+    )
+
+    assert result["stored"] == [{"id": "/new", "title": "New", "action": "created"}]
+    (record,) = read_payloads(tmp_path / "lib")
+    assert record["outcome"] == "ok"
+    assert record["error"] is None
+    assert record["tool"] == "store_knowledge"
+    assert record["user_id"] == "user-1"
+    assert record["agent_label"] == "agent-p"
+    assert record["trace_id"]  # minted (no middleware in this harness)
+    assert record["received_at"] and record["finished_at"]
+    assert record["params"] == {
+        "content": "fresh knowledge",
+        "kind_hint": "note",
+        "relates_to": None,
+        "topic_hint": "alpha",
+        "images": [],
+    }
+    assert record["stored"] == [{"id": "/new", "title": "New", "action": "created"}]
+
+
+async def test_store_payload_records_error_on_no_write(tmp_path):
+    """A LibrarianNoWriteError store is archived (exception name only) and re-raised."""
+    backend = FakeBackend()
+    provider = ScriptedProvider([LLMResponse(text="no tools")])
+    librarian = make_librarian(backend, provider, root=tmp_path / "lib")
+
+    with pytest.raises(LibrarianNoWriteError):
+        await librarian.handle_store("nothing happens")
+
+    (record,) = read_payloads(tmp_path / "lib")
+    assert record["outcome"] == "error"
+    assert record["error"] == "LibrarianNoWriteError"
+    assert record["stored"] == []
+
+
+async def test_store_payload_records_partial_outcome(tmp_path):
+    """A mid-loop provider failure after landed writes archives outcome partial."""
+    backend = FakeBackend()
+    provider = FailAfterProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/n.md",
+                            "frontmatter": {"title": "N", "type": "Note"},
+                            "body": "b",
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+    librarian = make_librarian(backend, provider, root=tmp_path / "lib")
+
+    result = await librarian.handle_store("knowledge")
+
+    assert result["partial"] is True
+    (record,) = read_payloads(tmp_path / "lib")
+    assert record["outcome"] == "partial"
+    assert record["stored"] == [{"id": "/n", "title": "N", "action": "created"}]
+
+
+async def test_store_payload_records_busy_rejection(tmp_path):
+    """The received record is written BEFORE the gate acquire, so a busy
+    rejection is archived with outcome busy."""
+    backend = FakeBackend()
+    provider = ScriptedProvider([LLMResponse(text="unused")])
+    librarian = make_librarian(backend, provider, root=tmp_path / "lib")
+
+    async with librarian._run_gate.acquire("user-1", KIND_LIBRARIAN, wait=False):
+        with pytest.raises(AgentRunBusyError):
+            await librarian.handle_store("while busy")
+
+    (record,) = read_payloads(tmp_path / "lib")
+    assert record["outcome"] == "busy"
+    assert record["error"] == "AgentRunBusyError"
+    assert provider.calls == []
+
+
+async def test_store_payload_archive_failure_never_fails_store(tmp_path, monkeypatch):
+    """Best-effort archive (D3.2): a failing PayloadStore is logged; the
+    store result is unaffected."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "x",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, root=tmp_path / "lib")
+
+    def broken_create(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(PayloadStore, "create", broken_create)
+
+    result = await librarian.handle_store("knowledge")
+    assert result["stored"] == [{"id": "/new", "title": "New", "action": "created"}]
+
+
+async def test_store_payload_archives_image_refs_only(tmp_path):
+    """D3.4: archived image params are content-addressed refs — the bytes
+    live once in the asset store, never as base64 in the payload JSON."""
+    backend = make_real_backend(tmp_path)
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "x",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, root=tmp_path / "lib")
+
+    await librarian.handle_store(
+        "knowledge",
+        images=[{"filename": "diagram.png", "media_type": "image/png", "data": b"\x89PNG fake"}],
+    )
+
+    (record,) = read_payloads(tmp_path / "lib")
+    (ref,) = record["params"]["images"]
+    assert ref["filename"] == "diagram.png"
+    assert ref["media_type"] == "image/png"
+    assert ref["bytes"] == len(b"\x89PNG fake")
+    assert ref["sha256"] == hashlib.sha256(b"\x89PNG fake").hexdigest()
+    # the predicted asset path matches the content-addressed write_asset name
+    assert ref["asset"] == f"/.athenaeum/assets/{ref['sha256'][:12]}-diagram.png"
+    assert "data" not in ref
+    assert "data_base64" not in ref
+
+
+# --- contradiction warnings (Feature 1, D1.x, 0.20.0) ---------------------------
+
+
+async def test_store_reports_contradictions_cross_checked():
+    """D1.1: LLM-reported contradictions land in the result ONLY when the
+    tracker confirms an updated/deprecated write on that concept. Runs in
+    degraded mode (no embedding service): the channel is embeddings-
+    independent (D1.5)."""
+    docs = {
+        "/existing.md": {
+            "frontmatter": {"title": "Existing", "type": "Note"},
+            "body": "old body",
+        }
+    }
+    backend = FakeBackend(docs=docs)
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc("c1", "edit_concept", {"path": "/existing.md", "new_body": "new body"})
+                ]
+            ),
+            LLMResponse(
+                text="Updated /existing.md with the corrected version.\n\n"
+                "## Contradictions\n"
+                "- /existing: replaced the outdated version claim\n"
+                "- /hallucinated: no such write happened"
+            ),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    assert librarian._embed is None  # degraded mode (D1.5): no pre-ranked candidates
+
+    result = await librarian.handle_store("the version is now 2.0")
+
+    # the LLM-reported id without a tracked write is dropped
+    assert result["contradictions"] == [
+        {"id": "/existing", "note": "replaced the outdated version claim"}
+    ]
+    # D1.4: the contradiction verdict comes AFTER the links verdict
+    assert result["summary"] == (
+        "Updated /existing.md with the corrected version.\n\n"
+        "## Contradictions\n"
+        "- /existing: replaced the outdated version claim\n"
+        "- /hallucinated: no such write happened"
+        "\n\nPost-run check: 1 written concept(s) received no inbound link: /existing."
+        "\n\nPost-run check: 1 contradiction(s) resolved in place: /existing."
+    )
+
+
+async def test_store_contradiction_via_deprecate_counts():
+    """A deprecate_concept write also verifies a reported contradiction."""
+    backend = FakeBackend(
+        docs={"/old.md": {"frontmatter": {"title": "Old", "type": "Note"}, "body": "x"}}
+    )
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "deprecate_concept", {"path": "/old.md"})]),
+            LLMResponse(
+                text="Deprecated /old.md.\n\n## Contradictions\n- /old: superseded entirely"
+            ),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_store("the old note is obsolete")
+
+    assert result["contradictions"] == [{"id": "/old", "note": "superseded entirely"}]
+
+
+async def test_store_contradictions_absent_without_section_or_writes():
+    """D1.3 absent-when-empty: '- none' and a missing section both yield no field."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "x",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored.\n\n## Contradictions\n- none"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    result = await librarian.handle_store("knowledge")
+    assert "contradictions" not in result
+    assert result["summary"].count("Post-run check:") == 1  # links verdict only
+
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "x",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored without any section."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    result = await librarian.handle_store("knowledge")
+    assert "contradictions" not in result
+
+
+async def test_update_never_reports_contradictions():
+    """D1.2 store-only scoping: the update contract is untouched even when
+    the summary carries a Contradictions section."""
+    docs = {
+        "/existing.md": {
+            "frontmatter": {"title": "Existing", "type": "Note"},
+            "body": "old body",
+        }
+    }
+    backend = FakeBackend(docs=docs)
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc("c1", "edit_concept", {"path": "/existing.md", "new_body": "new body"})
+                ]
+            ),
+            LLMResponse(text="Fixed.\n\n## Contradictions\n- /existing: corrected the claim"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_update("fix the existing note")
+
+    assert "contradictions" not in result
+
+
+async def test_store_task_carries_contradictions_report_instruction():
+    """D1.1 prompt side: the STORE task pins the report format."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "x",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    await librarian.handle_store("knowledge")
+
+    task_prompt = provider.calls[0][0][1]["content"]
+    assert "## Contradictions" in task_prompt
+    assert "- <concept id>: <note>" in task_prompt
 
 
 async def test_missing_required_arg_is_recoverable_tool_error():
@@ -984,9 +1389,9 @@ def test_curate_llm_partial_override_and_default():
     assert plain._curate_llm() is base
 
 
-async def test_unconfigured_librarian_raises():
+async def test_unconfigured_librarian_raises(tmp_path):
     backend = FakeBackend()
-    librarian = Librarian("/unused-root", LibrarianConfig(user_id="user-1"), backend=backend)
+    librarian = Librarian(tmp_path / "lib", LibrarianConfig(user_id="user-1"), backend=backend)
     assert not librarian.configured
     with pytest.raises(LibrarianNotConfiguredError):
         await librarian.handle_request("q")
@@ -1250,6 +1655,147 @@ async def test_curate_against_real_backend(tmp_path):
     assert "/stub" in preamble and "Stub" in preamble
 
 
+async def test_curate_deprecated_cleanup_finding_reaches_curator(tmp_path):
+    """A deprecated concept with no live inbound links is a cleanup finding:
+    it wakes the curator (scripted delete_concept) and converges post-run."""
+    backend = make_real_backend(tmp_path)
+    backend.create_concept("/old.md", {"type": "Note", "title": "Old"}, "stale\n")
+    backend.deprecate_concept("/old.md")
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "delete_concept", {"path": "/old.md"})]),
+            LLMResponse(text="Deleted the deprecated concept."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_curate()
+
+    assert provider.calls, "a cleanup finding must wake the curator"
+    preamble = provider.calls[0][0][1]["content"]
+    assert "deprecated concepts pending cleanup" in preamble
+    assert "- /old (Old)" in preamble
+    assert [a["id"] for a in result["actions"]] == ["/old"]
+    assert result["actions"][0]["action"] == "deleted"
+    # post-run scan: the deprecated concept is gone, nothing left to clean
+    assert result["organized"] is True
+    assert result["findings"]["deprecated_cleanup"] == []
+
+
+# --- curate store-payload digest (D3.6, 0.20.0) ---------------------------------
+
+
+def payload_record(
+    request_id: str,
+    *,
+    outcome: str = "error",
+    received_at: str = "2026-08-01T00:00:00+00:00",
+    content: str = "c",
+) -> dict:
+    return {
+        "request_id": request_id,
+        "tool": "store_knowledge",
+        "user_id": "user-1",
+        "agent_label": "agent-a",
+        "trace_id": "20260801T000000Z-deadbeef",
+        "received_at": received_at,
+        "outcome": outcome,
+        "error": "LibrarianNoWriteError" if outcome == "error" else None,
+        "params": {"content": content},
+        "stored": [],
+    }
+
+
+async def test_curate_wakes_on_failed_store_payload_once(tmp_path):
+    """D3.6: a failed store payload is a one-shot curate finding — it wakes
+    a paid run and is consumed by it (post-run key empty, organized True)."""
+    backend = FakeBackend()
+    store_provider = ScriptedProvider([LLMResponse(text="no tools")])
+    storer = make_librarian(backend, store_provider, root=tmp_path / "lib")
+    with pytest.raises(LibrarianNoWriteError):
+        await storer.handle_store("unstored knowledge about zeta")
+
+    curator_provider = ScriptedProvider([LLMResponse(text="Reviewed the failed payload.")])
+    curator = make_librarian(backend, curator_provider, root=tmp_path / "lib")
+    # the payload archive lives under a dot-dir: structural scans stay empty
+    backend.scan_root = tmp_path / "lib"
+
+    result = await curator.handle_curate()
+
+    assert curator_provider.calls, "a payload-only finding must wake a curate run"
+    preamble = curator_provider.calls[0][0][1]["content"]
+    assert "store payloads pending review" in preamble
+    assert "unstored knowledge about zeta" in preamble
+    assert result["organized"] is True
+    # one-shot: the post-run report never re-lists the consumed payload
+    assert result["findings"]["store_payload_reviews"] == []
+
+
+async def test_curate_skips_payloads_older_than_last_run(tmp_path):
+    """The time filter is payload-store-local (D3.6/R22): payloads received
+    before curate_last_run_at are not reported — each payload is reported
+    exactly once because curate_last_run_at advances."""
+    backend = FakeBackend()
+    provider = ScriptedProvider([LLMResponse(text="unused")])
+    config = LibrarianConfig(
+        user_id="user-1",
+        llm=LLMConfig(provider="openai", model="m", api_key="k"),
+        curate_last_run_at="2026-08-02T00:00:00+00:00",
+    )
+    librarian = Librarian(tmp_path / "lib", config, backend=backend, provider=provider)
+    backend.scan_root = tmp_path / "lib"
+    PayloadStore(tmp_path / "lib").create(
+        payload_record(
+            "20260801T000000Z-aaaa1111",
+            received_at="2026-08-01T00:00:00+00:00",  # before the baseline
+            content="old failed store",
+        )
+    )
+
+    result = await librarian.handle_curate()
+
+    assert provider.calls == []  # nothing wakes the curator
+    assert result["organized"] is True
+    assert result["summary"] == "Library is well-organized; nothing to curate."
+
+
+def test_store_payload_reviews_digest_bounds(tmp_path):
+    """The digest keeps the MAX_STORE_PAYLOAD_REVIEWS newest error/partial
+    records and bounds excerpts at MAX_PAYLOAD_EXCERPT chars."""
+    config = LibrarianConfig(
+        user_id="user-1",
+        llm=LLMConfig(provider="openai", model="m", api_key="k"),
+    )
+    librarian = Librarian(
+        tmp_path / "lib", config, backend=FakeBackend(), provider=ScriptedProvider([])
+    )
+    store = PayloadStore(tmp_path / "lib")
+    for day in range(1, 8):
+        store.create(
+            payload_record(
+                f"2026080{day}T000000Z-aaaa111{day}",
+                received_at=f"2026-08-0{day}T00:00:00+00:00",
+                content="x" * 200,
+            )
+        )
+    store.create(payload_record("20260808T000000Z-aaaa1118", outcome="ok"))
+    store.create(payload_record("20260809T000000Z-aaaa1119", outcome="busy"))
+
+    reviews = librarian._store_payload_reviews()
+
+    # ok/busy outcomes are excluded; newest first, capped at 5
+    assert [r["request_id"] for r in reviews] == [
+        "20260807T000000Z-aaaa1117",
+        "20260806T000000Z-aaaa1116",
+        "20260805T000000Z-aaaa1115",
+        "20260804T000000Z-aaaa1114",
+        "20260803T000000Z-aaaa1113",
+    ]
+    assert len(reviews) == MAX_STORE_PAYLOAD_REVIEWS
+    assert all(r["outcome"] == "error" for r in reviews)
+    assert all(len(r["excerpt"]) == MAX_PAYLOAD_EXCERPT for r in reviews)
+
+
 async def test_store_links_after_against_real_backend(tmp_path):
     """links_after against a real LibraryBackend: the real link graph agrees."""
     backend = make_real_backend(tmp_path)
@@ -1288,6 +1834,45 @@ async def test_store_links_after_against_real_backend(tmp_path):
 
     assert result["links_after"]["healthy"] is True
     assert "/new" in result["links_after"]["checked"]
+
+
+async def test_store_with_images_attaches_asset_links(tmp_path):
+    """handle_store writes image assets server-side (real backend); the task
+    text carries the absolute markdown image links, never the payload."""
+    backend = make_real_backend(tmp_path)
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "new knowledge\n",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored /new.md with the diagram."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_store(
+        "knowledge",
+        images=[{"filename": "diagram.png", "media_type": "image/png", "data": b"\x89PNG fake"}],
+    )
+
+    assets = list((tmp_path / "lib" / ".athenaeum" / "assets").glob("*.png"))
+    assert len(assets) == 1
+    assert assets[0].read_bytes() == b"\x89PNG fake"
+    assert assets[0].name.endswith("-diagram.png")
+    task = provider.calls[0][0][1]["content"]
+    assert "Attached images" in task
+    assert f"![diagram.png](/.athenaeum/assets/{assets[0].name})" in task
+    assert result["stored"] == [{"id": "/new", "title": "New", "action": "created"}]
 
 
 def test_lazy_reconcile_repairs_drifted_index(tmp_path):

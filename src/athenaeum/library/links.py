@@ -5,6 +5,8 @@ Bundle links come in two forms (OKF spec section 6): absolute bundle-relative
 Concept-to-concept links are extracted from markdown bodies and from the
 path-valued frontmatter fields (``resource``, ``sources[].resource``,
 ``computation``, ``executor.resource``, ``attester.resource``).
+Markdown image syntax (``![alt](src)``) is NOT a concept link: it is excluded
+from extraction and rewriting, so image assets never become graph citizens.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from pathlib import Path
 from . import frontmatter as fm_mod
 from .frontmatter import write_text_atomic
 
-LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+LINK_RE = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
 

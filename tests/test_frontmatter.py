@@ -11,6 +11,7 @@ from athenaeum.library.frontmatter import (
     FrontmatterError,
     dump_document,
     split_document,
+    write_bytes_atomic,
     write_text_atomic,
 )
 
@@ -86,6 +87,28 @@ def test_write_text_atomic_cleans_tmp_on_replace_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("os.replace", failing_replace)
     with pytest.raises(OSError, match="simulated replace failure"):
         write_text_atomic(target, "x\n")
+    assert not target.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_write_bytes_atomic_round_trip(tmp_path):
+    target = tmp_path / "sub" / "blob.bin"  # parent dir created on demand
+    payload = bytes(range(256)) + b"\x00\xffbinary\n"
+    write_bytes_atomic(target, payload)
+    assert target.read_bytes() == payload
+    assert list(tmp_path.glob("**/*.tmp")) == []
+
+
+def test_write_bytes_atomic_cleans_tmp_on_replace_failure(tmp_path, monkeypatch):
+    """L13: a failed os.replace must not leak the tmp sibling (binary twin)."""
+    target = tmp_path / "blob.bin"
+
+    def failing_replace(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("os.replace", failing_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        write_bytes_atomic(target, b"x")
     assert not target.exists()
     assert list(tmp_path.glob("*.tmp")) == []
 

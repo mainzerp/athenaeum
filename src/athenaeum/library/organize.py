@@ -22,7 +22,13 @@ duplicate pair only when at least one member changed.
 
 The module stays pure functions / no backend state / no LLM. The fifth
 finding key, ``semantic_duplicate_candidates``, is an empty placeholder the
-caller (``Librarian.handle_curate``) fills from the embedding store.
+caller (``Librarian.handle_curate``) fills from the embedding store. The
+sixth, ``deprecated_cleanup``, is computed here: deprecated concepts with no
+inbound links from non-deprecated concepts are pending deletion. The
+seventh, ``store_payload_reviews``, is another caller-filled placeholder:
+``handle_curate`` fills it from the payload archive (failed/partial store
+requests since the previous curate run — one-shot events, not structural
+state).
 """
 
 from __future__ import annotations
@@ -69,11 +75,13 @@ FINDING_KEYS = (
     "thin_concepts",
     "near_duplicate_candidates",
     "semantic_duplicate_candidates",
+    "deprecated_cleanup",
+    "store_payload_reviews",
 )
 
 
 def findings_empty(report: dict) -> bool:
-    """True when all five finding lists are empty (the no-op predicate)."""
+    """True when all finding lists are empty (the no-op predicate)."""
     return all(not report[key] for key in FINDING_KEYS)
 
 
@@ -176,12 +184,12 @@ def organization_findings(root: str | Path, *, since: str | None = None) -> dict
         and c["status"] != "deprecated"
     ]
 
-    # 4. near-duplicate candidates (same type; numbered title series excluded;
-    #    pair reported when a member changed)
+    # 4. near-duplicate candidates (same type; deprecated excluded; numbered
+    #    title series excluded; pair reported when a member changed)
     token_sets = {c["id"]: _tokens(c["title"]) for c in concepts}
     by_type: dict[str, list[dict]] = {}
     for c in concepts:
-        if c["type"]:
+        if c["type"] and c["status"] != "deprecated":
             by_type.setdefault(str(c["type"]), []).append(c)
     near_duplicate_candidates = []
     for group in by_type.values():
@@ -223,6 +231,26 @@ def organization_findings(root: str | Path, *, since: str | None = None) -> dict
     near_duplicate_candidates.sort(key=lambda item: (-item["similarity"], item["ids"]))
     near_duplicate_candidates = near_duplicate_candidates[:NEAR_DUPLICATE_MAX_PAIRS]
 
+    # 5. deprecated cleanup: deprecated concepts with no inbound links from
+    #    non-deprecated concepts are pending deletion. A live inbound link
+    #    keeps a deprecated concept unlisted (convergence: never a permanent
+    #    re-reported finding); inbound from another deprecated concept does
+    #    not count. Whole-tree structural state, never changed-set filtered.
+    graph = links_mod.link_graph(root)
+    status_by_path = {f"{c['id']}.md": c["status"] for c in concepts}
+    live_inbound: dict[str, int] = {p: 0 for p in graph}
+    for source, targets in graph.items():
+        if status_by_path.get(source) == "deprecated":
+            continue
+        for target in targets:
+            if target in live_inbound:
+                live_inbound[target] += 1
+    deprecated_cleanup = [
+        {"id": c["id"], "title": c["title"]}
+        for c in sorted(concepts, key=lambda c: c["id"])
+        if c["status"] == "deprecated" and live_inbound.get(f"{c['id']}.md", 0) == 0
+    ]
+
     return {
         "type_named_folders": type_named_folders,
         "oversized_folders": oversized_folders,
@@ -230,6 +258,10 @@ def organization_findings(root: str | Path, *, since: str | None = None) -> dict
         "near_duplicate_candidates": near_duplicate_candidates,
         # Populated by the caller (handle_curate); always empty here.
         "semantic_duplicate_candidates": [],
+        "deprecated_cleanup": deprecated_cleanup,
+        # Populated by the caller (handle_curate) from the payload archive;
+        # always empty here.
+        "store_payload_reviews": [],
         "concepts_scanned": len(concepts),
         "since": since,
     }

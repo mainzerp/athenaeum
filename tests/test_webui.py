@@ -503,6 +503,7 @@ def test_config_behavior_and_library_settings(env):
             "snapshot_keep": "5",
             "trace_keep": "7",
             "activity_keep": "11",
+            "payload_keep": "13",
         },
     )
     cfg = read_config(data_root, user["id"])
@@ -510,6 +511,7 @@ def test_config_behavior_and_library_settings(env):
     assert cfg["snapshot_keep"] == 5
     assert cfg["trace_keep"] == 7
     assert cfg["activity_keep"] == 11
+    assert cfg["payload_keep"] == 13
     assert cfg["library_name"] == "My KB"
     assert cfg["library_description"] == "desc"
 

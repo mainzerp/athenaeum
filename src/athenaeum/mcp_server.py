@@ -22,9 +22,13 @@ and Decision 4 (bearer-token auth seam; OAuth 2.1 + PKCE deferred).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import inspect
 import logging
+import posixpath
+import re
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
@@ -341,6 +345,61 @@ class SeedMiddleware(Middleware):
         return rewritten
 
 
+MAX_IMAGES_PER_STORE = 5  # attached images accepted per store_knowledge call
+MAX_IMAGE_BYTES = 5 * 1024 * 1024  # decoded size cap per image
+IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_IMAGE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _sanitize_image_filename(filename: str) -> str:
+    """Bare-name, safe-character filename for the asset store."""
+    base = posixpath.basename(filename.replace("\\", "/"))
+    cleaned = _IMAGE_NAME_RE.sub("-", base)
+    return cleaned if cleaned not in ("", ".", "..") else "image"
+
+
+def _validate_images(images: list[dict] | None) -> list[dict] | None:
+    """Validate attached images (ToolError on violation); return them decoded.
+
+    Each accepted image becomes ``{"filename", "media_type", "data"}`` with
+    sanitized filename and raw bytes — base64 never travels further in.
+    """
+    if images is None:
+        return None
+    if len(images) > MAX_IMAGES_PER_STORE:
+        raise ToolError(f"at most {MAX_IMAGES_PER_STORE} images per store_knowledge call.")
+    validated = []
+    for image in images:
+        if not isinstance(image, dict):
+            raise ToolError("each image must be an object with filename/media_type/data_base64.")
+        media_type = image.get("media_type")
+        if media_type not in IMAGE_MEDIA_TYPES:
+            raise ToolError(
+                f"unsupported image media_type {media_type!r}; "
+                f"allowed: {', '.join(sorted(IMAGE_MEDIA_TYPES))}."
+            )
+        data_base64 = image.get("data_base64")
+        if not isinstance(data_base64, str):
+            raise ToolError("image data_base64 must be a base64 string.")
+        try:
+            data = base64.b64decode(data_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raise ToolError("image data_base64 is not valid base64.") from None
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ToolError(f"image exceeds the {MAX_IMAGE_BYTES}-byte limit.")
+        filename = image.get("filename")
+        if not isinstance(filename, str) or not filename:
+            raise ToolError("image filename must be a non-empty string.")
+        validated.append(
+            {
+                "filename": _sanitize_image_filename(filename),
+                "media_type": media_type,
+                "data": data,
+            }
+        )
+    return validated
+
+
 def create_mcp_server(
     manager: LibrarianManager,
     *,
@@ -380,11 +439,15 @@ def create_mcp_server(
         kind_hint: str | None = None,
         relates_to: list[str] | None = None,
         topic_hint: str | None = None,
+        images: list[dict] | None = None,
         ctx: Context = None,
     ) -> dict:
         """Persist new knowledge; the librarian decides placement/frontmatter/links \
-(topic_hint names the target topic area)."""
+(topic_hint names the target topic area). Optional images ([{"filename", \
+"media_type", "data_base64"}]) are stored server-side as library assets and \
+linked into the stored concepts."""
         user_id, label = _identity()
+        validated_images = _validate_images(images)
         async with _agent_run(
             manager, user_id, label, "store_knowledge", for_client=True
         ) as librarian:
@@ -393,6 +456,7 @@ def create_mcp_server(
                 kind_hint=kind_hint,
                 relates_to=relates_to,
                 topic_hint=topic_hint,
+                images=validated_images,
                 agent_label=label,
             )
         # The trace session closed when the with-block exited (plan step 3.1).

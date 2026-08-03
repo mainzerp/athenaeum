@@ -128,7 +128,8 @@ class FtsIndex:
         """Best-effort write-through index update; NEVER raises.
 
         Mirrors ``EmbeddingService.sync_writes`` minus the embedding: actions
-        collapse per path (last wins), ``deleted`` removes the row, a
+        collapse per path (last wins), ``deleted`` and ``deprecated`` remove
+        the row (deprecated concepts are hidden pending cleanup), a
         ``moved`` write's ``from_id`` removes the OLD path's row (L8), and
         survivors are re-read through the backend and re-indexed with the
         current content hash. Per-write failures are logged and skipped.
@@ -149,7 +150,7 @@ class FtsIndex:
                 self.delete(concept_path)
             for concept_path, write in by_path.items():
                 try:
-                    if write.get("action") == "deleted":
+                    if write.get("action") in ("deleted", "deprecated"):
                         self.delete(concept_path)
                         continue
                     doc = backend.read_document(concept_path)
@@ -178,6 +179,10 @@ class FtsIndex:
                     doc = backend.read_document(bundle_path)
                 except Exception as exc:
                     logger.warning("FTS reconcile skipped %s: %s", concept_path, exc)
+                    continue
+                if doc["frontmatter"].get("status") == "deprecated":
+                    # Hidden pending cleanup: excluded from on_disk, so a
+                    # stale stored row drops out in the deletion pass below.
                     continue
                 text = concept_text(doc["frontmatter"], doc["body"])
                 on_disk[concept_path] = (text, content_hash(text))

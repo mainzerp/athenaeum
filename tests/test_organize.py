@@ -32,6 +32,14 @@ def test_findings_empty_predicate(tmp_path):
     assert not findings_empty(report)
 
 
+def test_store_payload_reviews_is_caller_filled_placeholder(tmp_path):
+    """The 7th key ships as an empty placeholder; handle_curate fills it
+    from the payload archive (one-shot events, not structural state)."""
+    report = organization_findings(tmp_path)
+    assert "store_payload_reviews" in FINDING_KEYS
+    assert report["store_payload_reviews"] == []
+
+
 def test_type_named_folder_top_level_flagged_nested_not(tmp_path):
     write_concept(tmp_path, "/versions/v1.md", {"type": "Version", "title": "V1"})
     write_concept(tmp_path, "/athenaeum/versions/v2.md", {"type": "Version", "title": "V2"})
@@ -122,6 +130,56 @@ def test_series_rule_keeps_genuine_duplicates(tmp_path):
     report = organization_findings(tmp_path)
     assert report["near_duplicate_candidates"] == [
         {"ids": ["/a", "/b"], "similarity": 1.0, "shared": ["learned", "lessons", "phase"]}
+    ]
+
+
+def test_near_duplicate_excludes_deprecated(tmp_path):
+    """Deprecated concepts are hidden: they never join the duplicate grouping."""
+    write_concept(tmp_path, "/a.md", {"type": "Note", "title": "Lessons Learned Phase"})
+    write_concept(
+        tmp_path,
+        "/b.md",
+        {"type": "Note", "title": "Phase Lessons Learned", "status": "deprecated"},
+    )
+    report = organization_findings(tmp_path)
+    assert report["near_duplicate_candidates"] == []
+
+
+# --- deprecated_cleanup (6th finding key) --------------------------------------
+
+
+def test_deprecated_cleanup_zero_inbound_reported(tmp_path):
+    write_concept(tmp_path, "/old.md", {"type": "Note", "title": "Old", "status": "deprecated"})
+    report = organization_findings(tmp_path)
+    assert report["deprecated_cleanup"] == [{"id": "/old", "title": "Old"}]
+    assert not findings_empty(report)  # a cleanup finding wakes curation
+
+
+def test_deprecated_cleanup_live_inbound_not_reported(tmp_path):
+    """Convergence pin: a deprecated concept with live inbound links is never
+    reported, so it cannot become a permanent re-reported finding."""
+    write_concept(tmp_path, "/old.md", {"type": "Note", "title": "Old", "status": "deprecated"})
+    write_concept(
+        tmp_path, "/live.md", {"type": "Note", "title": "Live"}, body="see [Old](/old.md)\n"
+    )
+    report = organization_findings(tmp_path)
+    assert report["deprecated_cleanup"] == []
+
+
+def test_deprecated_cleanup_inbound_from_deprecated_counts_as_deletable(tmp_path):
+    """Inbound only from another deprecated concept does not keep a deprecated
+    concept unlisted — the whole deprecated cluster is pending deletion."""
+    write_concept(tmp_path, "/old-a.md", {"type": "Note", "title": "Old A", "status": "deprecated"})
+    write_concept(
+        tmp_path,
+        "/old-b.md",
+        {"type": "Note", "title": "Old B", "status": "deprecated"},
+        body="see [A](/old-a.md)\n",
+    )
+    report = organization_findings(tmp_path)
+    assert report["deprecated_cleanup"] == [
+        {"id": "/old-a", "title": "Old A"},
+        {"id": "/old-b", "title": "Old B"},
     ]
 
 

@@ -82,6 +82,26 @@ def test_seed_rebuilds_on_log_mtime_change(tmp_path):
     assert "/b.md" in second
 
 
+def test_seed_concepts_hide_deprecated(tmp_path):
+    """Deprecated concepts are hidden from the seed's Concepts section
+    (pending cleanup); the structural tree view still lists the file."""
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/live.md", {"type": "Concept", "title": "Live", "description": "here"}, "x\n"
+    )
+    backend.create_concept(
+        "/old.md", {"type": "Concept", "title": "Old", "description": "gone"}, "y\n"
+    )
+    backend.deprecate_concept("/old.md")
+    seed = generate_seed(backend)
+    concept_lines = [line for line in seed.splitlines() if line.startswith("- /")]
+    assert any(line.startswith("- /live.md") for line in concept_lines)
+    assert not any(line.startswith("- /old.md") for line in concept_lines)
+    assert "gone" not in seed
+    # _tree is a structural filename view: the deprecated file still shows
+    assert "old.md" in seed
+
+
 # --- SeedCache fallback (CS-11) ----------------------------------------------
 
 

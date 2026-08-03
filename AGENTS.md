@@ -103,7 +103,7 @@ Research and Implementation only — Planning stays single/sequential. **MAX 3 p
 
 **Naming:** `docs/SubAgent/[NAME]/[SUFFIX].md` — `[NAME]` is a short task identifier in `UPPER_SNAKE_CASE` chosen at task start (e.g. `ADD_UPS_PROTOCOL`), reused across all phases; `[SUFFIX]` is `ANALYSIS`, `[TOPIC]_ANALYSIS`, `PLAN`, `PART1_PLAN`, `CHANGES`, etc.
 
-**Artifacts:** `docs/SubAgent/` belongs in `.gitignore` (ephemeral working files). To preserve one (e.g. an approved plan promoted to a ticket): `git add -f docs/SubAgent/[NAME]/PLAN.md` or a targeted `.gitignore` exception.
+**Artifacts:** `docs/SubAgent/` belongs in `.gitignore` (ephemeral working files). To preserve one (e.g. an approved plan promoted to a ticket): `git add -f docs/SubAgent/[NAME]/PLAN.md` or a targeted `.gitignore` exception. Because the folder is gitignored, `Glob` never matches it — subagent prompts must hand over exact artifact paths for `Read`/`Edit`, never glob patterns (a synthesis agent once reported all inputs missing because of this).
 
 ### Required Prompt Blocks
 

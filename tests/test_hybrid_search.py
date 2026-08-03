@@ -339,6 +339,43 @@ def test_fts_reconcile_never_raises_on_unreadable_doc(tmp_path):
     assert fts.hashes().keys() == {"ok.md"}
 
 
+@requires_fts5
+async def test_fts_sync_writes_deprecated_deletes_row(tmp_path):
+    """A deprecated write removes the FTS row, exactly like deleted."""
+    db_path = make_db(tmp_path)
+    root = tmp_path / "lib"
+    root.mkdir()
+    backend = make_backend(root)
+    fts = FtsIndex(db_path, "user-1")
+    write_concept(root, "a.md", "Alpha", "searchable body")
+    fts.sync_writes(backend, [{"id": "/a", "action": "created"}])
+    assert fts.hashes().keys() == {"a.md"}
+
+    fts.sync_writes(backend, [{"id": "/a", "action": "deprecated"}])
+    assert fts.hashes() == {}
+    assert fts.search("searchable", 10) == []
+
+
+@requires_fts5
+def test_fts_reconcile_skips_deprecated_on_disk(tmp_path):
+    """Deprecated on-disk concepts are not indexed; a stale row drops out."""
+    db_path = make_db(tmp_path)
+    root = tmp_path / "lib"
+    root.mkdir()
+    backend = make_backend(root)
+    write_concept(root, "a.md", "Alpha", "live body")
+    (root / "old.md").write_text(
+        "---\ntitle: Old\nstatus: deprecated\n---\nold body\n", encoding="utf-8"
+    )
+    fts = FtsIndex(db_path, "user-1")
+    fts.upsert("old.md", "stale deprecated text", "h-stale")
+
+    fts.reconcile(backend)
+
+    assert set(fts.hashes()) == {"a.md"}
+    assert fts.search("deprecated", 10) == []
+
+
 # --- EmbeddingService wiring -----------------------------------------------------
 
 

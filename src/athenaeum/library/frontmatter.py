@@ -69,6 +69,22 @@ def write_text_atomic(path: str | Path, text: str) -> None:
         raise
 
 
+def write_bytes_atomic(path: str | Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` atomically: unique tmp sibling + fsync + rename."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex}.tmp")
+    try:
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # L13: never leak the tmp sibling
+        raise
+
+
 def _split_raw(text: str) -> tuple[str | None, str]:
     """Split into ``(frontmatter_text, body)``; frontmatter_text None if absent."""
     lines = text.split("\n")

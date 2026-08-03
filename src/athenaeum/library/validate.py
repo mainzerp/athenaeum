@@ -13,7 +13,9 @@ Error classes (6, spec section 11 / analysis section 1.5):
 Warning classes (9): ``broken-link``, ``missing-recommended``,
 ``non-conventional-actor``, ``verified-bare-mapping``, ``malformed-date``,
 ``index-drift``, ``footnote-mismatch``, plus ``orphan`` (no inbound and no
-outbound bundle links). Broken links are warnings, never errors (spec 6.1).
+outbound bundle links; deprecated concepts are never reported — they are
+pending removal, not graph citizens to wire in). Broken links are warnings,
+never errors (spec 6.1).
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ def validate_bundle(root: str | Path, scope: str | None = None) -> dict:
         for p in root.rglob("*.md")
         if not any(part.startswith(".") for part in p.relative_to(root).parts)
     )
+    statuses: dict[str, Any] = {}  # rel -> frontmatter status (orphan check)
     for path in md_files:
         rel = "/" + path.relative_to(root).as_posix()
         if not in_scope(rel):
@@ -77,6 +80,7 @@ def validate_bundle(root: str | Path, scope: str | None = None) -> dict:
             errors.append(_entry(rel, "frontmatter-parse", "concept has no frontmatter block"))
             continue
         fm, _ = fm_mod.split_document(text)
+        statuses[rel] = fm.get("status")
         _check_concept(rel, fm, raw_fm, body, errors, warnings)
 
     # link integrity (warning, never error)
@@ -115,6 +119,8 @@ def validate_bundle(root: str | Path, scope: str | None = None) -> dict:
             if target in inbound:
                 inbound[target] += 1
     for concept, outbound in graph.items():
+        if statuses.get(concept) == "deprecated":
+            continue  # pending removal: never reported, never wired in (L16)
         if in_scope(concept) and not outbound and inbound.get(concept, 0) == 0:
             warnings.append(_entry(concept, "orphan", "no inbound or outbound bundle links"))
 

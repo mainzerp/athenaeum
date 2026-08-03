@@ -8,6 +8,8 @@ Self-contained: local fakes mirror the test_mcp_tools.py stand-ins.
 """
 
 import asyncio
+import base64
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -18,8 +20,8 @@ from fastmcp.server.middleware import MiddlewareContext
 import athenaeum.identity as identity_module
 import athenaeum.mcp_server as mcp_server
 from athenaeum import db as db_module
-from athenaeum.activity import MAX_ARGS, ActivityMiddleware, ActivityRegistry
-from athenaeum.librarian.llm import LLMResponse
+from athenaeum.activity import MAX_ARGS, ActivityMiddleware, ActivityRegistry, _sanitize_arguments
+from athenaeum.librarian.llm import LLMResponse, ToolCall
 from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.mcp_server import SeedCache, create_mcp_server, sqlite_token_lookup
 
@@ -46,6 +48,9 @@ class FakeBackend:
     def link_check(self, path=None) -> list[dict]:
         return []
 
+    def write_asset(self, filename: str, data: bytes) -> str:
+        return f"/.athenaeum/assets/fake-{filename}"
+
     def status(self) -> dict:
         return {
             "stats": {"concepts": len(self.docs), "directories": 1},
@@ -54,7 +59,11 @@ class FakeBackend:
         }
 
     def link_health(self, paths: list[str]) -> dict:
-        return {}
+        report = {}
+        for raw in paths:
+            bundle = raw if raw.startswith("/") else "/" + raw
+            report[bundle] = {"inbound": 0, "outbound": 0}
+        return report
 
 
 class ScriptedProvider:
@@ -316,3 +325,63 @@ async def test_middleware_truncates_long_arguments():
     assert len(arguments) <= MAX_ARGS + len("…[truncated]")
     assert arguments.endswith("…[truncated]")
     assert registry.snapshot() == []  # removed after the call
+
+
+# --- argument sanitization (R20: journal carries refs, never base64) -----------
+
+
+def test_sanitize_arguments_replaces_image_base64():
+    args = {
+        "content": "c",
+        "images": [
+            {"filename": "a.png", "media_type": "image/png", "data_base64": "QUJD"},
+            {"filename": "b.png"},  # tolerated: no data_base64
+        ],
+    }
+    out = _sanitize_arguments("store_knowledge", args)
+    ref = out["images"][0]["data_base64"]
+    assert ref.startswith("sha256:")
+    assert ref.endswith("(4 chars)")
+    assert "QUJD" not in json.dumps(out)
+    assert out["images"][1] == {"filename": "b.png"}
+    # other tools and image-less arguments pass through untouched
+    assert _sanitize_arguments("request_knowledge", args) is args
+    assert _sanitize_arguments("store_knowledge", {"content": "c"}) == {"content": "c"}
+
+
+async def test_middleware_journals_image_refs_not_base64(tmp_path, monkeypatch):
+    scripts = [
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="write_concept",
+                    arguments={
+                        "path": "/n.md",
+                        "frontmatter": {"title": "N", "type": "Note"},
+                        "body": "b",
+                    },
+                )
+            ]
+        ),
+        LLMResponse(text="stored"),
+    ]
+    server, *_rest, db_path = make_stack(tmp_path, scripts)
+    set_identity(monkeypatch, ("user-a", "agent-a"))
+    data_b64 = base64.b64encode(b"\x89PNG fake").decode("ascii")
+    async with Client(server) as client:
+        await client.call_tool(
+            "store_knowledge",
+            {
+                "content": "with image",
+                "images": [
+                    {"filename": "d.png", "media_type": "image/png", "data_base64": data_b64}
+                ],
+            },
+        )
+    rows = journal_rows(db_path)
+    assert len(rows) == 1
+    arguments = rows[0]["arguments"]
+    assert data_b64 not in arguments
+    assert "sha256:" in arguments
+    assert f"({len(data_b64)} chars)" in arguments

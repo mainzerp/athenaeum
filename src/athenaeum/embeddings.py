@@ -257,7 +257,8 @@ class EmbeddingService:
         """Best-effort write-through index update; NEVER raises.
 
         Actions are collapsed per concept path (last one wins) before any I/O:
-        ``deleted`` removes the row, a ``moved`` write's ``from_id`` removes
+        ``deleted`` and ``deprecated`` remove the row (deprecated concepts are
+        hidden pending cleanup), a ``moved`` write's ``from_id`` removes
         the OLD path's row, and everything else re-reads the concept through
         the backend (A10) and re-embeds (L8 — a create-then-delete in one run
         must not resurrect a row, and a move must not leak the stale old-path
@@ -281,7 +282,7 @@ class EmbeddingService:
         pending: list[tuple[str, str, str]] = []  # (concept_path, text, hash)
         for concept_path, write in by_path.items():
             try:
-                if write.get("action") == "deleted":
+                if write.get("action") in ("deleted", "deprecated"):
                     self.delete(concept_path)
                     continue
                 doc = backend.read_document(concept_path)
@@ -331,6 +332,10 @@ class EmbeddingService:
                 doc = backend.read_document(bundle_path)
             except Exception as exc:
                 logger.warning("embedding reconcile skipped %s: %s", concept_path, exc)
+                continue
+            if doc["frontmatter"].get("status") == "deprecated":
+                # Hidden pending cleanup: excluded from on_disk, so a stale
+                # stored row drops out in the deletion pass below.
                 continue
             text = concept_text(doc["frontmatter"], doc["body"])
             on_disk[concept_path] = (text, content_hash(text))

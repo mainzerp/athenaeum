@@ -37,6 +37,10 @@
         <input class="input-field" type="number" id="activity_keep" name="activity_keep" min="0" value="{{ cfg['activity_keep'] }}">
       </div>
       <div class="form-row">
+        <label class="input-label" for="payload_keep">Payload archives to keep (0 = keep all)</label>
+        <input class="input-field" type="number" id="payload_keep" name="payload_keep" min="0" value="{{ cfg['payload_keep'] }}">
+      </div>
+      <div class="form-row">
         <label class="input-label" for="library_path">Storage path (read-only)</label>
         <input class="input-field" type="text" id="library_path" value="{{ library_path }}" disabled>
       </div>

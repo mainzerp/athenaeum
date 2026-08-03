@@ -699,6 +699,24 @@ async def test_sync_writes_move_deletes_old_path_row(tmp_path):
     assert len(provider.calls) == 1  # the new path embedded in one batch
 
 
+async def test_sync_writes_deprecated_deletes_row(tmp_path):
+    """A deprecated write removes the vector row, exactly like deleted
+    (deprecated concepts are hidden pending cleanup)."""
+    db_path = make_db(tmp_path)
+    root = tmp_path / "lib"
+    write_concept(root, "a.md", "Alpha", "body a")
+    service, provider = make_service(db_path)
+    service.upsert("a.md", "test-model", [1.0, 0.0, 0.0], "old")
+
+    await service.sync_writes(
+        make_backend(root),
+        [{"id": "a", "title": "Alpha", "action": "deprecated"}],
+    )
+
+    assert service.load() == {}
+    assert provider.calls == []  # nothing re-embedded
+
+
 async def test_sync_writes_create_then_delete_leaves_no_row(tmp_path):
     """L8: a concept created and deleted within one run keeps no row."""
     db_path = make_db(tmp_path)
@@ -801,6 +819,24 @@ async def test_reconcile_deletes_vanished_paths(tmp_path):
 
     await service.reconcile(make_backend(root))
     assert set(service.load()) == {"a.md"}
+
+
+async def test_reconcile_skips_deprecated_on_disk(tmp_path):
+    """Deprecated on-disk concepts are not embedded, and a stale stored row
+    drops out (deprecated concepts are hidden pending cleanup)."""
+    db_path = make_db(tmp_path)
+    root = tmp_path / "lib"
+    write_concept(root, "a.md", "Alpha", "body a")
+    (root / "old.md").write_text(
+        "---\ntitle: Old\nstatus: deprecated\n---\nbody old\n", encoding="utf-8"
+    )
+    service, provider = make_service(db_path)
+    service.upsert("old.md", "test-model", [1.0, 0.0, 0.0], "stale")
+
+    await service.reconcile(make_backend(root))
+
+    assert set(service.load()) == {"a.md"}
+    assert sum(len(texts) for texts, _ in provider.calls) == 1  # only a.md embedded
 
 
 async def test_reconcile_failure_marks_failed_and_reraises(tmp_path):

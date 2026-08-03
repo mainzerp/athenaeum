@@ -133,6 +133,8 @@ def semantic_duplicate_candidates(
             fm, _ = fm_mod.split_document(abs_path.read_text(encoding="utf-8"))
         except (fm_mod.FrontmatterError, OSError, UnicodeDecodeError):
             continue
+        if fm.get("status") == "deprecated":
+            continue  # deprecated concepts are hidden (pending cleanup)
         generated = fm.get("generated")
         generated_at = _raw_ts(generated.get("at")) if isinstance(generated, dict) else None
         changed = since is None or generated_at is None or _norm_ts(generated_at) >= _norm_ts(since)

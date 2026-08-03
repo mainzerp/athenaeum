@@ -686,6 +686,7 @@ def library_save(
     snapshot_keep: str = Form("0"),
     trace_keep: str = Form("0"),
     activity_keep: str = Form("0"),
+    payload_keep: str = Form("0"),
 ):
     user = deps.current_user(request, conn)
     if user is None:
@@ -699,6 +700,7 @@ def library_save(
         snapshot_keep=_opt_keep(snapshot_keep),
         trace_keep=_opt_keep(trace_keep),
         activity_keep=_opt_keep(activity_keep),
+        payload_keep=_opt_keep(payload_keep),
     )
     if manager is not None:
         manager.evict(user["id"])

@@ -12,8 +12,8 @@ Athenaeum is **multi-user**: every user gets their own library *and* their own l
 
 ## Core concepts
 
-- **OKF bundle per user** — one conformant OKF v0.2 bundle directory per user, stored under `data/users/<user_id>/library/`. See `reference.md` for the format and `architecture.md` for the storage model.
-- **Librarian agent** — a per-user, in-process LLM agent that is the *only writer* to the bundle. It exposes 6 intent-based MCP tools to the outside and drives a 9-tool internal view over the library backend.
+- **OKF bundle per user** — one conformant OKF v0.2 bundle directory per user, stored under `data/users/<user_id>/library/`, with dot-dir side stores for shadow-copy snapshots (`.athenaeum/versions/`), query-path traces (`.traces/`), the `store_knowledge` payload archive (`.athenaeum/payloads/`, 0.20.0), and content-addressed image assets (`.athenaeum/assets/`, 0.20.0). See `reference.md` for the format and `architecture.md` for the storage model.
+- **Librarian agent** — a per-user, in-process LLM agent that is the *only writer* to the bundle. It exposes 6 intent-based MCP tools to the outside and drives a 10-tool internal view over the library backend.
 - **MCP server** — Streamable HTTP transport, bearer-token auth, mounted in the same process as the WebUI.
 - **WebUI** — server-rendered administration and inspection UI: librarian configuration (named provider connections with a default, per-agent connection select + model and prompt), document tree and relations graph, log viewer, MCP token management.
 

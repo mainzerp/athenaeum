@@ -60,6 +60,11 @@ _SCHEMA: list[tuple[str, list[tuple[str, str | None, str | None]], list[str]]] =
                 "activity_keep INTEGER NOT NULL DEFAULT 1000",
                 "activity_keep INTEGER NOT NULL DEFAULT 0",
             ),
+            (
+                "payload_keep",  # 0 = keep all
+                "payload_keep INTEGER NOT NULL DEFAULT 100",
+                "payload_keep INTEGER NOT NULL DEFAULT 0",
+            ),
             ("library_name", "library_name TEXT", None),
             ("library_description", "library_description TEXT", None),
             (
@@ -247,6 +252,7 @@ HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 DEFAULT_SNAPSHOT_KEEP = 50
 DEFAULT_TRACE_KEEP = 50
 DEFAULT_ACTIVITY_KEEP = 1000
+DEFAULT_PAYLOAD_KEEP = 100
 
 
 def utcnow() -> str:
@@ -432,14 +438,15 @@ def create_user(
         conn.execute(
             "INSERT INTO librarian_configs"
             " (user_id, curate_schedule_enabled, curate_schedule_time,"
-            "  snapshot_keep, trace_keep, activity_keep)"
-            " VALUES (?, 1, ?, ?, ?, ?)",
+            "  snapshot_keep, trace_keep, activity_keep, payload_keep)"
+            " VALUES (?, 1, ?, ?, ?, ?, ?)",
             (
                 user_id,
                 DEFAULT_SCHEDULE_TIME,
                 DEFAULT_SNAPSHOT_KEEP,
                 DEFAULT_TRACE_KEEP,
                 DEFAULT_ACTIVITY_KEEP,
+                DEFAULT_PAYLOAD_KEEP,
             ),
         )
     return get_user_by_id(conn, user_id)
@@ -727,11 +734,15 @@ def update_library_settings(
     snapshot_keep: int,
     trace_keep: int,
     activity_keep: int,
+    payload_keep: int | None = None,
 ) -> None:
+    # payload_keep uses COALESCE semantics: None keeps the stored value, so
+    # existing callers that predate the column leave it untouched.
     with conn:
         conn.execute(
             "UPDATE librarian_configs SET library_name = ?, library_description = ?,"
-            " versioning = ?, snapshot_keep = ?, trace_keep = ?, activity_keep = ?"
+            " versioning = ?, snapshot_keep = ?, trace_keep = ?, activity_keep = ?,"
+            " payload_keep = COALESCE(?, payload_keep)"
             " WHERE user_id = ?",
             (
                 name or None,
@@ -740,6 +751,7 @@ def update_library_settings(
                 snapshot_keep,
                 trace_keep,
                 activity_keep,
+                payload_keep,
                 user_id,
             ),
         )

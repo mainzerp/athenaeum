@@ -559,6 +559,44 @@ def test_retention_defaults_bounded_for_new_users_only(conn, tmp_path):
     assert cfg["activity_keep"] == 0
 
 
+def test_payload_keep_bounded_default_explicit_zero_survives(conn, tmp_path):
+    """A12 pattern for payload_keep: bounded default for new rows; an explicit
+    keep-all (0) survives a re-init; None in update_library_settings leaves
+    the column untouched (existing callers predate the column)."""
+    assert db.DEFAULT_PAYLOAD_KEEP > 0
+    user = db.create_user(conn, "alice", "h")
+    cfg = db.get_config(conn, user["id"])
+    assert cfg["payload_keep"] == db.DEFAULT_PAYLOAD_KEEP
+    # omitted payload_keep (None) = column untouched
+    db.update_library_settings(
+        conn,
+        user["id"],
+        name=None,
+        description=None,
+        versioning=True,
+        snapshot_keep=0,
+        trace_keep=0,
+        activity_keep=0,
+    )
+    cfg = db.get_config(conn, user["id"])
+    assert cfg["payload_keep"] == db.DEFAULT_PAYLOAD_KEEP
+    # an explicit keep-all (0) choice survives a re-init untouched
+    db.update_library_settings(
+        conn,
+        user["id"],
+        name=None,
+        description=None,
+        versioning=True,
+        snapshot_keep=0,
+        trace_keep=0,
+        activity_keep=0,
+        payload_keep=0,
+    )
+    db.init_db(tmp_path / "app.db")
+    cfg = db.get_config(conn, user["id"])
+    assert cfg["payload_keep"] == 0
+
+
 def test_update_curate_schedule_roundtrip(conn, tmp_path):
     user = db.create_user(conn, "alice", "h")
     db.update_curate_schedule(conn, user["id"], enabled=False, time_hhmm="22:30")

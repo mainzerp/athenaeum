@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.19.0**
+Current version: **0.20.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,61 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.20.0
+
+Store-surface extensions: contradiction warnings, deletion-via-deprecate
+with hidden-deprecated semantics, a raw-payload archive for
+`store_knowledge`, and base64 images stored as hidden library assets.
+(Commit hashes filled in at commit time.)
+
+- **Contradiction warnings (store-only):** when the librarian supersedes
+  contradictions in place (write-discipline rule 3), the STORE task now
+  requires a `## Contradictions` summary section (`- <concept id>: <note>`
+  per resolved contradiction, or `- none`). `store_knowledge` results gain
+  an optional `contradictions: [{id, note}]` field — LLM-reported,
+  deterministically cross-checked against the tracked writes (only
+  `updated`/`deprecated` writes on the reported id count), present only
+  when non-empty, with a deterministic "Post-run check" verdict appended
+  after the links verdict. The channel is embeddings-independent and works
+  in degraded mode (embeddings only add candidate recall). The
+  `update_knowledge` contract is untouched.
+- **Deletion via deprecate:** update tasks route delete requests ALWAYS to
+  `deprecate_concept`, never `delete_concept` (curator-only, prompt-level
+  pin). Deprecated concepts are now hidden from knowledge consumers: the
+  library seed's Concepts section, embedding/FTS indexes (a deprecation
+  deletes the row like a deletion; reconcile drops stale rows), semantic
+  and near-duplicate candidate passes, and the orphan warning (deprecated
+  concepts are never orphan-reported, so they no longer force paid
+  maintain runs — edges still count and `stats.concepts` still counts the
+  files). `library_curate` gains a 6th finding kind `deprecated_cleanup`:
+  deprecated concepts with zero inbound links from non-deprecated concepts
+  are listed for the curator to `delete_concept` (live inbound links keep
+  a deprecated concept unlisted — never a permanent re-reported finding).
+  The answering prompt pins: deprecated concepts are pending removal —
+  never cite, never enrich.
+- **Raw-payload archive:** every `store_knowledge` call is archived
+  two-phase under `<library>/.athenaeum/payloads/<request_id>.json`
+  (`received` on entry — busy rejections included — rewritten with the
+  final `ok`/`partial`/`error`/`busy` outcome and stored entries on exit;
+  best-effort, never fails the store). Image params are archived as
+  content-addressed refs only. Retention via the new `payload_keep`
+  config column (PD-1: bounded default 100 for new installs/config rows,
+  existing rows migrate to 0 = keep all; WebUI library page). Failed or
+  partial payloads surface as a 7th curate finding kind
+  `store_payload_reviews` — a bounded digest (5 newest, 120-char excerpts)
+  reported once since the previous curate run and never re-reported; a
+  payload-only finding wakes exactly one paid curate run.
+- **Base64 images → hidden asset store:** `store_knowledge` gains an
+  optional `images` param (`[{filename, media_type, data_base64}]`; max 5
+  images, 5 MiB decoded each, png/jpeg/gif/webp). Bytes are written
+  server-side to `.athenaeum/assets/<sha256[:12]>-<filename>`
+  (content-addressed, idempotent; outside the compound write — no
+  snapshot/index/log) and reach the prompt only as absolute markdown
+  image links; base64 never enters the prompt or the activity journal
+  (sha-ref sanitization). Markdown image syntax is no longer parsed as a
+  concept link (`LINK_RE` negative lookbehind): assets are not graph
+  citizens — no edges, no broken-link warnings, no move-rewrite.
 
 ### 0.19.0
 

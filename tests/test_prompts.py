@@ -30,6 +30,12 @@ def test_default_prompt_pins_semantic_requery_discipline():
     assert "per distinct information need" in DEFAULT_SYSTEM_PROMPT
 
 
+def test_default_prompt_pins_deprecated_citation_hygiene():
+    """Deprecated concepts are pending removal: never cited, never enriched."""
+    assert "Deprecated concepts are pending removal" in DEFAULT_SYSTEM_PROMPT
+    assert "never cite them, never enrich them" in DEFAULT_SYSTEM_PROMPT
+
+
 def test_default_prompt_pins_subject_match_placement():
     assert "NAME THE SUBJECT FIRST" in DEFAULT_SYSTEM_PROMPT
     assert "is NOT a topic" in DEFAULT_SYSTEM_PROMPT
@@ -103,8 +109,46 @@ def test_curate_preamble_renders_findings():
         },
         instructions="be careful",
     )
-    assert empty.count("- none") == 5
+    assert empty.count("- none") == 7
     assert "be careful" in empty
+
+
+def test_curate_preamble_renders_store_payload_reviews():
+    """The 7th finding key: one-shot failed/partial store payload digest."""
+    findings = {
+        "type_named_folders": [],
+        "oversized_folders": [],
+        "thin_concepts": [],
+        "near_duplicate_candidates": [],
+        "store_payload_reviews": [
+            {
+                "request_id": "20260802T000000Z-abcd1234",
+                "outcome": "error",
+                "error": "LibrarianNoWriteError",
+                "excerpt": "remember {braces} verbatim",
+            },
+            {
+                "request_id": "20260801T000000Z-ef567890",
+                "outcome": "partial",
+                "error": None,
+                "excerpt": "interrupted store",
+            },
+        ],
+        "concepts_scanned": 0,
+        "since": None,
+    }
+    preamble = build_curate_preamble(findings)
+    assert "Store payload reviews" in preamble
+    assert "store payloads pending review" in preamble
+    assert (
+        "  - 20260802T000000Z-abcd1234 (error, LibrarianNoWriteError):"
+        " remember {braces} verbatim" in preamble
+    )
+    assert "  - 20260801T000000Z-ef567890 (partial): interrupted store" in preamble
+    # carve-out next to the scope line: reported once, never re-reported
+    assert "re-reported until it is actually fixed" in preamble
+    assert "each is reported once" in preamble
+    assert "never re-reported" in preamble
 
 
 def test_curate_preamble_pins_series_rule():
