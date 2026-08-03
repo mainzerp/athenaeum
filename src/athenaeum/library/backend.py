@@ -49,6 +49,19 @@ _WRITE_LOCKS: dict[str, threading.RLock] = {}
 _WRITE_LOCKS_GUARD = threading.Lock()
 
 
+def write_lock_for(root: str | Path) -> threading.RLock:
+    """The process-wide write lock for a library root (A4): every writer of
+    the bundle — compound writes, reconcile, and the import replace — must
+    hold it. Keyed by the resolved root path, shared by all backends."""
+    key = str(Path(root).resolve())
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _WRITE_LOCKS[key] = lock
+        return lock
+
+
 def drop_write_lock(root: str | Path) -> None:
     """Forget the write lock for ``root`` (A12: no per-user registry leak).
 
@@ -606,13 +619,7 @@ class LibraryBackend:
 
     def _write_lock(self) -> threading.RLock:
         """The process-wide write lock for this backend's library root."""
-        key = str(self.root)
-        with _WRITE_LOCKS_GUARD:
-            lock = _WRITE_LOCKS.get(key)
-            if lock is None:
-                lock = threading.RLock()
-                _WRITE_LOCKS[key] = lock
-            return lock
+        return write_lock_for(self.root)
 
     def _resolve(self, path: str) -> Path:
         return resolve_under(self.root, path)

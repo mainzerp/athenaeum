@@ -45,7 +45,8 @@ keys and access tokens. Admins manage users in the web interface.
 
 - Self-hosted: one container, one data volume — that's it.
 - Plain files: your library is ordinary Markdown you can copy, back up, or
-  take elsewhere at any time.
+  take elsewhere at any time — the web interface downloads the whole library
+  as a zip archive and restores it back.
 - Encrypted keys: AI provider credentials are stored encrypted, never in
   plain text.
 - Local option: semantic search can run fully offline on your own machine.

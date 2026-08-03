@@ -5,8 +5,10 @@ provider layer are replaced here by fakes honoring the pinned contracts
 (plan §3.2 read/versioning surface, §3.4 provider factory).
 """
 
+import io
 import json
 import re
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,9 @@ from athenaeum import db as db_module
 from athenaeum import security
 from athenaeum.config import get_settings
 from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST
+from athenaeum.librarian.gate import RunGate
 from athenaeum.library.backend import provision_library
-from athenaeum.webui import ROUTERS, deps, routes_auth
+from athenaeum.webui import ROUTERS, deps, routes_auth, routes_library
 from conftest import CsrfTestClient
 
 SECRET = "test-secret-key"
@@ -127,6 +130,7 @@ def env(tmp_path, monkeypatch):
     class FakeManager:
         def __init__(self):
             self.evicted: list[str] = []
+            self.run_gate = RunGate()  # real gate: import acquires it for real
 
         def evict(self, user_id: str) -> None:
             self.evicted.append(user_id)
@@ -1963,3 +1967,154 @@ def test_format_datetime():
     assert deps.format_datetime("2026-01-01T00:00:00+00:00") == "2026-01-01 00:00 UTC"
     assert deps.format_datetime("2026-07-28T12:01:19.149973+00:00") == "2026-07-28 12:01 UTC"
     assert deps.format_datetime("not-a-date") == "not-a-date"
+
+
+# --- library export / import -----------------------------------------------------
+
+
+def _zip_bytes(members: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    return buffer.getvalue()
+
+
+IMPORT_MEMBERS = {"index.md": "# Index\n", "log.md": "# Log\n", "restored.md": "back\n"}
+
+
+def _tree_files(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_library_export_requires_login(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    response = client.get("/library/export")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_library_import_requires_login(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    response = client.post(
+        "/library/import",
+        files={"file": ("lib.zip", _zip_bytes(IMPORT_MEMBERS), "application/zip")},
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_library_import_csrf_rejected(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    response = client.post(
+        "/library/import",
+        files={"file": ("lib.zip", _zip_bytes(IMPORT_MEMBERS), "application/zip")},
+        csrf=False,
+    )
+    assert response.status_code == 403
+
+
+def test_library_import_csrf_multipart_success(env):
+    """csrf_protect consumes request.form() before the handler's UploadFile
+    binding; Starlette caches the parsed form so both coexist."""
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    root = Path(data_root) / "users" / user["id"] / "library"
+    assert not (root / "restored.md").exists()
+
+    response = client.post(
+        "/library/import",
+        data={},
+        files={"file": ("lib.zip", _zip_bytes(IMPORT_MEMBERS), "application/zip")},
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/config/library?msg=")
+    assert (root / "restored.md").read_text(encoding="utf-8") == "back\n"
+
+
+def test_library_import_413_over_limit(env, monkeypatch):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    monkeypatch.setattr(routes_library, "MAX_UPLOAD_BYTES", 64)
+    root = Path(data_root) / "users" / user["id"] / "library"
+    before = _tree_files(root)
+
+    response = client.post(
+        "/library/import",
+        files={"file": ("lib.zip", _zip_bytes(IMPORT_MEMBERS), "application/zip")},
+    )
+    assert response.status_code == 413
+    assert "512 MB" in response.text
+    assert _tree_files(root) == before  # live bundle untouched
+
+
+def test_library_import_400_corrupt(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    root = Path(data_root) / "users" / user["id"] / "library"
+    before = _tree_files(root)
+
+    response = client.post(
+        "/library/import",
+        files={"file": ("lib.zip", b"not a zip", "application/zip")},
+    )
+    assert response.status_code == 400
+    assert _tree_files(root) == before  # live bundle byte-identical
+
+
+def test_library_import_400_zip_slip(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    user_dir = Path(data_root) / "users" / user["id"]
+    members = {"index.md": "# I\n", "log.md": "# L\n", "../evil.md": "x"}
+
+    response = client.post(
+        "/library/import",
+        files={"file": ("lib.zip", _zip_bytes(members), "application/zip")},
+    )
+    assert response.status_code == 400
+    assert not (user_dir / "evil.md").exists()  # nothing outside the bundle
+    assert not (user_dir / "library.import-staging").exists()
+
+
+@pytest.mark.parametrize("missing", ["index.md", "log.md"])
+def test_library_import_400_missing_required(env, missing):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    members = {"index.md": "# I\n", "log.md": "# L\n"}
+    del members[missing]
+
+    response = client.post(
+        "/library/import",
+        files={"file": ("lib.zip", _zip_bytes(members), "application/zip")},
+    )
+    assert response.status_code == 400
+    assert missing in response.text
+
+
+def test_library_export_headers_and_contents(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    root = Path(data_root) / "users" / user["id"] / "library"
+    (root / "notes.md").write_text("hello export\n", encoding="utf-8")
+
+    response = client.get("/library/export")
+    assert response.status_code == 200
+    disposition = response.headers["content-disposition"]
+    assert "attachment" in disposition
+    assert "athenaeum-library-" in disposition
+    assert ".zip" in disposition
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        names = set(zf.namelist())
+    assert {"index.md", "log.md", "notes.md"} <= names

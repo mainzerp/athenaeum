@@ -7,6 +7,7 @@
 </div>
 {% if saved %}<div class="js-flash" data-type="success" data-message="Saved." hidden></div>{% endif %}
 {% if msg %}<div class="js-flash" data-type="success" data-message="{{ msg }}" hidden></div>{% endif %}
+{% if error %}<div class="js-flash" data-type="danger" data-message="{{ error }}" hidden></div>{% endif %}
 
 <div class="card">
   <div class="card-header">Library</div>
@@ -61,6 +62,25 @@
       <form method="post" action="/config/library/validate">
         {{ csrf_input(request) }}
         <button type="submit" class="btn btn-secondary">Validate bundle</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Backup</div>
+  <div class="card-body">
+    <p class="subtitle">Export downloads the complete bundle (concepts, versions, assets,
+      payloads, traces) as a zip archive; import restores a previous export and overwrites
+      the current library.</p>
+    <div class="flex items-center gap-3">
+      <a class="btn btn-secondary" href="/library/export">Download library archive (.zip)</a>
+      <form method="post" action="/library/import" enctype="multipart/form-data"
+            data-confirm="This REPLACES your entire library with the uploaded archive. A one-generation backup of the current library is written to import-backup.zip first. Continue?"
+            data-loading>
+        {{ csrf_input(request) }}
+        <input class="input-field" type="file" name="file" accept=".zip,application/zip" required>
+        <button type="submit" class="btn btn-secondary">Import archive (replaces library)</button>
       </form>
     </div>
   </div>

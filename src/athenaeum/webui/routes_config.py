@@ -656,6 +656,7 @@ def library_form(
     settings: Annotated[Settings, Depends(deps.settings_dep)],
     saved: bool = False,
     msg: str | None = None,
+    error: str | None = None,
 ):
     user = deps.current_user(request, conn)
     if user is None:
@@ -671,6 +672,7 @@ def library_form(
             "msg": msg,
             "library_path": str(deps.library_root_for(settings, user["id"])),
             "validation": None,
+            "error": error,
         },
     )
 

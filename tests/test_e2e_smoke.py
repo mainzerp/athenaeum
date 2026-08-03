@@ -299,3 +299,29 @@ async def test_e2e_store_status_rollback_chain(running_app, admin_user, test_set
     backend.rollback(1)
     assert not (root / "new.md").exists()
     assert "Rolled back to version 000001" in (root / "log.md").read_text(encoding="utf-8")
+
+
+def test_library_export_import_round_trip(client, admin_user, test_settings):
+    """Export -> destroy -> import restores the whole bundle end to end."""
+    response = client.post("/login", data={"username": "owner", "password": "owner-pw"})
+    assert response.status_code == 303
+    root = Path(test_settings.data_root) / "users" / admin_user["id"] / "library"
+    backend = LibraryBackend(root, actor="e2e-roundtrip")
+    backend.create_concept("/roundtrip.md", {"type": "Note", "title": "RT"}, "body\n")
+
+    response = client.get("/library/export")
+    assert response.status_code == 200
+    archive = response.content
+
+    (root / "roundtrip.md").unlink()
+    response = client.post(
+        "/library/import",
+        files={"file": ("lib.zip", archive, "application/zip")},
+    )
+    assert response.status_code == 303
+    assert (root / "roundtrip.md").is_file()
+    assert (root.parent / "import-backup.zip").is_file()
+
+    page = client.get("/config/library")
+    assert page.status_code == 200
+    assert "/library/export" in page.text  # the Backup card renders
