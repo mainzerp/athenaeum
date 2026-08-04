@@ -27,8 +27,8 @@ Git Time Machine: the shadow-copy snapshot versioning is replaced by a real
 git history in every library bundle — per-write auto-commits, per-document
 timelines with per-file restore and a library-wide history section in the
 WebUI (per-commit diffs, revert, undoable reset slider), optional remote
-push/pull, and Docker/compose hardening. (Commits: (...) — filled in at
-release time per the release checklist.)
+push/pull, and Docker/compose hardening. (Commits: `5099f05` feat(library),
+`1853600` docs(lessons).)
 
 - **Git history backend (PART 1):** every compound write (and asset store)
   ends in a best-effort `git` auto-commit with a deterministic message
