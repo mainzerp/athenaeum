@@ -1,4 +1,4 @@
-"""Trace list + replay views over the per-user ``.traces/`` store.
+"""Trace replay views over the per-user ``.traces/`` store.
 
 Owner-scoped by construction: the TraceStore is rooted at the logged-in
 user's own library root, so another user's trace ids simply do not exist and
@@ -36,35 +36,6 @@ def _read_trace(store: TraceStore, trace_id: str) -> dict:
     except (FileNotFoundError, ValueError) as exc:
         # Missing trace or rejected id: indistinguishable, both 404.
         raise HTTPException(status_code=404, detail="Trace not found") from exc
-
-
-@router.get("/library/traces")
-def traces_page(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-):
-    ctx = _store(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, _ = ctx
-    return deps.templates.TemplateResponse(request, "traces.html", {"user": user})
-
-
-@router.get("/library/traces/rows")
-def traces_rows(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-):
-    """htmx polling target: trace summaries, newest first."""
-    ctx = _store(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, store = ctx
-    return deps.templates.TemplateResponse(
-        request, "traces_rows.html", {"user": user, "traces": store.list(limit=100)}
-    )
 
 
 @router.get("/library/traces/{trace_id}")

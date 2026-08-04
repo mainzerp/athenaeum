@@ -53,13 +53,7 @@
       </svg>
       Log
     </a>
-    <a href="/library/traces" class="sidebar-link {% if current_path.startswith('/library/traces') %}sidebar-link-active{% endif %}">
-      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M4 17l6-6-6-6M12 19h8"/>
-      </svg>
-      Traces
-    </a>
-    <a href="/activity" class="sidebar-link {% if current_path.startswith('/activity') %}sidebar-link-active{% endif %}">
+    <a href="/activity" class="sidebar-link {% if current_path.startswith('/activity') or current_path.startswith('/library/traces') %}sidebar-link-active{% endif %}">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
       </svg>

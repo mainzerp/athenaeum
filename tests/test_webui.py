@@ -1854,18 +1854,15 @@ def make_trace(data_root, user_id, trace_id="20260728T180036Z-a1b2c3d4", **overr
     return trace
 
 
-def test_traces_pages_and_api(env):
+def test_trace_replay_page_and_api(env):
     client, _, data_root = env
     user = make_user(data_root, "alice", "pw")
     make_trace(data_root, user["id"])
     login(client, "alice", "pw")
 
-    assert client.get("/library/traces").status_code == 200
-
-    response = client.get("/library/traces/rows")
-    assert response.status_code == 200
-    assert "request_knowledge" in response.text
-    assert "/library/traces/20260728T180036Z-a1b2c3d4" in response.text
+    # the trace list page and its rows endpoint were removed; replay lives on
+    assert client.get("/library/traces").status_code == 404
+    assert client.get("/library/traces/rows").status_code == 404
 
     response = client.get("/library/traces/20260728T180036Z-a1b2c3d4")
     assert response.status_code == 200
@@ -1906,7 +1903,6 @@ def test_cross_user_trace_access_404(env):
     # alice's trace id does not exist in bob's own .traces store
     assert client.get("/library/traces/20260728T180036Z-a1b2c3d4").status_code == 404
     assert client.get("/api/traces/20260728T180036Z-a1b2c3d4").status_code == 404
-    assert "20260728T180036Z-a1b2c3d4" not in client.get("/library/traces/rows").text
 
 
 def insert_journal_row(data_root, user_id, *, tool, trace_id, outcome="ok"):

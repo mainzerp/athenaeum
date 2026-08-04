@@ -37,7 +37,7 @@ Athenaeum phase 1 is **one Python process**. A single FastAPI application hosts 
         |  WebUI pages FastAPI + Jinja2 + htmx        |
         |               (SessionMiddleware cookie)    |
         |  /api/graph  nodes/folders/edges JSON (3D)  |
-        |  /library/traces  trace list + graph replay |
+        |  /library/traces/<id>  trace graph replay   |
         |  /activity  request journal + in-flight     |
         |  /config/provider  connections CRUD + test  |
         |  /config/agents/*  per-agent conn + model   |

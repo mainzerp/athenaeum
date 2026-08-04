@@ -64,7 +64,7 @@ Items:
   addenda are defined once by an admin and apply to all users; regular users
   cannot create, edit, or delete connections or agent settings.
 - **Restricted self-service**: for non-admin users the WebUI reduces to
-  library browsing (tree, graph, traces, activity) and own-token management;
+  library browsing (tree, graph, activity) and own-token management;
   config screens are hidden and their write routes reject non-admin requests
   server-side (403) — hiding the UI alone is not the enforcement.
 - **Resolution change**: the per-user config resolution (`LibrarianManager`)
