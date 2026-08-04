@@ -21,6 +21,7 @@ from athenaeum.config import get_settings
 from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST
 from athenaeum.librarian.gate import RunGate
 from athenaeum.library.backend import provision_library
+from athenaeum.library.gittool import GitError
 from athenaeum.webui import ROUTERS, deps, routes_auth, routes_library
 from conftest import CsrfTestClient
 
@@ -28,11 +29,16 @@ SECRET = "test-secret-key"
 
 
 class FakeBackend:
-    """Minimal stand-in for the plan §3.2 read-only/versioning surface."""
+    """Minimal stand-in for the plan §3.2 read-only/history surface."""
 
-    def __init__(self, docs):
+    def __init__(self, docs, commits=(), *, diff="", configured=True, available=True):
         self.docs = docs
         self.reconciled = False
+        self._commits = list(commits)
+        self._diff = diff
+        self.history_configured = configured
+        self.history_available = available
+        self.restored: list[tuple[str, str]] = []
 
     def list_dir(self, path: str = "/") -> list[dict]:
         prefix = "/" if path == "/" else path.rstrip("/") + "/"
@@ -62,21 +68,46 @@ class FakeBackend:
         doc = self.docs[path]
         return {"path": path, "frontmatter": doc["frontmatter"], "body": doc["body"]}
 
-    def list_versions(self) -> list[dict]:
-        return [
-            {
-                "n": 1,
-                "timestamp": "2026-01-01T00:00:00+00:00",
-                "actor": "athenaeum-librarian/0.1.0",
-                "operation": "create",
-                "paths": ["/concepts/alpha.md"],
-            }
-        ]
+    def list_commits(self, limit: int = 200) -> list[dict]:
+        return self._commits
 
-    def diff_version(self, n: int, path: str) -> str:
+    def git_head(self) -> str | None:
+        return self._commits[0]["sha"] if self._commits else None
+
+    def commit_diff(self, sha: str) -> str:
+        if not any(c["sha"] == sha for c in self._commits):
+            raise GitError(f"unknown commit: {sha}")
+        return self._diff
+
+    def file_history(self, path: str, limit: int = 100) -> list[dict]:
+        return self._commits
+
+    def read_document_at(self, path: str, sha: str) -> dict:
+        if not any(c["sha"] == sha or c["sha"].startswith(sha) for c in self._commits):
+            raise GitError(f"unknown commit: {sha}")
         if path not in self.docs:
             raise FileNotFoundError(path)
-        return "--- a\n+++ b\n-old\n+new\n"
+        doc = self.docs[path]
+        return {
+            "path": path,
+            "frontmatter": doc["frontmatter"],
+            "body": f"historical body at {sha[:7]}\n",
+        }
+
+    def file_diff_at(self, sha: str, path: str) -> str:
+        return f"diff for {path} at {sha[:7]}"
+
+    def restore_file_from_commit(self, path: str, sha: str) -> None:
+        self.restored.append((path, sha))
+
+    def revert_commit(self, sha: str) -> None:
+        return None
+
+    def reset_to_commit(self, sha: str) -> None:
+        return None
+
+    def git_pull(self) -> None:
+        return None
 
     def validate(self, scope: str | None = None) -> dict:
         return {"errors": [], "warnings": ["example warning"]}
@@ -498,26 +529,39 @@ def test_config_behavior_and_library_settings(env):
     cfg = read_config(data_root, user["id"])
     assert cfg["prompt_addendum"] == "Custom prompt"
 
-    # retention knobs and library identity share one form on the library page
+    # retention knobs, git history, and library identity share one form
     client.post(
         "/config/library",
         data={
             "name": "My KB",
             "description": "desc",
-            "snapshot_keep": "5",
+            "git_enabled": "1",
+            "git_remote_url": "  https://example.test/lib.git  ",
+            "git_auto_push": "1",
             "trace_keep": "7",
             "activity_keep": "11",
             "payload_keep": "13",
         },
     )
     cfg = read_config(data_root, user["id"])
-    assert cfg["versioning"] == 0  # checkbox absent -> off
-    assert cfg["snapshot_keep"] == 5
+    assert cfg["git_enabled"] == 1
+    assert cfg["git_remote_url"] == "https://example.test/lib.git"  # stripped
+    assert cfg["git_auto_push"] == 1
     assert cfg["trace_keep"] == 7
     assert cfg["activity_keep"] == 11
     assert cfg["payload_keep"] == 13
     assert cfg["library_name"] == "My KB"
     assert cfg["library_description"] == "desc"
+
+    # checkboxes absent -> off; blank URL -> NULL
+    client.post(
+        "/config/library",
+        data={"git_remote_url": "", "trace_keep": "7", "activity_keep": "11"},
+    )
+    cfg = read_config(data_root, user["id"])
+    assert cfg["git_enabled"] == 0
+    assert cfg["git_auto_push"] == 0
+    assert cfg["git_remote_url"] is None
 
     response = client.post("/config/library/reconcile")
     assert response.status_code == 303
@@ -536,21 +580,19 @@ def test_config_library_retention_edge_values(env):
 
     response = client.post(
         "/config/library",
-        data={"snapshot_keep": "-1", "trace_keep": "-100", "activity_keep": "-5"},
+        data={"trace_keep": "-100", "activity_keep": "-5"},
     )
     assert response.status_code == 303
     cfg = read_config(data_root, user["id"])
-    assert cfg["snapshot_keep"] == 0
     assert cfg["trace_keep"] == 0
     assert cfg["activity_keep"] == 0
 
     response = client.post(
         "/config/library",
-        data={"snapshot_keep": "1000000", "trace_keep": "99999", "activity_keep": "123456"},
+        data={"trace_keep": "99999", "activity_keep": "123456"},
     )
     assert response.status_code == 303
     cfg = read_config(data_root, user["id"])
-    assert cfg["snapshot_keep"] == 1000000
     assert cfg["trace_keep"] == 99999
     assert cfg["activity_keep"] == 123456
 
@@ -563,7 +605,7 @@ def test_config_numeric_fields_invalid_input_400(env):
 
     response = client.post(
         "/config/library",
-        data={"snapshot_keep": "abc", "trace_keep": "1", "activity_keep": "1"},
+        data={"trace_keep": "abc", "activity_keep": "1"},
     )
     assert response.status_code == 400
 
@@ -1159,7 +1201,7 @@ def test_tokens_create_revoke(env):
 # --- library browsing ----------------------------------------------------------
 
 
-def test_tree_document_versions_log_pages(env):
+def test_tree_document_log_pages(env):
     client, _, data_root = env
     make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
@@ -1168,6 +1210,8 @@ def test_tree_document_versions_log_pages(env):
     assert response.status_code == 200
     assert "concepts/" in response.text
     assert "/library/graph?folder=" in response.text  # tree -> graph jump (0.10.2)
+    # history empty state (the fake backend has no commits)
+    assert "No history yet — the first library write creates the first commit." in response.text
 
     response = client.get("/library/tree/children", params={"path": "/concepts"})
     assert response.status_code == 200
@@ -1179,19 +1223,11 @@ def test_tree_document_versions_log_pages(env):
     assert "Alpha" in response.text
     assert "Concept" in response.text
     assert "human-reviewed" in response.text
+    # per-document history empty state (the fake backend has no commits)
+    assert "No history yet — the first write touching this document" in response.text
 
     response = client.get("/library/document", params={"path": "/concepts/beta.md"})
     assert "stale" in response.text
-
-    response = client.get("/library/versions")
-    assert response.status_code == 200
-    assert "create" in response.text
-    assert "2026-01-01 00:00 UTC" in response.text
-    assert "2026-01-01T00:00:00+00:00" not in response.text
-
-    response = client.get("/library/versions/diff", params={"n": 1, "path": "/concepts/alpha.md"})
-    assert response.status_code == 200
-    assert "+new" in response.text
 
     assert client.get("/library/log").status_code == 200
     response = client.get("/library/log/content")
@@ -1199,67 +1235,248 @@ def test_tree_document_versions_log_pages(env):
     assert "Initialization" in response.text
 
 
-def test_version_rollback_route_with_real_backend(env, monkeypatch, tmp_path):
-    """CS-12: POST /library/versions/{n}/rollback through the REAL VersionStore."""
-    from athenaeum.library.backend import LibraryBackend
+# --- git history: tree-page section, diff page, document timeline --------------
 
-    client, _, data_root = env
-    make_user(data_root, "alice", "pw")
+HISTORY_COMMITS = [
+    {
+        "sha": "c" * 40,
+        "short": "ccccccc",
+        "timestamp": "2026-08-03T10:00:00+00:00",
+        "subject": "Update: Edited [Alpha](/concepts/alpha.md).",
+        "is_root": False,
+        "path": "concepts/alpha.md",
+    },
+    {
+        "sha": "b" * 40,
+        "short": "bbbbbbb",
+        "timestamp": "2026-08-02T10:00:00+00:00",
+        "subject": "Creation: Created [Alpha](/concepts/alpha.md).",
+        "is_root": False,
+        "path": "concepts/alpha.md",
+    },
+    {
+        "sha": "a" * 40,
+        "short": "aaaaaaa",
+        "timestamp": "2026-08-01T10:00:00+00:00",
+        "subject": "Initialization: Initialized the library bundle.",
+        "is_root": True,
+        "path": "concepts/alpha.md",
+    },
+]
+
+
+def set_remote_url(data_root, user_id, remote_url):
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        db_module.update_library_settings(
+            conn,
+            user_id,
+            name=None,
+            description=None,
+            git_enabled=True,
+            git_remote_url=remote_url,
+            git_auto_push=False,
+            trace_keep=0,
+            activity_keep=0,
+        )
+    finally:
+        conn.close()
+
+
+def test_tree_page_lists_commits(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+
+    response = client.get("/library/tree")
+    assert response.status_code == 200
+    assert HISTORY_COMMITS[0]["subject"] in response.text
+    assert "2026-08-03 10:00 UTC" in response.text
+    assert f"/library/diff?commit={HISTORY_COMMITS[0]['sha']}" in response.text
+    assert f"/library/history/{HISTORY_COMMITS[0]['sha']}/revert" in response.text
+    # the root row's Revert button is disabled with the hint
+    assert "The initial commit cannot be reverted." in response.text
+    # reset slider covers every commit except HEAD (2 resettable points)
+    assert 'max="1"' in response.text
+    # flashes render from the query string
+    response = client.get("/library/tree", params={"msg": "Pulled."})
+    assert 'data-message="Pulled."' in response.text
+
+
+def test_tree_page_history_unavailable_states(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
 
-    lib = tmp_path / "library"
-    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
-    backend.init_bundle()
-    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "v1\n")
-    backend.edit_concept("/concepts/alpha.md", new_body="v2\n")
-    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
-
-    # the button is offered on the LATEST row only
-    response = client.get("/library/versions")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), configured=False, available=False)
+    response = client.get("/library/tree")
     assert response.status_code == 200
-    assert response.text.count("/rollback") == 1
-    assert "/library/versions/2/rollback" in response.text
+    assert "Git history is unavailable." in response.text
+    assert "Library settings" in response.text
 
-    # an older snapshot is rejected (latest-only contract)
-    response = client.post("/library/versions/1/rollback")
-    assert response.status_code == 400
-    assert "latest" in response.text.lower()
+    backends[user["id"]] = FakeBackend(make_docs("alice"), configured=True, available=False)
+    response = client.get("/library/tree")
+    assert response.status_code == 200
+    assert "Git history is unavailable." in response.text
+    assert "git binary not found on this server." in response.text
 
-    # a missing snapshot is a 404
-    assert client.post("/library/versions/99/rollback").status_code == 404
 
-    # rolling back the latest restores its pre-image
-    response = client.post("/library/versions/2/rollback")
+def test_tree_page_pull_card_requires_remote(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+
+    response = client.get("/library/tree")
+    assert "/library/history/pull" not in response.text
+
+    set_remote_url(data_root, user["id"], "https://example.invalid/lib.git")
+    response = client.get("/library/tree")
+    assert "/library/history/pull" in response.text
+
+
+def test_diff_page(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(
+        make_docs("alice"), commits=HISTORY_COMMITS, diff="diff --git a/x.md b/x.md\n+hello\n"
+    )
+
+    response = client.get("/library/diff", params={"commit": HISTORY_COMMITS[0]["sha"]})
+    assert response.status_code == 200
+    assert "+hello" in response.text
+    assert "Commit ccccccc" in response.text
+    assert HISTORY_COMMITS[0]["subject"] in response.text
+
+    response = client.get("/library/diff", params={"commit": "d" * 40})
+    assert response.status_code == 404
+
+
+def test_document_page_history_card(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+
+    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert 'id="history-slider"' in response.text
+    assert 'max="2"' in response.text  # 3 file commits -> slider 0..2
+    assert "See [Beta](/concepts/beta.md)." in response.text  # live body
+    # live view: no banner, no restore form
+    assert "not the current version" not in response.text
+    assert "Restore this version" not in response.text
+
+
+def test_document_page_historical_view(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+
+    sha = HISTORY_COMMITS[1]["sha"]  # an older commit, not HEAD
+    response = client.get("/library/document", params={"path": "/concepts/alpha.md", "sha": sha})
+    assert response.status_code == 200
+    assert "historical body at bbbbbbb" in response.text
+    # banner with the viewed commit
+    assert "not the current version" in response.text
+    assert "2026-08-02 10:00 UTC" in response.text
+    assert "Back to current" in response.text
+    # per-file diff card
+    assert "Changes in" in response.text
+    assert "diff for /concepts/alpha.md at bbbbbbb" in response.text
+    # the restore form posts path + sha to the restore route
+    assert "/library/document/restore" in response.text
+    assert "Restore this version" in response.text
+    assert f'value="{sha}"' in response.text
+
+
+def test_document_page_sha_equal_head_is_live(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+
+    response = client.get(
+        "/library/document",
+        params={"path": "/concepts/alpha.md", "sha": HISTORY_COMMITS[0]["sha"]},
+    )
+    assert response.status_code == 200
+    assert "See [Beta](/concepts/beta.md)." in response.text  # live body
+    assert "not the current version" not in response.text
+    assert "Restore this version" not in response.text
+
+
+def test_document_page_unknown_sha_404(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+
+    response = client.get(
+        "/library/document", params={"path": "/concepts/alpha.md", "sha": "f" * 40}
+    )
+    assert response.status_code == 404
+
+
+def test_document_page_history_unavailable_hint(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    backends[user["id"]] = FakeBackend(make_docs("alice"), configured=False, available=False)
+    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert "Git history is unavailable." in response.text
+    assert "Library settings" in response.text
+
+    backends[user["id"]] = FakeBackend(make_docs("alice"), configured=True, available=False)
+    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert "git binary not found on this server." in response.text
+
+
+def test_document_restore_route(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backend = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    backends[user["id"]] = backend
+    manager = client.app.state.librarian_manager
+
+    sha = HISTORY_COMMITS[1]["sha"]
+    response = client.post(
+        "/library/document/restore", data={"path": "/concepts/alpha.md", "sha": sha}
+    )
     assert response.status_code == 303
-    assert response.headers["location"] == "/library/versions"
-    assert backend.read_document("/concepts/alpha.md")["body"] == "v1\n"
+    assert response.headers["location"] == (
+        "/library/document?path=%2Fconcepts%2Falpha.md&msg=Restored+to+commit+bbbbbbb."
+    )
+    assert backend.restored == [("/concepts/alpha.md", sha)]
+    # the cached librarian is evicted so embeddings/FTS reconcile on next use
+    assert manager.evicted == [user["id"]]
 
 
-def test_version_diff_traversal_rejected_with_real_backend(env, monkeypatch, tmp_path):
-    """CS-1: /library/versions/diff through the REAL VersionStore — no FakeBackend."""
-    from athenaeum.library.backend import LibraryBackend
-
+def test_document_restore_route_csrf_and_login(env):
     client, _, data_root = env
     make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
+    sha = HISTORY_COMMITS[1]["sha"]
+    response = client.post(
+        "/library/document/restore",
+        data={"path": "/concepts/alpha.md", "sha": sha},
+        csrf=False,
+    )
+    assert response.status_code == 403
 
-    secret = tmp_path / "secret.txt"
-    secret.write_text("leak\n", encoding="utf-8")
-    lib = tmp_path / "library"
-    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
-    backend.init_bundle()
-    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "body\n")
-    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
-
-    for evil in ("../../secret.txt", "..\\..\\secret.txt", "/concepts/../../../secret.txt"):
-        response = client.get("/library/versions/diff", params={"n": 1, "path": evil})
-        assert response.status_code == 400
-        assert "leak" not in response.text
-
-    # a legitimate diff through the real store still works
-    response = client.get("/library/versions/diff", params={"n": 1, "path": "/concepts/alpha.md"})
-    assert response.status_code == 200
-    assert "+body" in response.text
+    client.post("/logout")
+    response = client.post(
+        "/library/document/restore", data={"path": "/concepts/alpha.md", "sha": sha}
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
 
 
 def test_graph_endpoint(env):

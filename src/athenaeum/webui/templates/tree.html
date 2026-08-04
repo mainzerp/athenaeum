@@ -5,9 +5,114 @@
   <h1>Document tree</h1>
   <p class="subtitle">Browse the library by folder. Select a folder to expand it.</p>
 </div>
+{% if msg %}<div class="js-flash" data-type="success" data-message="{{ msg }}" hidden></div>{% endif %}
+{% if error %}<div class="js-flash" data-type="danger" data-message="{{ error }}" hidden></div>{% endif %}
 <div class="card">
   <div class="card-body">
     {% include "tree_children.html" %}
   </div>
 </div>
+{% if not history_available %}
+<div class="card">
+  <div class="card-body">
+    <p class="muted">Git history is unavailable.</p>
+    <p class="muted">
+      {% if not history_configured %}
+      Enable it in <a class="text-accent" href="/config/library">Library settings</a>.
+      {% else %}
+      git binary not found on this server.
+      {% endif %}
+    </p>
+  </div>
+</div>
+{% else %}
+{% if remote_configured %}
+<div class="card">
+  <div class="card-header">Remote</div>
+  <div class="card-body">
+    <form method="post" action="/library/history/pull" data-loading>
+      {{ csrf_input(request) }}
+      <button type="submit" class="btn btn-primary">Pull from remote</button>
+      <p class="muted mt-2">Fast-forward only; diverged history is rejected with an error.</p>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% if not commits %}
+<div class="card">
+  <div class="card-body">
+    <p class="muted">No history yet — the first library write creates the first commit.</p>
+  </div>
+</div>
+{% else %}
+<div class="card table-wrap">
+  <div class="card-header">History</div>
+  <div class="overflow-x-auto">
+    <table>
+      <thead>
+        <tr><th>Commit</th><th>Timestamp</th><th>Subject</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for c in commits %}
+        <tr>
+          <td><a class="text-accent" href="/library/diff?commit={{ c['sha'] | urlencode }}">{{ c["short"] }}</a></td>
+          <td>{{ c["timestamp"] | dt }}</td>
+          <td>{{ c["subject"] }}</td>
+          <td>
+            <form method="post" action="/library/history/{{ c['sha'] }}/revert" class="inline"
+                  data-confirm="Revert commit {{ c['short'] }}? Its changes are undone by a new commit.">
+              {{ csrf_input(request) }}
+              <button type="submit" class="btn btn-sm btn-danger"
+                      {% if c["is_root"] %}disabled title="The initial commit cannot be reverted."{% endif %}>Revert</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<div class="card">
+  <div class="card-header">Reset to an earlier state</div>
+  <div class="card-body">
+    {% if commits|length < 2 %}
+    <p class="muted">Need at least two commits to reset.</p>
+    {% else %}
+    <form method="post" action="/library/history/reset"
+          data-confirm="Reset the library to the selected commit? The reset itself is recorded as a new commit, so you can undo it by resetting again."
+          data-loading>
+      {{ csrf_input(request) }}
+      <input type="hidden" name="sha" id="reset-sha" value="{{ reset_points[commits|length - 2]['sha'] }}">
+      <div class="form-row">
+        <input type="range" id="reset-slider" min="0" max="{{ commits|length - 2 }}"
+               value="{{ commits|length - 2 }}" step="1">
+        <p class="range-label" id="reset-label"></p>
+      </div>
+      <button type="submit" class="btn btn-danger">Reset library to this point</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
+{% block scripts %}
+{% if history_available and commits|length >= 2 %}
+<script>
+(function () {
+  /* Reset slider: index -> reset point (oldest .. one commit back). */
+  var points = {{ reset_points | tojson }};
+  var slider = document.getElementById("reset-slider");
+  var shaField = document.getElementById("reset-sha");
+  var label = document.getElementById("reset-label");
+  function update() {
+    var p = points[Number(slider.value)];
+    shaField.value = p.sha;
+    label.textContent = p.short + " · " + p.timestamp.slice(0, 10) + " · " + p.subject;
+  }
+  slider.addEventListener("input", update);
+  update();
+})();
+</script>
+{% endif %}
 {% endblock %}

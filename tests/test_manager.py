@@ -4,6 +4,8 @@ import sqlite3
 import threading
 import time
 
+import pytest
+
 from athenaeum import db as db_module
 from athenaeum.librarian.manager import LibrarianManager
 
@@ -128,15 +130,43 @@ def test_config_round_trip_preserves_stored_zero(tmp_path):
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE provider_configs SET max_iterations = 0 WHERE id = 'conn-a'")
         conn.execute(
-            "UPDATE librarian_configs SET trace_keep = 0, activity_keep = 0,"
-            " snapshot_keep = 0 WHERE user_id = 'user-1'"
+            "UPDATE librarian_configs SET trace_keep = 0, activity_keep = 0"
+            " WHERE user_id = 'user-1'"
         )
     manager = make_manager(db_path, tmp_path)
     config = manager.get("user-1").config
     assert config.llm.max_iterations == 0
     assert config.trace_keep == 0
     assert config.activity_keep == 0
-    assert config.snapshot_keep == 0
+
+
+def test_git_config_loaded(tmp_path):
+    """0.22.0 git history columns load through the config chain."""
+    db_path = make_db(tmp_path)
+    manager = make_manager(db_path, tmp_path)
+    # schema defaults: git history on, no remote, no auto-push
+    config = manager._load_config("user-1")
+    assert config.git_enabled is True
+    assert config.git_remote_url is None
+    assert config.git_auto_push is False
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE librarian_configs SET git_enabled = 0,"
+            " git_remote_url = 'https://example.test/lib.git', git_auto_push = 1"
+            " WHERE user_id = 'user-1'"
+        )
+    config = manager._load_config("user-1")
+    assert config.git_enabled is False
+    assert config.git_remote_url == "https://example.test/lib.git"
+    assert config.git_auto_push is True
+
+
+def test_library_root_rejects_traversal_but_allows_slugs(tmp_path):
+    manager = make_manager(make_db(tmp_path), tmp_path)
+    for bad in ("../x", "a/b", "a\\b", "a..b", ""):
+        with pytest.raises(ValueError):
+            manager.library_root(bad)
+    assert manager.library_root("user-1") == tmp_path / "data" / "users" / "user-1" / "library"
 
 
 def test_curator_explicit_connection_resolution(tmp_path):

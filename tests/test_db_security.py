@@ -177,10 +177,15 @@ def test_users_empty_and_create_user(conn, tmp_path):
     assert cfg["librarian_connection_id"] is None
     assert cfg["curator_connection_id"] is None
     assert cfg["curator_model"] is None
-    assert cfg["versioning"] == 1
-    assert cfg["snapshot_keep"] == db.DEFAULT_SNAPSHOT_KEEP
+    assert cfg["git_enabled"] == 1
+    assert cfg["git_remote_url"] is None
+    assert cfg["git_auto_push"] == 0
     assert cfg["trace_keep"] == db.DEFAULT_TRACE_KEEP
     assert cfg["activity_keep"] == db.DEFAULT_ACTIVITY_KEEP
+    # fresh schemas never carry the pre-0.22.0 snapshot columns
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(librarian_configs)")}
+    assert "versioning" not in columns
+    assert "snapshot_keep" not in columns
     # A7: db.py does no filesystem provisioning — the on-disk bundle is the
     # caller's job (library.backend.provision_library).
     assert not (tmp_path / "users").exists()
@@ -266,16 +271,18 @@ def test_update_library_settings(conn, tmp_path):
         user["id"],
         name="My KB",
         description="desc",
-        versioning=False,
-        snapshot_keep=3,
+        git_enabled=False,
+        git_remote_url="https://example.test/lib.git",
+        git_auto_push=True,
         trace_keep=7,
         activity_keep=11,
     )
     cfg = db.get_config(conn, user["id"])
     assert cfg["library_name"] == "My KB"
     assert cfg["library_description"] == "desc"
-    assert cfg["versioning"] == 0
-    assert cfg["snapshot_keep"] == 3
+    assert cfg["git_enabled"] == 0
+    assert cfg["git_remote_url"] == "https://example.test/lib.git"
+    assert cfg["git_auto_push"] == 1
     assert cfg["trace_keep"] == 7 and cfg["activity_keep"] == 11
 
 
@@ -432,6 +439,9 @@ def test_ensure_column_idempotent_on_preexisting_db(tmp_path):
         assert "semantic_threshold" in columns
         assert "hybrid_search" in columns
         assert "hybrid_rerank" in columns
+        assert "git_enabled" in columns
+        assert "git_remote_url" in columns
+        assert "git_auto_push" in columns
         cfg = db.get_config(conn, "u1")
         assert cfg["trace_keep"] == 0 and cfg["activity_keep"] == 0
         assert cfg["curate_provider"] is None
@@ -449,6 +459,10 @@ def test_ensure_column_idempotent_on_preexisting_db(tmp_path):
         # pre-existing rows backfill to hybrid-on (NOT NULL DEFAULT 1)
         assert cfg["hybrid_search"] == 1
         assert cfg["hybrid_rerank"] == 1
+        # pre-existing rows gain the 0.22.0 git columns via migration
+        assert cfg["git_enabled"] == 1
+        assert cfg["git_remote_url"] is None
+        assert cfg["git_auto_push"] == 0
     finally:
         conn.close()
 
@@ -533,12 +547,10 @@ def test_create_user_defaults_schedule_enabled(conn, tmp_path):
 
 def test_retention_defaults_bounded_for_new_users_only(conn, tmp_path):
     """A12: new config rows get bounded keeps; existing rows are never migrated."""
-    assert db.DEFAULT_SNAPSHOT_KEEP > 0
     assert db.DEFAULT_TRACE_KEEP > 0
     assert db.DEFAULT_ACTIVITY_KEEP > 0
     user = db.create_user(conn, "alice", "h")
     cfg = db.get_config(conn, user["id"])
-    assert cfg["snapshot_keep"] == db.DEFAULT_SNAPSHOT_KEEP
     assert cfg["trace_keep"] == db.DEFAULT_TRACE_KEEP
     assert cfg["activity_keep"] == db.DEFAULT_ACTIVITY_KEEP
     # an explicit keep-all (0) choice survives a re-init untouched
@@ -547,14 +559,14 @@ def test_retention_defaults_bounded_for_new_users_only(conn, tmp_path):
         user["id"],
         name=None,
         description=None,
-        versioning=True,
-        snapshot_keep=0,
+        git_enabled=True,
+        git_remote_url=None,
+        git_auto_push=False,
         trace_keep=0,
         activity_keep=0,
     )
     db.init_db(tmp_path / "app.db")
     cfg = db.get_config(conn, user["id"])
-    assert cfg["snapshot_keep"] == 0
     assert cfg["trace_keep"] == 0
     assert cfg["activity_keep"] == 0
 
@@ -573,8 +585,9 @@ def test_payload_keep_bounded_default_explicit_zero_survives(conn, tmp_path):
         user["id"],
         name=None,
         description=None,
-        versioning=True,
-        snapshot_keep=0,
+        git_enabled=True,
+        git_remote_url=None,
+        git_auto_push=False,
         trace_keep=0,
         activity_keep=0,
     )
@@ -586,8 +599,9 @@ def test_payload_keep_bounded_default_explicit_zero_survives(conn, tmp_path):
         user["id"],
         name=None,
         description=None,
-        versioning=True,
-        snapshot_keep=0,
+        git_enabled=True,
+        git_remote_url=None,
+        git_auto_push=False,
         trace_keep=0,
         activity_keep=0,
         payload_keep=0,

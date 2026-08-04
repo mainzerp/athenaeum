@@ -10,6 +10,7 @@ provider injected via monkeypatch on ``athenaeum.librarian.manager.create_provid
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,8 @@ from athenaeum.config import get_settings
 from athenaeum.librarian.llm import LLMResponse, ToolCall
 from athenaeum.library.backend import LibraryBackend
 from conftest import CsrfTestClient
+
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git binary required")
 
 ALL_TOOLS = {
     "request_knowledge",
@@ -238,8 +241,9 @@ async def test_mcp_agent_tools_error_when_unconfigured(running_app, admin_user, 
         assert "not configured" in result.content[0].text
 
 
-async def test_e2e_store_status_rollback_chain(running_app, admin_user, test_settings, monkeypatch):
-    """Full plan Step 4 chain: stub provider -> disk artifacts -> status -> rollback."""
+@requires_git
+async def test_e2e_store_status_revert_chain(running_app, admin_user, test_settings, monkeypatch):
+    """Full plan Step 4 chain: stub provider -> disk artifacts -> status -> revert."""
     provider = ScriptedProvider(
         [
             LLMResponse(
@@ -281,12 +285,12 @@ async def test_e2e_store_status_rollback_chain(running_app, admin_user, test_set
         result = await client.call_tool("store_knowledge", {"content": "fresh"})
         assert result.data["stored"] == [{"id": "/new", "title": "New", "action": "created"}]
 
-        # disk artifacts: concept + index + log + snapshot
+        # disk artifacts: concept + index + log + git repository
         root = Path(test_settings.data_root) / "users" / admin_user["id"] / "library"
         assert (root / "new.md").is_file()
         assert "new.md" in (root / "index.md").read_text(encoding="utf-8")
         assert "**Creation**" in (root / "log.md").read_text(encoding="utf-8")
-        assert (root / ".athenaeum" / "versions" / "000001" / "meta.json").exists()
+        assert (root / ".git").is_dir()
 
         # status delta over the same MCP client; the new concept has no
         # inbound/outbound links, so it is an orphan (D1 contract, end to end)
@@ -295,11 +299,16 @@ async def test_e2e_store_status_rollback_chain(running_app, admin_user, test_set
         assert status["healthy"] is False
         assert status["health"]["orphans"] == [{"id": "/new", "title": "New"}]
 
-    # rollback the creation version: the concept file disappears again
-    backend = LibraryBackend(root, actor="e2e-rollback")
-    backend.rollback(1)
+    # revert the creation commit: the concept file disappears again and the
+    # history grows by one commit (append-only undo)
+    backend = LibraryBackend(root, actor="e2e-revert")
+    commits_before = backend.status()["stats"]["versions"]
+    creation = next(c for c in backend.list_commits() if c["subject"].startswith("Creation:"))
+    backend.revert_commit(creation["sha"])
     assert not (root / "new.md").exists()
-    assert "Rolled back to version 000001" in (root / "log.md").read_text(encoding="utf-8")
+    log_text = (root / "log.md").read_text(encoding="utf-8")
+    assert f"Reverted commit {creation['sha'][:7]}" in log_text
+    assert backend.status()["stats"]["versions"] == commits_before + 1
 
 
 def test_library_export_import_round_trip(client, admin_user, test_settings):

@@ -3,13 +3,22 @@
 # CDN; the 3D graph stack (3d-force-graph) is vendored under webui/static/vendor.
 # The image contains only the Python app and carries no
 # secrets — ATHENAEUM_SECRET_KEY and all config arrive via env at runtime.
-FROM python:3.12-slim
+# Pinned to a patch-level tag (verified on Docker Hub 2026-08-04). Stricter
+# option: pin by digest (python:3.12.13-slim@sha256:<manifest-list digest>) —
+# bump procedure next to the PYTHON_VERSION note in .github/workflows/ci.yml.
+FROM python:3.12.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ATHENAEUM_DATA_ROOT=/data \
     ATHENAEUM_HOST=0.0.0.0 \
     ATHENAEUM_PORT=8000
+
+# git binary for the library time machine (per-library history under /data).
+# Identity is configured repo-locally per library at init time, never globally.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -23,7 +32,8 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir ".[local]"
 
-RUN useradd --create-home athenaeum \
+RUN groupadd --gid 10001 athenaeum \
+    && useradd --uid 10001 --gid athenaeum --create-home athenaeum \
     && mkdir -p /data \
     && chown -R athenaeum:athenaeum /data
 USER athenaeum

@@ -60,7 +60,7 @@ def make_db(tmp_path):
 
 
 def make_backend(root):
-    return LibraryBackend(root, actor="test-hybrid", versioning=False)
+    return LibraryBackend(root, actor="test-hybrid", git_enabled=False)
 
 
 def write_concept(root, rel: str, title: str, body: str, description: str = "") -> None:
@@ -502,7 +502,7 @@ def make_hybrid_backend(tmp_path, service, **kwargs):
     root = tmp_path / "lib"
     root.mkdir(exist_ok=True)
     return LibraryBackend(
-        root, actor="test/0", versioning=False, embedding_service=service, **kwargs
+        root, actor="test/0", git_enabled=False, embedding_service=service, **kwargs
     )
 
 

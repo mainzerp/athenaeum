@@ -21,7 +21,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 
-from athenaeum import __version__, db
+from athenaeum import __version__, db, isolation
 from athenaeum.config import Settings, get_settings
 from athenaeum.librarian.manager import LibrarianManager
 
@@ -162,11 +162,12 @@ def require_user(request: Request, conn: sqlite3.Connection) -> sqlite3.Row | No
 
 def library_root_for(settings: Settings, user_id: str) -> Path:
     """Per-user OKF bundle root (plan §3.4: opaque UUID in the path)."""
+    isolation.validate_user_id(user_id)
     return Path(settings.data_root) / "users" / user_id / "library"
 
 
 def get_library_backend(settings: Settings, user: sqlite3.Row, conn: sqlite3.Connection) -> object:
-    """Construct a LibraryBackend for the user's bundle (read/versioning surface).
+    """Construct a LibraryBackend for the user's bundle (read/history surface).
 
     Lazy import: ``athenaeum.library`` is owned by stream A. Tests substitute
     this factory with a fake implementing the plan §3.2 read-only surface.
@@ -177,8 +178,9 @@ def get_library_backend(settings: Settings, user: sqlite3.Row, conn: sqlite3.Con
     return LibraryBackend(
         library_root_for(settings, user["id"]),
         actor=f"athenaeum-webui/{__version__}",
-        versioning=bool(cfg["versioning"]),
-        snapshot_keep=int(cfg["snapshot_keep"]),
+        git_enabled=bool(cfg["git_enabled"]),
+        git_remote_url=cfg["git_remote_url"],
+        git_auto_push=bool(cfg["git_auto_push"]),
     )
 
 

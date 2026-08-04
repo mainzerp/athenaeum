@@ -35,6 +35,13 @@ Everything your agents do is visible: the web interface lets you browse
 your library as an interactive graph, read every document, and review a full
 activity log of each change and why it happened.
 
+Every library write is also a git commit. Every document page carries a
+History card: a slider over that file's commits, a read-only historical view
+with its diff, and "Restore this version" for that one file. The Library
+page carries the full history — per-commit diffs, revert for any commit, and
+an undoable reset slider; an optional remote in Library settings adds
+push/pull (remote auth uses the git client's own credentials).
+
 ## Multi-user
 
 One Athenaeum server serves your whole household or team: every user gets
@@ -46,7 +53,9 @@ keys and access tokens. Admins manage users in the web interface.
 - Self-hosted: one container, one data volume — that's it.
 - Plain files: your library is ordinary Markdown you can copy, back up, or
   take elsewhere at any time — the web interface downloads the whole library
-  as a zip archive and restores it back.
+  as a zip archive and restores it back. The archive holds content only
+  (git history and legacy snapshot data are excluded); an import
+  re-initializes the history.
 - Encrypted keys: AI provider credentials are stored encrypted, never in
   plain text.
 - Local option: semantic search can run fully offline on your own machine.

@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ fm.get("title") or doc["path"] }} - Athenaeum{% endblock %}
 {% block content %}
+{% if msg %}<div class="js-flash" data-type="success" data-message="{{ msg }}" hidden></div>{% endif %}
+{% if error %}<div class="js-flash" data-type="danger" data-message="{{ error }}" hidden></div>{% endif %}
 <div class="page-header page-header-sticky">
   <p class="mb-2"><a href="/library/tree">Back to tree</a></p>
   <h1>{{ fm.get("title") or doc["path"] }}</h1>
@@ -13,12 +15,83 @@
   </div>
   {% if fm.get("description") %}<p class="subtitle mt-2">{{ fm["description"] }}</p>{% endif %}
 </div>
+{% if not history_available %}
+<div class="card">
+  <div class="card-body">
+    <p class="muted">Git history is unavailable.</p>
+    <p class="muted">
+      {% if not history_configured %}
+      Enable it in <a class="text-accent" href="/config/library">Library settings</a>.
+      {% else %}
+      git binary not found on this server.
+      {% endif %}
+    </p>
+  </div>
+</div>
+{% elif not file_commits %}
+<div class="card">
+  <div class="card-body">
+    <p class="muted">No history yet — the first write touching this document creates its first commit.</p>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="card-header">History</div>
+  <div class="card-body">
+    <input type="range" id="history-slider" min="0" max="{{ file_commits|length - 1 }}" value="{{ viewed_index }}" step="1">
+    <p class="range-label" id="history-label"></p>
+    <p>
+      {% if viewed_index > 0 %}
+      <a class="text-accent" href="/library/document?path={{ doc["path"] | urlencode }}&sha={{ file_commits[viewed_index - 1]["sha"] | urlencode }}">Newer</a>
+      {% else %}
+      <span class="muted">Newer</span>
+      {% endif %}
+      ·
+      {% if viewed_index + 1 < file_commits|length %}
+      <a class="text-accent" href="/library/document?path={{ doc["path"] | urlencode }}&sha={{ file_commits[viewed_index + 1]["sha"] | urlencode }}">Older</a>
+      {% else %}
+      <span class="muted">Older</span>
+      {% endif %}
+    </p>
+    {% if viewed %}
+    <form method="post" action="/library/document/restore"
+          data-confirm="Restore this document to commit {{ viewed['short'] }}? The restore is recorded as a new commit."
+          data-loading>
+      {{ csrf_input(request) }}
+      <input type="hidden" name="path" value="{{ doc['path'] }}">
+      <input type="hidden" name="sha" value="{{ viewed['sha'] }}">
+      <button type="submit" class="btn btn-primary">Restore this version</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% if viewed %}
+<div class="card">
+  <div class="card-body">
+    <p class="muted">Viewing <code>{{ viewed["short"] }}</code>{% if viewed["timestamp"] %} from {{ viewed["timestamp"] | dt }}{% endif %} — not the current version.
+    <a class="text-accent" href="/library/document?path={{ doc["path"] | urlencode }}">Back to current</a></p>
+  </div>
+</div>
+{% endif %}
 <div class="card">
   <div class="card-body">
     <div id="md-source" hidden>{{ doc["body"] }}</div>
     <div id="md-rendered" class="doc-body"></div>
   </div>
 </div>
+{% if viewed %}
+<div class="card">
+  <div class="card-header">Changes in <code>{{ viewed["short"] }}</code></div>
+  <div class="card-body">
+    {% if diff %}
+    <pre class="diff">{{ diff }}</pre>
+    {% else %}
+    <p class="muted">No changes recorded for this commit.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 {% endblock %}
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/marked@18.0.7/lib/marked.umd.js"></script>
@@ -27,4 +100,27 @@
   document.getElementById("md-rendered").innerHTML =
     DOMPurify.sanitize(marked.parse(document.getElementById("md-source").textContent));
 </script>
+{% if file_commits %}
+<script>
+(function () {
+  /* History slider: index -> file commit (0 = HEAD, newest first). */
+  var commits = {{ file_commits | tojson }};
+  var docPath = {{ doc["path"] | tojson }};
+  var slider = document.getElementById("history-slider");
+  var label = document.getElementById("history-label");
+  function update() {
+    var c = commits[Number(slider.value)];
+    label.textContent = c.short + " · " + c.timestamp.slice(0, 10) + " · " + c.subject;
+  }
+  slider.addEventListener("input", update);
+  slider.addEventListener("change", function () {
+    var i = Number(slider.value);
+    var url = "/library/document?path=" + encodeURIComponent(docPath);
+    if (i > 0) { url += "&sha=" + commits[i].sha; }
+    window.location = url;
+  });
+  update();
+})();
+</script>
+{% endif %}
 {% endblock %}

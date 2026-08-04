@@ -33,7 +33,7 @@ class FakeSearchService:
 def make_backend(tmp_path, service=None) -> LibraryBackend:
     root = tmp_path / "lib"
     root.mkdir()
-    return LibraryBackend(root, actor="test/0", versioning=False, embedding_service=service)
+    return LibraryBackend(root, actor="test/0", git_enabled=False, embedding_service=service)
 
 
 def write_concept(root, name, frontmatter_yaml, body):

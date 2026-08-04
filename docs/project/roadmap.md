@@ -105,7 +105,7 @@ ActivityRegistry / EmbedStatusRegistry in-flight state.
 These items are deliberately unphased; each needs an explicit go decision and
 its own Research -> Planning cycle before any work starts.
 
-- **WebUI chat with the librarian** (understory feature): direct chat with
+- **WebUI chat with the librarian**: direct chat with
   the per-user librarian from the browser, with tool calls rendered inline so
   the owner can watch it work. Useful for testing prompt/config changes.
 - **`sqlite-vec` ANN index for embeddings** (conditional upgrade path): the
@@ -113,10 +113,6 @@ its own Research -> Planning cycle before any work starts.
   correct at the <1000-concept scale. If libraries grow past ~10k concepts,
   move to `sqlite-vec` behind the same `EmbeddingService` seam; the table
   layout already carries model/dims per row for a mixed-state migration.
-- **Real git backend** for versioning (deferred). Shadow-copy snapshots
-  already cover undo/audit/diff; upgrade is lossless (`git init &&
-  git add -A && git commit` on the plain directory). Only worth doing if
-  external git tooling integration becomes a real requirement.
 - **Per-user subprocess isolation** (deferred). One shared process with
   in-process per-user librarians today; `LibrarianManager` is the swap seam.
   Motivation would be blast-radius containment of a misbehaving librarian or
@@ -124,12 +120,8 @@ its own Research -> Planning cycle before any work starts.
 - **Streaming LLM responses** (deferred). Not needed for intent-based
   request/response tools; the `LLMProvider` protocol can grow a streaming
   variant if a future tool wants progressive output.
-- **Tool-description refresh via `tools/list_changed`** (understory
-  feature): after writes in a long-lived MCP session, push a refreshed seed
+- **Tool-description refresh via `tools/list_changed`** after writes in a long-lived MCP session, push a refreshed seed
   so the client session sees its own writes without reconnecting.
-- **Snapshot pruning policy beyond `snapshot_keep`** — the hook
-  (`VersionStore.prune(keep_last)`) already exists; only extend if keep-all
-  proves wasteful in practice.
 - **Verification workflow for trust tiers** (gap found 2026-07-30): trust
   tiers are derived from the `verified` frontmatter list, but nothing in the
   product ever sets it — `edit_concept` explicitly refuses to touch
@@ -141,11 +133,3 @@ its own Research -> Planning cycle before any work starts.
   checks; whether the nightly curate run should gain an opt-in verification
   step; and what verification actually asserts (link validity, source
   freshness, owner sign-off).
-
-
-ui tree rework, bessere usability und möglichkeit für den user dateien anzulegen, editieren und löschen
-
-agents rework, librarian und curator split, als eigenstädige agents
-
-
-reasoning effort einstellbar

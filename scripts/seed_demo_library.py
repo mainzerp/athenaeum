@@ -221,7 +221,7 @@ def main() -> int:
         else:
             child.unlink()
     count = write_tree(root, demo_tree())
-    LibraryBackend(root, actor="demo-seed", versioning=False).reconcile()
+    LibraryBackend(root, actor="demo-seed", git_enabled=False).reconcile()
     print(f"seeded {count} concepts into {root}")
     return 0
 

@@ -2,12 +2,14 @@
 
 Two backends on one library root (the WebUI builds fresh backends per
 request) run threaded write bursts; the shared RLock must serialize the
-compound write (snapshot -> concept file -> index.md -> log.md) so no log
-entry is lost, snapshot numbers stay unique, and the index tree stays
-consistent.
+compound write (concept file -> index.md -> log.md -> git commit) so no log
+entry is lost, every write lands exactly one commit, and the index tree
+stays consistent.
 """
 
 import asyncio
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -24,6 +26,8 @@ from athenaeum.library.backend import LibraryBackend
 from test_mcp_tools import make_stack as make_mcp_stack
 from test_mcp_tools import set_identity
 
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git binary required")
+
 
 def _entry_lines(root: Path, kind: str) -> list[str]:
     return [
@@ -33,7 +37,19 @@ def _entry_lines(root: Path, kind: str) -> list[str]:
     ]
 
 
-def test_threaded_write_bursts_preserve_log_snapshots_index(tmp_path):
+def _git_commit_count(root: Path) -> int:
+    proc = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(proc.stdout.strip())
+
+
+@requires_git
+def test_threaded_write_bursts_preserve_log_commits_index(tmp_path):
     root = tmp_path / "library"
     backend_a = LibraryBackend(root, actor="agent-a")
     backend_b = LibraryBackend(root, actor="agent-b")
@@ -79,10 +95,8 @@ def test_threaded_write_bursts_preserve_log_snapshots_index(tmp_path):
     assert len(_entry_lines(root, "Creation")) == 21
     assert len(_entry_lines(root, "Update")) == 20
 
-    # one snapshot per mutating call, all uniquely numbered
-    snaps = [d.name for d in (root / ".athenaeum" / "versions").iterdir() if d.is_dir()]
-    assert len(snaps) == 41
-    assert len(set(snaps)) == 41
+    # one commit per compound write (init + 21 creates + 20 edits)
+    assert _git_commit_count(root) == 42
 
     # no tmp residue from atomic writes anywhere in the bundle
     assert list(root.rglob("*.tmp")) == []
@@ -134,12 +148,11 @@ def test_move_concept_nested_lock_no_deadlock(tmp_path):
     assert report["errors"] == []
 
 
-def test_rollback_and_reconcile_serialized_with_writes(tmp_path):
+def test_edit_and_reconcile_serialized_with_writes(tmp_path):
     root = tmp_path / "library"
     backend_a = LibraryBackend(root, actor="agent-a")
     backend_b = LibraryBackend(root, actor="agent-b")
     backend_a.create_concept("/a.md", {"type": "Note", "title": "A"}, "v1\n")
-    backend_a.edit_concept("/a.md", new_body="v2\n")  # snapshot 2 pre-images /a.md
     barrier = threading.Barrier(2)
     errors = []
 
@@ -156,15 +169,6 @@ def test_rollback_and_reconcile_serialized_with_writes(tmp_path):
             barrier.wait(timeout=10)
             for _ in range(5):
                 backend_b.reconcile()
-                # L12: rollback is constrained to the latest snapshot; the
-                # writer can outpace the lookup, so retry on that race.
-                for _attempt in range(20):
-                    latest = backend_b.list_versions()[0]["n"]
-                    try:
-                        backend_b.rollback(latest)
-                        break
-                    except ValueError:
-                        continue
         except Exception as exc:
             errors.append(exc)
 

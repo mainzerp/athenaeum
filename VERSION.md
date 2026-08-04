@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.21.0**
+Current version: **0.22.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,61 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.22.0
+
+Git Time Machine: the shadow-copy snapshot versioning is replaced by a real
+git history in every library bundle — per-write auto-commits, per-document
+timelines with per-file restore and a library-wide history section in the
+WebUI (per-commit diffs, revert, undoable reset slider), optional remote
+push/pull, and Docker/compose hardening. (Commits: (...) — filled in at
+release time per the release checklist.)
+
+- **Git history backend (PART 1):** every compound write (and asset store)
+  ends in a best-effort `git` auto-commit with a deterministic message
+  mirroring the log.md entry (`Creation: Created [X](/x.md). (requested by
+  agent:<label>)`); git failures never break a write. History lives in the
+  bundle's own repository (`git init -b main`, repo-local identity, library
+  `.gitignore` excluding `.athenaeum/versions/`, `.athenaeum/payloads/`,
+  `.traces/`, and atomic-write temp files). `snapshots.py` and the
+  `versioning`/`snapshot_keep` settings are retired (dead-legacy-column
+  pattern); `status()["stats"]["versions"]` now reports the commit count.
+- **Revert / append-only reset:** undo one commit via `git revert
+  --no-commit` + one recording commit; reset to any earlier commit via
+  `git read-tree --reset -u` + one recording commit, so the pre-reset state
+  stays reachable as the reset commit's parent (undoable, fast-forward
+  pushable). Reverting the root commit is refused.
+- **Config chain:** new `librarian_configs` columns `git_enabled` (default
+  on), `git_remote_url`, `git_auto_push` (default off), wired through db.py,
+  the librarian manager/agent, `deps.get_library_backend`, and the Library
+  settings form. Push runs post-commit (`GIT_TERMINAL_PROMPT=0`); pull is an
+  explicit action (`git pull --ff-only`).
+- **History WebUI (PART 2 + DOC_TIMELINE):** the old Versions pages are
+  replaced by git history in the Library — every document page carries a
+  History card (a slider over that file's commits via rename-aware per-file
+  git ops, a read-only historical view with its diff, and "Restore this
+  version": a per-file restore recorded as one new compound-write commit;
+  no-op and file-absent-at-commit restores are refused), and the tree page
+  carries the library-wide section (commit list, per-commit diff view at
+  `/library/diff`, revert buttons, reset slider, pull button when a remote
+  is configured). The standalone Time-Machine page is folded in; legacy
+  `/library/time-machine` URLs 301-redirect. Restore and pull evict the
+  cached librarian so embeddings/FTS reconcile on the next agent entry.
+- **ZIP coexistence (PART 2):** exports exclude `.git` and legacy
+  `.athenaeum/versions/`; imports reject archives containing `.git` members
+  (hook-injection guard) and re-initialize git history after the swap.
+- **Docker/compose hardening + path confinement (PART 3):** git binary in
+  the container image; `resolve_under` confinement in links/validate;
+  `user_id` path-segment validation; sqlite `dbname` URI-metacharacter
+  rejection for runtime connections. Compose: read-only rootfs + `tmpfs /tmp`,
+  `cap_drop: ALL`, `no-new-privileges`, CPU/RAM/PID limits; base image pinned
+  (`python:3.12.13-slim`), container user pinned to UID/GID 10001.
+- **Upgrade note (existing volumes):** the pinned UID 10001 replaces the old
+  unpinned UID 1000, so an existing data volume is not writable by the new
+  container (sqlite "attempt to write a readonly database", restart loop).
+  One-time fix: `docker run --rm --user root -v <project>_athenaeum-data:/data
+  athenaeum-athenaeum chown -R 10001:10001 /data`, then `docker compose up -d`.
+  Fresh volumes are unaffected.
 
 ### 0.21.0
 

@@ -1,5 +1,9 @@
 """Tests for athenaeum.library.links."""
 
+import os
+
+import pytest
+
 from athenaeum.library.links import (
     broken_links,
     extract_body_links,
@@ -147,3 +151,23 @@ def test_linked_image_construct_yields_no_page_link():
     """v1 accepted edge: ``[![a](/i.png)](/a.md)`` — the outer ``[...](...)``
     match consumes the image part, so no link to the page target is extracted."""
     assert extract_body_links("[![a](/i.png)](/a.md)") == ["/i.png"]
+
+
+# --- symlink escape probes (resolve_under confinement) -------------------------
+
+
+def test_broken_links_symlink_escape_reported_broken(tmp_path):
+    """A link pointing outside the root via a symlinked directory is reported
+    broken — the probe is confined by resolve_under, never follows the escape,
+    and never crashes (test_isolation.py pattern)."""
+    outside = tmp_path.parent / (tmp_path.name + "_outside")
+    outside.mkdir(exist_ok=True)
+    secret = outside / "secret.md"
+    secret.write_text(FM + "secret\n", encoding="utf-8")
+    try:
+        os.symlink(outside, tmp_path / "link", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    write(tmp_path, "/a.md", FM + "[s](/link/secret.md)\n")
+    assert broken_links(tmp_path) == [{"source": "/a.md", "target": "/link/secret.md"}]
+    assert secret.read_text(encoding="utf-8").endswith("secret\n")  # untouched

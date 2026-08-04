@@ -181,8 +181,23 @@ def _driver_message(exc: Exception, secret: str | None = None) -> str:
     return msg
 
 
+def validate_sqlite_dbname(dbname: str) -> None:
+    """Reject sqlite paths that could re-parameterize the ``file:...?mode=ro`` URI.
+
+    The dbname is interpolated into a sqlite URI (``file:{dbname}?mode=ro``);
+    ``?``/``#``/NUL are URI metacharacters that could smuggle extra parameters
+    (e.g. another ``mode``) or truncate the path. Empty is rejected too.
+    """
+    if not dbname or any(c in dbname for c in ("?", "#", "\x00")):
+        raise ComputationError(
+            "invalid sqlite database path: must be non-empty and may not "
+            "contain '?', '#', or NUL characters"
+        )
+
+
 def run_sqlite(dbname: str, sql: str, params: dict, *, timeout_s: float, row_cap: int) -> dict:
     """Run the statement read-only against a sqlite file (``:name`` placeholders)."""
+    validate_sqlite_dbname(dbname)
     try:
         conn = sqlite3.connect(f"file:{dbname}?mode=ro", uri=True)
     except sqlite3.Error as exc:

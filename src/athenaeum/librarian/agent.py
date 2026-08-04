@@ -112,8 +112,9 @@ class LibrarianConfig:
     llm: LLMConfig | None = None  # None = unconfigured librarian
     curate_llm: LLMConfig | None = None  # resolved curator config; None = use llm
     prompt_addendum: str | None = None  # None = built-in default prompt only
-    versioning: bool = True
-    snapshot_keep: int = 0  # 0 = keep all
+    git_enabled: bool = True  # commit every library write to git history
+    git_remote_url: str | None = None  # None = no remote configured
+    git_auto_push: bool = False  # push to the remote after each commit
     trace_keep: int = 0  # 0 = keep all
     activity_keep: int = 0  # 0 = keep all
     payload_keep: int = 0  # 0 = keep all
@@ -278,8 +279,9 @@ class Librarian:
         backend = LibraryBackend(
             self.root,
             actor=f"athenaeum-librarian/{__version__}",
-            versioning=self.config.versioning,
-            snapshot_keep=self.config.snapshot_keep,
+            git_enabled=self.config.git_enabled,
+            git_remote_url=self.config.git_remote_url,
+            git_auto_push=self.config.git_auto_push,
             embedding_service=self._embed,
             hybrid_search=self.config.hybrid_search,
             hybrid_rerank=self.config.hybrid_rerank,

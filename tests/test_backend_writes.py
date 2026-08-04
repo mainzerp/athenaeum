@@ -1,11 +1,23 @@
 """Tests for athenaeum.library.backend.LibraryBackend compound writes."""
 
+import shutil
+import subprocess
+
 import pytest
 
 from athenaeum.library.backend import LibraryBackend, provision_library
 from athenaeum.library.frontmatter import split_document
+from athenaeum.library.gittool import GitError
 
 ACTOR = "athenaeum-librarian/0.1.0"
+
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git binary required")
+
+
+def _git(cwd, *args):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout
 
 
 def make_backend(tmp_path, **kwargs):
@@ -37,7 +49,8 @@ def test_init_bundle(tmp_path):
     assert "**Initialization**" in (root / "log.md").read_text(encoding="utf-8")
 
 
-def test_compound_write_produces_concept_index_log_snapshot(tmp_path):
+@requires_git
+def test_compound_write_produces_concept_index_log_commit(tmp_path):
     backend = make_backend(tmp_path)
     result = backend.create_concept(
         "/tables/customers.md",
@@ -56,8 +69,13 @@ def test_compound_write_produces_concept_index_log_snapshot(tmp_path):
     assert "tables/" in (root / "index.md").read_text(encoding="utf-8")
     # log entry
     assert "**Creation**" in read_log(root)
-    # snapshot pre-image recorded
-    assert (root / ".athenaeum" / "versions" / "000001" / "meta.json").exists()
+    # one git commit per compound write; the message mirrors the log entry
+    commits = backend.list_commits()
+    assert [c["subject"] for c in commits] == [
+        "Creation: Created [Customers](/tables/customers.md).",
+        "Initialization: Initialized the library bundle.",
+    ]
+    assert backend.status()["stats"]["versions"] == 2
     # no leftover .tmp files
     assert not list(root.rglob("*.tmp"))
 
@@ -166,16 +184,21 @@ def test_verify_concept_appends_to_existing_list(tmp_path):
     ]
 
 
-def test_verify_concept_snapshot_and_log(tmp_path):
+@requires_git
+def test_verify_concept_commit_and_log(tmp_path):
     backend = make_backend(tmp_path)
     backend.create_concept("/a.md", {"type": "Concept", "title": "A"}, "x\n")
     backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0", agent_label="bot-1")
     root = tmp_path / "lib"
-    assert (root / ".athenaeum" / "versions" / "000002" / "meta.json").exists()
     log = read_log(root)
     assert "**Verification**" in log
     assert "(verifier: athenaeum-curator/0.2.0)" in log
     assert "(requested by agent:bot-1)" in log
+    # the commit message mirrors the log text, attribution suffix included
+    assert backend.list_commits()[0]["subject"] == (
+        "Verification: Verified [A](/a.md) (verifier: athenaeum-curator/0.2.0)."
+        " (requested by agent:bot-1)"
+    )
 
 
 def test_verify_concept_refusals(tmp_path):
@@ -272,6 +295,7 @@ def test_deprecate_sets_status(tmp_path):
 # --- write_asset (content-addressed asset store) -------------------------------
 
 
+@requires_git
 def test_write_asset_happy_path(tmp_path):
     backend = make_backend(tmp_path)
     root = tmp_path / "lib"
@@ -282,9 +306,11 @@ def test_write_asset_happy_path(tmp_path):
     assert bundle_path.endswith("-scan.png")
     stored = root / bundle_path.lstrip("/")
     assert stored.read_bytes() == data
-    # outside the compound write: no log entry, no snapshot, no index drift
+    # outside the compound write: no log entry, no index drift — but the
+    # asset IS committed to git history (assets are linked from concepts)
     assert read_log(root) == log_before
     assert backend.validate()["errors"] == []
+    assert backend.list_commits()[0]["subject"].startswith("Asset: Stored asset ")
     assert not list(root.rglob("*.tmp"))
 
 
@@ -448,14 +474,69 @@ def test_link_health_ignores_bare_paths(tmp_path):
     assert backend.link_health(["/b.md"])["/b.md"]["inbound"] == 0
 
 
-def test_rollback_restores_concept_and_logs(tmp_path):
+@requires_git
+def test_revert_commit_restores_concept_and_logs(tmp_path):
     backend = make_backend(tmp_path)
     backend.create_concept("/a.md", {"type": "Concept"}, "v1\n")
     backend.edit_concept("/a.md", new_body="v2\n")
     assert backend.read_document("/a.md")["body"] == "v2\n"
-    backend.rollback(2)
+    edit_sha = backend.list_commits()[0]["sha"]
+    backend.revert_commit(edit_sha)
     assert backend.read_document("/a.md")["body"] == "v1\n"
-    assert "Rolled back to version 000002" in read_log(tmp_path / "lib")
+    assert f"Reverted commit {edit_sha[:7]}" in read_log(tmp_path / "lib")
+    commits = backend.list_commits()
+    # ONE new commit records the revert (append-only undo)
+    assert commits[0]["subject"] == f"Update: Reverted commit {edit_sha[:7]}."
+    assert len(commits) == 4  # init + create + edit + revert
+
+
+@requires_git
+def test_reset_to_commit_is_append_only(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept"}, "v1\n")
+    first_sha = backend.list_commits()[0]["sha"]
+    backend.edit_concept("/a.md", new_body="v2\n")
+    pre_reset = backend.git_head()
+    backend.reset_to_commit(first_sha)
+    assert backend.read_document("/a.md")["body"] == "v1\n"
+    assert f"Reset library to {first_sha[:7]}" in read_log(tmp_path / "lib")
+    commits = backend.list_commits()
+    assert commits[0]["subject"] == f"Update: Reset library to {first_sha[:7]}."
+    # append-only: the reset commit's parent is the pre-reset commit, so the
+    # pre-reset state stays reachable (undo = another reset)
+    assert commits[1]["sha"] == pre_reset
+    assert len(commits) == 4
+
+
+@requires_git
+def test_history_refusals_leave_clean_worktree(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept"}, "v1\n")
+    root_sha = backend.list_commits()[-1]["sha"]
+    assert backend.list_commits()[-1]["is_root"] is True
+    with pytest.raises(GitError, match="cannot revert the initial commit"):
+        backend.revert_commit(root_sha)
+    head = backend.git_head()
+    with pytest.raises(GitError, match="already at this commit"):
+        backend.reset_to_commit(head)
+    with pytest.raises(GitError, match="invalid commit sha"):
+        backend.revert_commit("../evil")
+    # the refused ops staged nothing: HEAD and history are untouched
+    assert backend.git_head() == head
+    assert len(backend.list_commits()) == 2
+
+
+def test_git_disabled_backend_writes_without_history(tmp_path):
+    backend = LibraryBackend(tmp_path / "lib", actor=ACTOR, git_enabled=False)
+    backend.init_bundle()
+    backend.create_concept("/a.md", {"type": "Concept"}, "x\n")
+    assert backend.history_configured is False
+    assert backend.history_available is False
+    assert backend.status()["stats"]["versions"] == 0
+    assert not (tmp_path / "lib" / ".git").exists()
+    assert "**Creation**" in read_log(tmp_path / "lib")
+    with pytest.raises(GitError, match="disabled"):
+        backend.list_commits()
 
 
 def test_search_and_browse_reads(tmp_path):
@@ -472,3 +553,140 @@ def test_search_and_browse_reads(tmp_path):
     sub = backend.list_dir("/tables")
     assert sub[0]["title"] == "Customers"
     assert backend.link_check() == []
+
+
+# --- per-file history + restore (DOC_TIMELINE, 0.22.0) ---------------------------
+
+
+@requires_git
+def test_restore_file_from_commit_reverts_edit(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/concepts/alpha.md", {"type": "Note", "title": "Alpha"}, "v1\n")
+    create_sha = backend.list_commits()[0]["sha"]
+    backend.edit_concept("/concepts/alpha.md", new_body="v2\n")
+    backend.create_concept("/concepts/beta.md", {"type": "Note", "title": "Beta"}, "beta\n")
+    count_before = len(backend.list_commits())
+
+    backend.restore_file_from_commit("/concepts/alpha.md", create_sha)
+
+    assert backend.read_document("/concepts/alpha.md")["body"] == "v1\n"
+    commits = backend.list_commits()
+    assert len(commits) == count_before + 1  # exactly ONE new commit
+    short = create_sha[:7]
+    message = f"Restored [Alpha](/concepts/alpha.md) from commit {short}."
+    assert commits[0]["subject"] == f"Update: {message}"
+    assert f"**Update**: {message}" in read_log(tmp_path / "lib")
+    # the log entry lands in the SAME commit as the restore
+    assert message in _git(tmp_path / "lib", "show", "HEAD:log.md")
+    # a file created after the target commit is untouched
+    assert backend.read_document("/concepts/beta.md")["body"] == "beta\n"
+
+
+@requires_git
+def test_restore_file_from_commit_regenerates_index(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/concepts/alpha.md", {"type": "Note", "title": "Title A"}, "v1\n")
+    create_sha = backend.list_commits()[0]["sha"]
+    backend.edit_concept("/concepts/alpha.md", frontmatter_patch={"title": "Title B"})
+    index_path = tmp_path / "lib" / "concepts" / "index.md"
+    assert "Title B" in index_path.read_text(encoding="utf-8")
+
+    backend.restore_file_from_commit("/concepts/alpha.md", create_sha)
+
+    index_text = index_path.read_text(encoding="utf-8")
+    assert "Title A" in index_text
+    assert "Title B" not in index_text
+
+
+@requires_git
+def test_restore_file_from_commit_noop_refused(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Note"}, "v1\n")
+    sha = backend.list_commits()[0]["sha"]
+    count = len(backend.list_commits())
+    with pytest.raises(GitError, match="already at this state"):
+        backend.restore_file_from_commit("/a.md", sha)
+    assert len(backend.list_commits()) == count
+
+
+@requires_git
+def test_restore_file_from_commit_absent_at_sha_refused(tmp_path):
+    backend = make_backend(tmp_path)
+    init_sha = backend.list_commits()[-1]["sha"]  # init commit predates the file
+    backend.create_concept("/a.md", {"type": "Note"}, "v1\n")
+    count = len(backend.list_commits())
+    with pytest.raises(GitError, match="did not exist"):
+        backend.restore_file_from_commit("/a.md", init_sha)
+    assert backend.read_document("/a.md")["body"] == "v1\n"  # untouched
+    assert len(backend.list_commits()) == count
+
+
+@requires_git
+def test_restore_file_from_commit_unknown_sha(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Note"}, "v1\n")
+    with pytest.raises(GitError, match="unknown commit"):
+        backend.restore_file_from_commit("/a.md", "deadbeef")
+
+
+@requires_git
+def test_restore_file_from_commit_rename_aware(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Note", "title": "Alpha"}, "original\n")
+    create_sha = backend.list_commits()[0]["sha"]
+    backend.move_concept("/a.md", "/b.md")
+    backend.edit_concept("/b.md", new_body="edited\n")
+
+    # restore the CURRENT path from a pre-move commit: the historical bytes
+    # (stored under the old name) land at /b.md
+    backend.restore_file_from_commit("/b.md", create_sha)
+
+    assert backend.read_document("/b.md")["body"] == "original\n"
+    assert not (tmp_path / "lib" / "a.md").exists()
+
+
+def test_restore_file_from_commit_git_disabled(tmp_path):
+    backend = LibraryBackend(tmp_path / "lib", actor=ACTOR, git_enabled=False)
+    backend.init_bundle()
+    backend.create_concept("/a.md", {"type": "Note"}, "x\n")
+    with pytest.raises(GitError, match="disabled"):
+        backend.restore_file_from_commit("/a.md", "deadbeef")
+
+
+def test_file_history_rejects_reserved(tmp_path):
+    backend = make_backend(tmp_path)
+    with pytest.raises(ValueError, match="reserved"):
+        backend.file_history("/log.md")
+
+
+@requires_git
+def test_git_pull_wires_origin_configured_after_last_write(tmp_path):
+    """A remote configured after the last auto-commit is wired at pull time."""
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(bare))
+
+    lib = tmp_path / "library"
+    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
+    backend.init_bundle()
+    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "v1\n")
+
+    # seed the bare remote with the same history plus one commit, and leave
+    # behind the branch tracking a manual `push -u` would have set
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", str(lib), str(other))
+    _git(other, "config", "user.name", "Test")
+    _git(other, "config", "user.email", "test@localhost")
+    (other / "pulled.md").write_text("from remote\n", encoding="utf-8")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-m", "remote commit")
+    _git(other, "push", str(bare), "main:main")
+    _git(lib, "config", "branch.main.remote", "origin")
+    _git(lib, "config", "branch.main.merge", "refs/heads/main")
+
+    # a fresh backend sees the newly configured remote; nothing has
+    # auto-committed since, so origin is not wired on disk yet
+    with_remote = LibraryBackend(lib, actor="athenaeum-test/0.0.0", git_remote_url=str(bare))
+    with_remote.git_pull()  # previously failed with git's "no such remote"
+
+    assert _git(lib, "remote", "get-url", "origin").strip() == str(bare)
+    assert (lib / "pulled.md").read_text(encoding="utf-8") == "from remote\n"

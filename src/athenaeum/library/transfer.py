@@ -1,12 +1,14 @@
 """Whole-bundle export/import: zip build, validated staging extraction, swap.
 
 Export zips the complete bundle (concepts, indexes, log, and the dot-dir
-side stores) under the per-root write lock so the walk sees a consistent
-tree. Import validates the archive (zip-slip and symlink members rejected,
+side stores — except ``.git`` and legacy ``.athenaeum/versions/``) under
+the per-root write lock so the walk sees a consistent tree. Import
+validates the archive (zip-slip, symlink, and ``.git`` members rejected,
 root ``index.md``/``log.md`` required), extracts to a staging sibling, then
 replaces the live root via rename-swap under the write lock — a
 well-behaved writer class beside the librarian (architecture §7), honoring
-``write_lock_for``.
+``write_lock_for``. After the swap, git history is re-initialized with one
+commit (archives carry no ``.git``; best-effort, never breaks the import).
 """
 
 from __future__ import annotations
@@ -14,9 +16,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from . import gittool
 from . import log as log_mod
 from .backend import write_lock_for
 
@@ -38,11 +42,22 @@ class CorruptArchiveError(TransferError):
 
 
 class UnsafeMemberError(TransferError):
-    """An archive member would escape the bundle root (zip-slip, symlink)."""
+    """An archive member is unsafe: escapes the bundle root (zip-slip,
+    symlink) or carries a ``.git`` path (git-hook injection)."""
 
 
 class MissingBundleFileError(TransferError):
     """The archive lacks a file every OKF bundle must carry at the root."""
+
+
+def _rmtree_onexc(func, path, _exc):
+    """chmod-retry for read-only files (git objects are mode 0o444 on Windows)."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def _rmtree(path: Path, *, ignore_errors: bool = False) -> None:
+    shutil.rmtree(path, ignore_errors=ignore_errors, onexc=_rmtree_onexc)
 
 
 def export_bundle(root: str | Path, dest_zip: str | Path) -> int:
@@ -67,7 +82,7 @@ def stage_import(root: str | Path, src_zip: str | Path) -> Path:
     Returns the staging path.
     """
     staging = Path(root).parent / STAGING_DIRNAME
-    shutil.rmtree(staging, ignore_errors=True)
+    _rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
     try:
         try:
@@ -85,6 +100,10 @@ def stage_import(root: str | Path, src_zip: str | Path) -> Path:
             for info in zf.infolist():
                 if _is_symlink(info):
                     raise UnsafeMemberError(f"symlink member not allowed: {info.filename!r}")
+                # Hook-injection guard: exports never carry .git, so an
+                # archive that does is hostile (supply-chain via git hooks).
+                if ".git" in _member_relpath(info.filename.rstrip("/")).parts:
+                    raise UnsafeMemberError(".git members are not allowed")
                 if info.is_dir():
                     # Explicit dir entries (empty dirs) round-trip; files
                     # create their parents on demand below.
@@ -102,10 +121,10 @@ def stage_import(root: str | Path, src_zip: str | Path) -> Path:
                         f"unreadable archive member {info.filename!r}: {exc}"
                     ) from exc
     except TransferError:
-        shutil.rmtree(staging, ignore_errors=True)
+        _rmtree(staging, ignore_errors=True)
         raise
     except Exception as exc:
-        shutil.rmtree(staging, ignore_errors=True)
+        _rmtree(staging, ignore_errors=True)
         raise CorruptArchiveError(f"unreadable archive: {exc}") from exc
     return staging
 
@@ -130,24 +149,31 @@ def replace_staged_bundle(root: str | Path, staging: str | Path, backup_zip: str
             _build_zip(root, tmp_backup)
             os.replace(tmp_backup, backup_zip)
         except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
+            _rmtree(staging, ignore_errors=True)
             raise
         renamed = False
         try:
             if old.exists():
-                shutil.rmtree(old)
+                _rmtree(old)
             os.rename(root, old)
             renamed = True
             os.rename(staging, root)
-            shutil.rmtree(old)
+            _rmtree(old)
         except Exception as exc:
             if renamed and not root.exists() and old.exists():
                 os.rename(old, root)  # best-effort rollback
-            shutil.rmtree(staging, ignore_errors=True)  # failed mid-swap
+            _rmtree(staging, ignore_errors=True)  # failed mid-swap
             raise TransferError(
                 f"Import failed during restore; the previous library is backed up at {backup_zip}"
             ) from exc
         log_mod.append_entry(root, "Update", "Library restored from uploaded archive.")
+        # Archives carry no .git (export excludes it, import rejects it), so
+        # the restored tree gets a fresh repo with one commit. Best-effort:
+        # ensure()/commit_all() never raise — a missing git binary must not
+        # fail the import after the swap already happened.
+        repo = gittool.GitRepo(root)
+        repo.ensure()
+        repo.commit_all("Update: Library restored from uploaded archive.")
 
 
 def import_bundle(root: str | Path, src_zip: str | Path, backup_zip: str | Path) -> None:
@@ -160,8 +186,18 @@ def import_bundle(root: str | Path, src_zip: str | Path, backup_zip: str | Path)
     replace_staged_bundle(root, staging, backup_zip)
 
 
+def _export_skip(rel: Path) -> bool:
+    """True for bundle paths excluded from archives (decision: content-only).
+
+    ``.git`` (history stays on the host; import re-initializes it) and the
+    legacy ``.athenaeum/versions/`` snapshot store (inert since 0.22.0).
+    """
+    return ".git" in rel.parts or rel.parts[:2] == (".athenaeum", "versions")
+
+
 def _build_zip(root: Path, dest_zip: Path) -> int:
-    """Zip the whole bundle (dot-dirs included) deterministically.
+    """Zip the whole bundle (dot-dirs included except ``.git`` and the
+    legacy ``.athenaeum/versions/`` store) deterministically.
 
     Entries are sorted by POSIX relpath; directories get explicit entries
     (name + ``/``) so empty dirs (e.g. an empty ``.athenaeum/payloads/``)
@@ -171,7 +207,10 @@ def _build_zip(root: Path, dest_zip: Path) -> int:
     count = 0
     with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for entry in entries:
-            arcname = entry.relative_to(root).as_posix()
+            rel = entry.relative_to(root)
+            if _export_skip(rel):
+                continue
+            arcname = rel.as_posix()
             if entry.is_dir():
                 zf.writestr(arcname + "/", "")
             else:

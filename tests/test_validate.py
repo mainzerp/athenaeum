@@ -1,5 +1,9 @@
 """Tests for athenaeum.library.validate."""
 
+import os
+
+import pytest
+
 from athenaeum.library.backend import LibraryBackend
 from athenaeum.library.validate import validate_bundle
 
@@ -95,6 +99,23 @@ def test_image_links_produce_no_broken_link_warnings(tmp_path):
     write(tmp_path, "/a.md", "---\ntype: Concept\n---\n![alt](/missing.png)\n")
     report = validate_bundle(tmp_path)
     assert "broken-link" not in codes(report, "warnings")
+
+
+def test_symlink_escape_link_is_broken_warning_no_crash(tmp_path):
+    """A link escaping the root via a symlinked directory is a broken-link
+    warning — the probe is confined by resolve_under and never crashes
+    (test_isolation.py pattern)."""
+    outside = tmp_path.parent / (tmp_path.name + "_outside")
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.md").write_text("---\ntype: Concept\n---\nsecret\n", encoding="utf-8")
+    try:
+        os.symlink(outside, tmp_path / "link", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    write(tmp_path, "/a.md", "---\ntype: Concept\n---\n[s](/link/secret.md)\n")
+    report = validate_bundle(tmp_path)
+    broken = {w["target"] for w in report["warnings"] if w["code"] == "broken-link"}
+    assert "/link/secret.md" in broken
 
 
 def test_orphan_detected_linked_concept_not(tmp_path):

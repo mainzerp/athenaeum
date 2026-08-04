@@ -1,10 +1,11 @@
 """Tests for athenaeum.isolation.resolve_under."""
 
 import os
+import uuid
 
 import pytest
 
-from athenaeum.isolation import PathEscapeError, UserPaths, resolve_under
+from athenaeum.isolation import PathEscapeError, UserPaths, resolve_under, validate_user_id
 
 
 def test_valid_nested_path(tmp_path):
@@ -53,3 +54,14 @@ def test_user_paths_wrapper(tmp_path):
     assert paths.resolve("/x.md") == tmp_path.resolve() / "x.md"
     with pytest.raises(PathEscapeError):
         paths.resolve("../x.md")
+
+
+def test_validate_user_id_accepts_uuids_and_slugs():
+    validate_user_id(str(uuid.uuid4()))
+    validate_user_id("user-1")
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "../x", "a/b", "a\\b", "a..b", "..", "a\x00b"])
+def test_validate_user_id_rejects_unsafe_segments(bad):
+    with pytest.raises(ValueError):
+        validate_user_id(bad)

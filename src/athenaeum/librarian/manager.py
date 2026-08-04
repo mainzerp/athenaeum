@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from athenaeum import db
+from athenaeum import db, isolation
 from athenaeum.computation import ComputationRunner
 from athenaeum.embeddings import EmbeddingService, EmbedStatusRegistry
 from athenaeum.fts import FtsIndex
@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_IDLE_TIMEOUT = 30 * 60  # 30 minutes, seconds
 
 _CONFIG_COLUMNS = (
-    "llm_model, prompt_addendum, trace_keep, activity_keep, payload_keep, versioning, "
-    "snapshot_keep, library_name, library_description, "
+    "llm_model, prompt_addendum, trace_keep, activity_keep, payload_keep, "
+    "git_enabled, git_remote_url, git_auto_push, library_name, library_description, "
     "librarian_connection_id, curator_connection_id, curator_model, "
     "curate_last_run_at, curate_prompt_addendum, "
     "embedding_source, embedding_model, embedding_connection_id, semantic_threshold, "
@@ -86,6 +86,9 @@ class LibrarianManager:
         self._get_lock = threading.Lock()
 
     def library_root(self, user_id: str) -> Path:
+        # Cheap shape assertion: the user_id becomes path segments, so reject
+        # traversal/slashes before any directory is touched (slugs allowed).
+        isolation.validate_user_id(user_id)
         return self.data_root / "users" / user_id / "library"
 
     def _load_config(self, user_id: str) -> LibrarianConfig:
@@ -111,8 +114,10 @@ class LibrarianManager:
         trace_keep = row["trace_keep"]
         activity_keep = row["activity_keep"]
         payload_keep = row["payload_keep"]
-        versioning = row["versioning"]
-        snapshot_keep = row["snapshot_keep"]
+        # NOT NULL DEFAULT columns — never NULL (0.22.0 git history).
+        git_enabled = bool(row["git_enabled"])
+        git_remote_url = row["git_remote_url"]
+        git_auto_push = bool(row["git_auto_push"])
         library_name = row["library_name"]
         library_description = row["library_description"]
         librarian_connection_id = row["librarian_connection_id"]
@@ -201,8 +206,9 @@ class LibrarianManager:
             trace_keep=trace_keep if trace_keep is not None else 0,
             activity_keep=activity_keep if activity_keep is not None else 0,
             payload_keep=payload_keep if payload_keep is not None else 0,
-            versioning=bool(versioning),
-            snapshot_keep=snapshot_keep if snapshot_keep is not None else 0,
+            git_enabled=git_enabled,
+            git_remote_url=git_remote_url,
+            git_auto_push=git_auto_push,
             library_name=library_name,
             library_description=library_description,
             curate_last_run_at=curate_last_run_at,

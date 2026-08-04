@@ -16,6 +16,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
+from ..isolation import PathEscapeError, resolve_under
 from . import frontmatter as fm_mod
 from .frontmatter import write_text_atomic
 
@@ -98,7 +99,11 @@ def broken_links(root: str | Path, source_path: str | None = None) -> list[dict]
     root = Path(root)
     broken = []
     for source, target, resolved in iter_bundle_links(root, source_path):
-        if not (root / resolved.lstrip("/")).exists():
+        try:
+            exists = resolve_under(root, resolved).exists()
+        except PathEscapeError:
+            exists = False  # escapes the root (e.g. symlink): broken by definition
+        if not exists:
             broken.append({"source": source, "target": target})
     return broken
 

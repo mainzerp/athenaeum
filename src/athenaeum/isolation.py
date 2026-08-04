@@ -18,6 +18,25 @@ class PathEscapeError(ValueError):
     """Raised when a bundle-relative path would escape its root."""
 
 
+def validate_user_id(user_id: str) -> None:
+    """Reject a ``user_id`` that is unsafe as a single path segment.
+
+    The id becomes ``users/<user_id>/library`` on disk, so empty/blank ids,
+    path separators, NUL, and any ``..`` raise ``ValueError``. Deliberately
+    NOT a UUID regex: tests and tooling use slugs like ``user-1``; the risk
+    closed here is path traversal, not id shape.
+    """
+    if (
+        not user_id
+        or not user_id.strip()
+        or "/" in user_id
+        or "\\" in user_id
+        or "\x00" in user_id
+        or ".." in user_id
+    ):
+        raise ValueError(f"invalid user_id: {user_id!r}")
+
+
 def resolve_under(root: str | Path, rel: str | Path) -> Path:
     """Resolve a bundle-relative path ``rel`` under ``root``.
 

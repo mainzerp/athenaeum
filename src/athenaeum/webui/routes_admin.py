@@ -12,6 +12,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 
 from athenaeum import db, security
+from athenaeum.computation import ComputationError, validate_sqlite_dbname
 from athenaeum.config import Settings
 from athenaeum.library.backend import provision_library
 from athenaeum.webui import deps
@@ -168,8 +169,13 @@ def _connection_form_values(
             raise HTTPException(
                 status_code=400, detail=f"Required for postgres: {', '.join(missing)}"
             )
-    if runtime == "sqlite" and not dbname.strip():
-        raise HTTPException(status_code=400, detail="Database file path is required for sqlite")
+    if runtime == "sqlite":
+        if not dbname.strip():
+            raise HTTPException(status_code=400, detail="Database file path is required for sqlite")
+        try:
+            validate_sqlite_dbname(dbname.strip())
+        except ComputationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
     return {
         "label": label,
         "runtime": runtime,
@@ -328,6 +334,7 @@ def connection_test(
     ok, message = False, ""
     try:
         if connection["runtime"] == "sqlite":
+            validate_sqlite_dbname(connection["dbname"])
             probe = sqlite3.connect(f"file:{connection['dbname']}?mode=ro", uri=True)
             probe.close()
             ok, message = True, "Connection OK (file opened read-only)."

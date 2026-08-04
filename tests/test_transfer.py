@@ -11,12 +11,12 @@ import asyncio
 import hashlib
 import os
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from athenaeum.librarian.agent import KIND_LIBRARIAN
-from athenaeum.library import transfer
+from athenaeum.library import gittool, transfer
 from athenaeum.library.backend import LibraryBackend
 
 
@@ -27,11 +27,17 @@ def _init_root(tmp_path: Path) -> Path:
 
 
 def _snapshot(root: Path) -> tuple[dict[str, str], set[str]]:
-    """(relpath -> sha256) for files plus the set of directory relpaths."""
+    """(relpath -> sha256) for files plus the set of directory relpaths.
+
+    Excludes ``.git``: archives never carry it (export exclusion) and the
+    post-import repo is a fresh re-init, so history cannot compare equal.
+    """
     files: dict[str, str] = {}
     dirs: set[str] = set()
     for path in root.rglob("*"):
         rel = path.relative_to(root).as_posix()
+        if ".git" in path.relative_to(root).parts:
+            continue
         if path.is_dir():
             dirs.add(rel)
         else:
@@ -166,6 +172,61 @@ def test_zip_symlink_member_rejected(tmp_path):
     with pytest.raises(transfer.UnsafeMemberError):
         transfer.stage_import(root, _evil_zip(tmp_path, info))
     assert not (tmp_path / transfer.STAGING_DIRNAME).exists()
+
+
+def test_export_excludes_git_and_legacy_versions(tmp_path):
+    """Archives are content bundles: no .git, no .athenaeum/versions/ (0.22.0)."""
+    root = _init_root(tmp_path)
+    # .git exists on hosts with git (init_bundle); hand-made entries keep the
+    # exclusion exercised on git-less hosts either way.
+    (root / ".git" / "objects").mkdir(parents=True, exist_ok=True)
+    (root / ".git" / "objects" / "blob").write_bytes(b"x")
+    (root / ".athenaeum" / "versions").mkdir(parents=True, exist_ok=True)
+    (root / ".athenaeum" / "versions" / "v1.json").write_text("{}\n", encoding="utf-8")
+
+    export_zip = tmp_path / "export.zip"
+    transfer.export_bundle(root, export_zip)
+    with zipfile.ZipFile(export_zip) as zf:
+        names = zf.namelist()
+    assert "index.md" in names  # content IS archived
+    assert not any(".git" in PurePosixPath(n).parts for n in names)
+    assert not any(PurePosixPath(n).parts[:2] == (".athenaeum", "versions") for n in names)
+
+
+def test_import_rejects_git_members(tmp_path):
+    """Hook-injection guard: exports never carry .git, so an archive that
+    does is hostile (supply-chain via git hooks)."""
+    root = _init_root(tmp_path)
+    with pytest.raises(transfer.UnsafeMemberError, match=r"\.git members are not allowed"):
+        transfer.stage_import(root, _evil_zip(tmp_path, ".git/hooks/x"))
+    assert not (tmp_path / transfer.STAGING_DIRNAME).exists()
+
+
+def test_import_accepts_legacy_versions_members(tmp_path):
+    """Pre-0.22 archives carry .athenaeum/versions/ — accepted but inert
+    (gitignored, unread by 0.22.0+)."""
+    root = _init_root(tmp_path)
+    archive = tmp_path / "old.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("index.md", "# I\n")
+        zf.writestr("log.md", "# L\n")
+        zf.writestr(".athenaeum/versions/v1.json", "{}\n")
+        zf.writestr("restored.md", "back\n")
+    transfer.import_bundle(root, archive, tmp_path / transfer.BACKUP_ZIP_NAME)
+    assert (root / "restored.md").read_text(encoding="utf-8") == "back\n"
+    assert (root / ".athenaeum" / "versions" / "v1.json").is_file()
+
+
+@pytest.mark.skipif(not gittool.git_available(), reason="git binary required")
+def test_import_reinitializes_git_history(tmp_path):
+    """The swapped-in tree gets a fresh repo with one restore commit."""
+    root = _init_root(tmp_path)
+    export_zip = tmp_path / "export.zip"
+    transfer.export_bundle(root, export_zip)
+    transfer.import_bundle(root, export_zip, tmp_path / transfer.BACKUP_ZIP_NAME)
+    commits = gittool.GitRepo(root).list_commits()
+    assert [c["subject"] for c in commits] == ["Update: Library restored from uploaded archive."]
+    assert commits[0]["is_root"]
 
 
 def test_corrupt_and_missing_required(tmp_path):

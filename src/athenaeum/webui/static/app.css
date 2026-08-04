@@ -597,6 +597,26 @@ textarea.input-field { min-height: 96px; resize: vertical; }
 .checkbox-row { display: flex; align-items: center; gap: 8px; }
 .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--clr-accent); }
 
+/* Range slider (Time Machine reset) */
+input[type="range"] {
+  width: 100%;
+  height: 4px;
+  accent-color: var(--clr-accent);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+input[type="range"]:disabled { cursor: not-allowed; opacity: 0.5; }
+.range-label {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--clr-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Tables */
 .table-wrap { overflow: hidden; }
 .table-toolbar {

@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Diff v{{ n }} - Athenaeum{% endblock %}
+{% block title %}Diff {{ short }} - Athenaeum{% endblock %}
 {% block content %}
 <div class="page-header">
-  <p class="mb-2"><a href="/library/versions">Back to versions</a></p>
-  <h1>Version {{ n }} diff</h1>
-  <p class="subtitle">{{ path }}</p>
+  <p class="mb-2"><a href="/library/tree">Back to Library</a></p>
+  <h1>Commit {{ short }}</h1>
+  <p class="subtitle">{{ subject }}</p>
 </div>
 {% if diff %}
 <div class="card">
@@ -15,7 +15,7 @@
 {% else %}
 <div class="card">
   <div class="card-body">
-    <p class="muted">No differences recorded for this path.</p>
+    <p class="muted">No changes recorded for this commit.</p>
   </div>
 </div>
 {% endif %}

@@ -9,9 +9,9 @@ exit (``ok`` / ``partial`` / ``error`` / ``busy``). The archive answers
 lands partially; the curator surfaces those records as one-shot
 ``store_payload_reviews`` findings.
 
-Dot-prefixed, so invisible to every OKF traversal, and never
-snapshotted — same posture as ``.traces`` ("what was requested" is
-history). Image params are archived as content-addressed refs only; the
+Dot-prefixed, so invisible to every OKF traversal, and excluded from git
+history (``.gitignore``) — same posture as ``.traces`` ("what was requested"
+is history). Image params are archived as content-addressed refs only; the
 bytes live once in the asset store. Retention: pruned on create behind
 per-user ``payload_keep`` (0 = keep all).
 """

@@ -48,8 +48,19 @@ _SCHEMA: list[tuple[str, list[tuple[str, str | None, str | None]], list[str]]] =
         [
             ("user_id", "user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE", None),
             ("llm_model", "llm_model TEXT", None),
-            ("versioning", "versioning INTEGER NOT NULL DEFAULT 1", None),
-            ("snapshot_keep", "snapshot_keep INTEGER NOT NULL DEFAULT 50", None),  # 0 = keep all
+            # Git history settings (0.22.0): NOT NULL DEFAULT backfills
+            # pre-existing rows via the idempotent ALTER below.
+            (
+                "git_enabled",
+                "git_enabled INTEGER NOT NULL DEFAULT 1",
+                "git_enabled INTEGER NOT NULL DEFAULT 1",
+            ),
+            ("git_remote_url", "git_remote_url TEXT", "git_remote_url TEXT"),
+            (
+                "git_auto_push",
+                "git_auto_push INTEGER NOT NULL DEFAULT 0",
+                "git_auto_push INTEGER NOT NULL DEFAULT 0",
+            ),
             (
                 "trace_keep",  # 0 = keep all
                 "trace_keep INTEGER NOT NULL DEFAULT 50",
@@ -125,6 +136,10 @@ _SCHEMA: list[tuple[str, list[tuple[str, str | None, str | None]], list[str]]] =
             # dead legacy too: they exist in every pre-0.8.0 database
             # already, need no migration, and are dropped from fresh creates.
             # _migrate_llm_to_provider_configs reads the llm_* columns.
+            # The pre-0.22.0 versioning/snapshot_keep columns are dead legacy
+            # the same way (snapshots were replaced by git history): they
+            # exist in every pre-0.22.0 database, need no migration, and are
+            # dropped from fresh creates.
         ],
         [],
     ),
@@ -270,7 +285,6 @@ HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 # A12: bounded retention defaults for NEW installs/config rows only — existing
 # config rows are never migrated to these (no silent pruning of user history
 # on upgrade), and 0 (= keep all) stays an explicit Admin-UI choice.
-DEFAULT_SNAPSHOT_KEEP = 50
 DEFAULT_TRACE_KEEP = 50
 DEFAULT_ACTIVITY_KEEP = 1000
 DEFAULT_PAYLOAD_KEEP = 100
@@ -459,12 +473,11 @@ def create_user(
         conn.execute(
             "INSERT INTO librarian_configs"
             " (user_id, curate_schedule_enabled, curate_schedule_time,"
-            "  snapshot_keep, trace_keep, activity_keep, payload_keep)"
-            " VALUES (?, 1, ?, ?, ?, ?, ?)",
+            "  trace_keep, activity_keep, payload_keep)"
+            " VALUES (?, 1, ?, ?, ?, ?)",
             (
                 user_id,
                 DEFAULT_SCHEDULE_TIME,
-                DEFAULT_SNAPSHOT_KEEP,
                 DEFAULT_TRACE_KEEP,
                 DEFAULT_ACTIVITY_KEEP,
                 DEFAULT_PAYLOAD_KEEP,
@@ -502,12 +515,11 @@ def create_first_admin(
         conn.execute(
             "INSERT INTO librarian_configs"
             " (user_id, curate_schedule_enabled, curate_schedule_time,"
-            "  snapshot_keep, trace_keep, activity_keep)"
-            " VALUES (?, 1, ?, ?, ?, ?)",
+            "  trace_keep, activity_keep)"
+            " VALUES (?, 1, ?, ?, ?)",
             (
                 user_id,
                 DEFAULT_SCHEDULE_TIME,
-                DEFAULT_SNAPSHOT_KEEP,
                 DEFAULT_TRACE_KEEP,
                 DEFAULT_ACTIVITY_KEEP,
             ),
@@ -824,8 +836,9 @@ def update_library_settings(
     *,
     name: str | None,
     description: str | None,
-    versioning: bool,
-    snapshot_keep: int,
+    git_enabled: bool,
+    git_remote_url: str | None,
+    git_auto_push: bool,
     trace_keep: int,
     activity_keep: int,
     payload_keep: int | None = None,
@@ -835,14 +848,16 @@ def update_library_settings(
     with conn:
         conn.execute(
             "UPDATE librarian_configs SET library_name = ?, library_description = ?,"
-            " versioning = ?, snapshot_keep = ?, trace_keep = ?, activity_keep = ?,"
+            " git_enabled = ?, git_remote_url = ?, git_auto_push = ?,"
+            " trace_keep = ?, activity_keep = ?,"
             " payload_keep = COALESCE(?, payload_keep)"
             " WHERE user_id = ?",
             (
                 name or None,
                 description or None,
-                int(versioning),
-                snapshot_keep,
+                int(git_enabled),
+                git_remote_url or None,
+                int(git_auto_push),
                 trace_keep,
                 activity_keep,
                 payload_keep,

@@ -3,15 +3,18 @@
 All paths are bundle-relative (``/tables/customers.md`` form); resolution
 delegates to ``isolation.resolve_under`` (rejects ``..``, OS-absolute paths,
 escapes). Concept IDs are paths minus ``.md``. Every mutating method performs
-the compound write in fixed crash-safe order: (1) snapshot pre-image, (2)
-concept file via write-then-rename, (3) regenerate affected index.md files,
-(4) append the root log.md entry. Index.md is a deterministic pure function
-of the tree, so ``reconcile()`` can always regenerate it after a crash —
-but that is ALL reconcile repairs (L11): a log.md entry lost between index
-regeneration and the log append is not recoverable, and a crash
-mid-``rewrite_links`` (move) can leave a mixed link state; both are outside
-reconcile's scope. Rollback is constrained to the latest snapshot — only
-"undo the most recent operation" is state-consistent (L12).
+the compound write in fixed crash-safe order: (1) concept file via
+write-then-rename, (2) regenerate affected index.md files, (3) append the
+root log.md entry, (4) best-effort git auto-commit (one commit per compound
+write; the full history — diff, revert, reset, per-file history and
+per-file restore — lives in the bundle's own git repository, and a git
+failure never breaks a write). Index.md is a
+deterministic pure function of the tree, so ``reconcile()`` can always
+regenerate it after a crash — but that is ALL reconcile repairs (L11): a
+log.md entry lost between index regeneration and the log append is not
+recoverable, and a crash mid-``rewrite_links`` (move) can leave a mixed
+link state; both are outside reconcile's scope. Undo goes through git
+history (revert / append-only reset), which is always state-consistent.
 """
 
 from __future__ import annotations
@@ -28,13 +31,13 @@ from athenaeum import __version__
 
 from ..isolation import resolve_under
 from . import frontmatter as fm_mod
+from . import gittool as gittool_mod
 from . import hybrid as hybrid_mod
 from . import index as index_mod
 from . import links as links_mod
 from . import log as log_mod
 from . import organize as organize_mod
 from . import semantic as semantic_mod
-from . import snapshots as snapshots_mod
 from . import validate as validate_mod
 from .frontmatter import write_bytes_atomic, write_text_atomic
 from .links import RESERVED_NAMES
@@ -94,8 +97,9 @@ class LibraryBackend:
         root: str | Path,
         *,
         actor: str,
-        versioning: bool = True,
-        snapshot_keep: int = 0,
+        git_enabled: bool = True,
+        git_remote_url: str | None = None,
+        git_auto_push: bool = False,
         embedding_service=None,
         hybrid_search: bool = True,
         hybrid_rerank: bool = True,
@@ -104,10 +108,13 @@ class LibraryBackend:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.actor = actor
-        self.versioning = versioning
-        self.versions = (
-            snapshots_mod.VersionStore(self.root, keep=snapshot_keep) if versioning else None
+        self._git = (
+            gittool_mod.GitRepo(self.root, remote_url=git_remote_url, auto_push=git_auto_push)
+            if git_enabled
+            else None
         )
+        if git_enabled and not gittool_mod.git_available():
+            logger.warning("git binary not found; library commit history disabled")
         # (log.md mtime_ns, seed); None forces regeneration (own writes below).
         self.seed_cache: tuple[int | None, str] | None = None
         self._embedding_service = embedding_service
@@ -117,6 +124,16 @@ class LibraryBackend:
         self._hybrid_search = hybrid_search
         self._hybrid_rerank = hybrid_rerank
         self._reranker = reranker
+
+    @property
+    def history_configured(self) -> bool:
+        """Git history is switched on for this backend (UI enabled state)."""
+        return self._git is not None
+
+    @property
+    def history_available(self) -> bool:
+        """Git history works end to end: enabled AND the git binary exists."""
+        return self._git is not None and gittool_mod.git_available()
 
     # ------------------------------------------------------------------ reads
 
@@ -358,7 +375,9 @@ class LibraryBackend:
             "stats": {
                 "concepts": len(concepts),
                 "directories": len(directories),
-                "versions": len(self.list_versions()),
+                # Key name kept for MCP contract stability; the value is the
+                # git commit count now (0 when git history is disabled).
+                "versions": self._git.count_commits() if self._git is not None else 0,
                 "last_write": last_write,
             },
             "health": {
@@ -428,15 +447,11 @@ class LibraryBackend:
             # wholesale; only the trusted parameters add provenance sub-keys.
             self._inject_generated(fm, requested_by=requested_by, via=via, preserve=False)
             bundle = self._bundle_path(path)
-            self._snapshot("create", [bundle, *self._affected_paths(bundle)])
             write_text_atomic(abs_path, fm_mod.dump_document(fm, body))
             self._regenerate_chain(bundle)
-            log_mod.append_entry(
-                self.root,
-                "Creation",
-                f"Created [{fm.get('title') or bundle[:-3]}]({bundle}).",
-                agent_label=agent_label,
-            )
+            text = f"Created [{fm.get('title') or bundle[:-3]}]({bundle})."
+            log_mod.append_entry(self.root, "Creation", text, agent_label=agent_label)
+            self._git_commit("Creation", text, agent_label)
             self.seed_cache = None
             return {"id": bundle[:-3], "action": "created"}
 
@@ -469,17 +484,13 @@ class LibraryBackend:
             # requested_by/via provenance; a new requester overwrites them.
             self._inject_generated(fm, requested_by=requested_by, via=via, preserve=True)
             bundle = self._bundle_path(path)
-            self._snapshot("update", [bundle, *self._affected_paths(bundle)])
             write_text_atomic(
                 abs_path, fm_mod.dump_document(fm, new_body if new_body is not None else body)
             )
             self._regenerate_chain(bundle)
-            log_mod.append_entry(
-                self.root,
-                "Update",
-                f"Updated [{fm.get('title') or bundle[:-3]}]({bundle}).",
-                agent_label=agent_label,
-            )
+            text = f"Updated [{fm.get('title') or bundle[:-3]}]({bundle})."
+            log_mod.append_entry(self.root, "Update", text, agent_label=agent_label)
+            self._git_commit("Update", text, agent_label)
             self.seed_cache = None
             return {"id": bundle[:-3], "action": "updated"}
 
@@ -511,16 +522,12 @@ class LibraryBackend:
             entries.append({"by": by, "at": at or self._now()})
             fm["verified"] = entries
             bundle = self._bundle_path(path)
-            self._snapshot("verify", [bundle, *self._affected_paths(bundle)])
             write_text_atomic(abs_path, fm_mod.dump_document(fm, body))
             # No _regenerate_chain: index.md entries carry only title and
             # description, so a verified-only change alters no index.
-            log_mod.append_entry(
-                self.root,
-                "Verification",
-                f"Verified [{fm.get('title') or bundle[:-3]}]({bundle}) (verifier: {by}).",
-                agent_label=agent_label,
-            )
+            text = f"Verified [{fm.get('title') or bundle[:-3]}]({bundle}) (verifier: {by})."
+            log_mod.append_entry(self.root, "Verification", text, agent_label=agent_label)
+            self._git_commit("Verification", text, agent_label)
             self.seed_cache = None
             return {"id": bundle[:-3], "action": "verified"}
 
@@ -534,10 +541,6 @@ class LibraryBackend:
                 raise FileExistsError(f"concept already exists: {new_path!r}")
             old_bundle = self._bundle_path(old_path)
             new_bundle = self._bundle_path(new_path)
-            affected = sorted(
-                set(self._affected_paths(old_bundle)) | set(self._affected_paths(new_bundle))
-            )
-            self._snapshot("move", [old_bundle, new_bundle, *affected])
             new_abs.parent.mkdir(parents=True, exist_ok=True)
             old_abs.rename(new_abs)
             rewritten = links_mod.rewrite_links(self.root, old_bundle, new_bundle)
@@ -546,12 +549,9 @@ class LibraryBackend:
             for directory in sorted(dirs):
                 if self._resolve(directory).is_dir():
                     self.regenerate_index(directory)
-            log_mod.append_entry(
-                self.root,
-                "Move",
-                f"Moved {old_bundle} to [{new_bundle[:-3]}]({new_bundle}).",
-                agent_label=agent_label,
-            )
+            text = f"Moved {old_bundle} to [{new_bundle[:-3]}]({new_bundle})."
+            log_mod.append_entry(self.root, "Move", text, agent_label=agent_label)
+            self._git_commit("Move", text, agent_label)
             self.seed_cache = None
             return {"id": new_bundle[:-3], "action": "moved", "links_rewritten": rewritten}
 
@@ -571,15 +571,11 @@ class LibraryBackend:
             fm["status"] = "deprecated"
             self._inject_generated(fm, requested_by=requested_by, via=via, preserve=True)
             bundle = self._bundle_path(path)
-            self._snapshot("deprecate", [bundle, *self._affected_paths(bundle)])
             write_text_atomic(abs_path, fm_mod.dump_document(fm, body))
             self._regenerate_chain(bundle)
-            log_mod.append_entry(
-                self.root,
-                "Deprecation",
-                f"Deprecated [{fm.get('title') or bundle[:-3]}]({bundle}).",
-                agent_label=agent_label,
-            )
+            text = f"Deprecated [{fm.get('title') or bundle[:-3]}]({bundle})."
+            log_mod.append_entry(self.root, "Deprecation", text, agent_label=agent_label)
+            self._git_commit("Deprecation", text, agent_label)
             self.seed_cache = None
             return {"id": bundle[:-3], "action": "deprecated"}
 
@@ -590,13 +586,12 @@ class LibraryBackend:
                 raise FileNotFoundError(f"no such concept: {path!r}")
             bundle = self._bundle_path(path)
             inbound = links_mod.inbound_links(self.root, bundle)
-            self._snapshot("delete", [bundle, *self._affected_paths(bundle)])
             abs_path.unlink()
             self._prune_empty_dirs(abs_path.parent)
             self._regenerate_chain(bundle)
-            log_mod.append_entry(
-                self.root, "Deletion", f"Deleted {bundle}.", agent_label=agent_label
-            )
+            text = f"Deleted {bundle}."
+            log_mod.append_entry(self.root, "Deletion", text, agent_label=agent_label)
+            self._git_commit("Deletion", text, agent_label)
             self.seed_cache = None
             return {"id": bundle[:-3], "action": "deleted", "inbound_links": inbound}
 
@@ -605,15 +600,17 @@ class LibraryBackend:
 
         The asset name is content-addressed (``<sha256[:12]>-<filename>``),
         so re-stores of the same bytes are idempotent. Deliberately OUTSIDE
-        the compound write — no snapshot, index regeneration, or log entry:
-        assets are content-addressed immutable blobs under a dot-dir,
-        invisible to every OKF ``.md`` traversal (same posture as `.traces`).
+        the compound write — no index regeneration or log entry — but
+        committed to git history (assets are linked from concepts): assets
+        are content-addressed immutable blobs under a dot-dir, invisible to
+        every OKF ``.md`` traversal (same posture as `.traces`).
         """
         if not filename or filename in (".", "..") or "/" in filename or "\\" in filename:
             raise ValueError(f"asset filename must be a bare name: {filename!r}")
         name = f"{hashlib.sha256(data).hexdigest()[:12]}-{filename}"
         with self._write_lock():
             write_bytes_atomic(self._resolve(f".athenaeum/assets/{name}"), data)
+            self._git_commit("Asset", f"Stored asset {name}.")
         return f"/.athenaeum/assets/{name}"
 
     # ------------------------------------------------------------ maintenance
@@ -627,6 +624,10 @@ class LibraryBackend:
                 write_text_atomic(index_path, index_mod.generate_index(self.root, "/"))
             if not (self.root / "log.md").exists():
                 log_mod.append_entry(self.root, "Initialization", "Initialized the library bundle.")
+            # Fresh libraries get their git repository here (ensure() inside
+            # commit_all, covering provision_library too); no-op when nothing
+            # changed.
+            self._git_commit("Initialization", "Initialized the library bundle.")
 
     def regenerate_index(self, directory: str = "/") -> None:
         with self._write_lock():
@@ -656,28 +657,155 @@ class LibraryBackend:
                 )
                 self.regenerate_index(rel)
 
-    # ------------------------------------------------------------- versioning
+    # ---------------------------------------------------------------- history
 
-    def list_versions(self) -> list[dict]:
-        return self.versions.list() if self.versions is not None else []
+    def list_commits(self, limit: int = 200) -> list[dict]:
+        """Git history, newest first ({sha, short, timestamp, subject, is_root})."""
+        return self._require_git().list_commits(limit)
 
-    def diff_version(self, n: int, path: str) -> str:
-        if self.versions is None:
-            raise RuntimeError("versioning is disabled for this backend")
-        return self.versions.diff(n, path)
+    def commit_diff(self, sha: str) -> str:
+        """Unified patch of one commit."""
+        return self._require_git().commit_diff(sha)
 
-    def rollback(self, n: int) -> None:
-        """Undo the most recent operation (``n`` must be the latest snapshot).
+    def file_history(self, path: str, limit: int = 100) -> list[dict]:
+        """Per-file git history for one concept path (bundle form ``/x.md``).
 
-        ``ValueError`` for a non-latest snapshot (L12),
-        ``FileNotFoundError`` for a missing one.
+        Same dict shape as ``list_commits`` plus ``"path"`` (the path valid
+        at that commit, rename-tracked). ``ValueError`` on a reserved or
+        non-concept path; never raises for git-side failures (``[]``).
         """
-        if self.versions is None:
-            raise RuntimeError("versioning is disabled for this backend")
+        self._guard_concept_path(path)
+        rel = self._bundle_path(path).lstrip("/")
+        return self._require_git().file_commits(rel, limit)
+
+    def read_document_at(self, path: str, sha: str) -> dict:
+        """``{path, frontmatter, body}`` parsed from the bytes at ``sha``.
+
+        ``FileNotFoundError`` when the document is absent at that commit
+        (the routes map it to 404 like a missing live document);
+        ``GitError`` on a malformed or unknown sha.
+        """
+        self._guard_concept_path(path)
+        git = self._require_git()
+        bundle = self._bundle_path(path)
+        rel = bundle.lstrip("/")
+        text = git.file_at_commit(sha, self._path_at_commit(git, sha, rel))
+        if text is None:
+            raise FileNotFoundError(f"no such document at commit {sha[:7]}: {path!r}")
+        fm, body = fm_mod.split_document(text)
+        return {"path": bundle, "frontmatter": fm, "body": body}
+
+    def file_diff_at(self, sha: str, path: str) -> str:
+        """Unified patch of ``sha`` limited to one concept path."""
+        self._guard_concept_path(path)
+        git = self._require_git()
+        rel = self._bundle_path(path).lstrip("/")
+        return git.file_diff(sha, self._path_at_commit(git, sha, rel))
+
+    def restore_file_from_commit(self, path: str, sha: str) -> None:
+        """Restore ONE document to its state at ``sha`` as one new commit.
+
+        Compound write under the per-root write lock (historical bytes are
+        written to the CURRENT path — rename-aware by construction).
+        ``GitError`` when the document did not exist at ``sha`` (never a
+        silent deletion) or when the current bytes already match (no-op
+        refused, like ``reset_staged``'s "already at this commit").
+        """
         with self._write_lock():
-            self.versions.rollback(n)
-            log_mod.append_entry(self.root, "Update", f"Rolled back to version {n:06d}.")
+            abs_path = self._guard_concept_path(path)
+            git = self._require_git()
+            bundle = self._bundle_path(path)
+            rel = bundle.lstrip("/")
+            text = git.file_at_commit(sha, self._path_at_commit(git, sha, rel))
+            if text is None:
+                raise gittool_mod.GitError(f"the document did not exist at commit {sha[:7]}")
+            if abs_path.is_file() and abs_path.read_text(encoding="utf-8") == text:
+                raise gittool_mod.GitError("already at this state")
+            try:
+                write_text_atomic(abs_path, text)
+                self._regenerate_chain(bundle)
+                # A byte-exact restore must not fail on malformed historical
+                # frontmatter — the title is only needed for the messages.
+                try:
+                    fm, _ = fm_mod.split_document(text)
+                    title = fm.get("title") or bundle[:-3]
+                except (fm_mod.FrontmatterError, ValueError):
+                    title = bundle[:-3]
+                text_msg = f"Restored [{title}]({bundle}) from commit {sha[:7]}."
+                log_mod.append_entry(self.root, "Update", text_msg)
+                git.commit_staged(f"Update: {text_msg}")
+            except gittool_mod.GitError:
+                git.abort_staged()
+                raise
             self.seed_cache = None
+
+    def _path_at_commit(self, git: gittool_mod.GitRepo, sha: str, rel: str) -> str:
+        """The repo-relative path valid at ``sha`` (rename-aware).
+
+        Resolved from the file's own log; falls back to the current path
+        when ``sha`` is not in it (defensive — hand-crafted URLs).
+        """
+        for entry in git.file_commits(rel):
+            if entry["sha"] == sha or entry["sha"].startswith(sha):
+                return entry["path"]
+        return rel
+
+    def git_head(self) -> str | None:
+        """Full sha of HEAD; None on an unborn branch."""
+        return self._require_git().head_sha()
+
+    def revert_commit(self, sha: str) -> None:
+        """Undo one commit: reverse-apply it, log the revert, commit once.
+
+        ``GitError`` on an unknown sha, the root commit, or a revert
+        conflict; the staged state is aborted before re-raising so the
+        worktree is left clean.
+        """
+        with self._write_lock():
+            git = self._require_git()
+            try:
+                git.revert_staged(sha)
+                log_mod.append_entry(self.root, "Update", f"Reverted commit {sha[:7]}.")
+                git.commit_staged(f"Update: Reverted commit {sha[:7]}.")
+            except gittool_mod.GitError:
+                git.abort_staged()
+                raise
+            self.seed_cache = None
+
+    def reset_to_commit(self, sha: str) -> None:
+        """Reset the library to an earlier commit (append-only, undoable).
+
+        Index+worktree become exactly ``sha``; ONE new commit records the
+        reset, so the pre-reset state stays reachable as its parent (undo is
+        another reset through the same UI). ``GitError`` on an unknown sha
+        or when already at that commit.
+        """
+        with self._write_lock():
+            git = self._require_git()
+            try:
+                short = git.reset_staged(sha)
+                log_mod.append_entry(self.root, "Update", f"Reset library to {short}.")
+                git.commit_staged(f"Update: Reset library to {short}.")
+            except gittool_mod.GitError:
+                git.abort_staged()
+                raise
+            self.seed_cache = None
+
+    def git_pull(self) -> None:
+        """Fast-forward pull from the configured remote, then reconcile.
+
+        The imported tree may drift the indexes, so a reconcile pass runs
+        before the (no-op when unchanged) follow-up commit. ``GitError`` on
+        divergence or any other pull failure.
+        """
+        with self._write_lock():
+            git = self._require_git()
+            # Wires origin when the remote was configured after the last
+            # auto-commit; never raises (degrades to an honest pull error).
+            git.ensure()
+            git.pull_ff_only()
+            self.reconcile()
+            self._git_commit("Update", "Pulled from remote.")
 
     # --------------------------------------------------------------- internal
 
@@ -743,13 +871,6 @@ class LibraryBackend:
         dirs.append("/")
         return dirs
 
-    def _affected_paths(self, bundle_path: str) -> list[str]:
-        paths = [
-            "/index.md" if d == "/" else d + "/index.md" for d in self._ancestor_dirs(bundle_path)
-        ]
-        paths.append("/log.md")
-        return paths
-
     def _regenerate_chain(self, bundle_path: str) -> None:
         for directory in self._ancestor_dirs(bundle_path):
             dir_path = self._resolve(directory)
@@ -768,6 +889,20 @@ class LibraryBackend:
             current.rmdir()
             current = current.parent
 
-    def _snapshot(self, operation: str, paths: list[str]) -> None:
-        if self.versions is not None:
-            self.versions.create(operation, paths, self.actor)
+    def _require_git(self) -> gittool_mod.GitRepo:
+        """The history repo; GitError when git history is disabled."""
+        if self._git is None:
+            raise gittool_mod.GitError("git history is disabled for this backend")
+        return self._git
+
+    def _git_commit(self, kind: str, text: str, agent_label: str | None = None) -> None:
+        """Best-effort auto-commit after a compound write (never raises).
+
+        The commit message mirrors the log.md entry text, including the
+        ``(requested by agent:<label>)`` attribution suffix.
+        """
+        if self._git is None:
+            return
+        if agent_label:
+            text = f"{text} (requested by agent:{agent_label})"
+        self._git.commit_all(f"{kind}: {text}")

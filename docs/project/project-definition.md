@@ -12,7 +12,7 @@ Athenaeum is **multi-user**: every user gets their own library *and* their own l
 
 ## Core concepts
 
-- **OKF bundle per user** — one conformant OKF v0.2 bundle directory per user, stored under `data/users/<user_id>/library/`, with dot-dir side stores for shadow-copy snapshots (`.athenaeum/versions/`), query-path traces (`.traces/`), the `store_knowledge` payload archive (`.athenaeum/payloads/`, 0.20.0), and content-addressed image assets (`.athenaeum/assets/`, 0.20.0). See `reference.md` for the format and `architecture.md` for the storage model.
+- **OKF bundle per user** — one conformant OKF v0.2 bundle directory per user, stored under `data/users/<user_id>/library/`, with a per-write git history (`.git/`, 0.22.0) and dot-dir side stores for query-path traces (`.traces/`), the `store_knowledge` payload archive (`.athenaeum/payloads/`, 0.20.0), and content-addressed image assets (`.athenaeum/assets/`, 0.20.0). See `reference.md` for the format and `architecture.md` for the storage model.
 - **Librarian agent** — a per-user, in-process LLM agent that is the *only writer* to the bundle. It exposes 7 intent-based MCP tools to the outside and drives an 11-tool internal view over the library backend.
 - **Trust tiers and provenance** (0.21.0) — concepts the curator repairs are machine-confirmed automatically (`verified` by `athenaeum-curator/<version>`); MCP-chat writes carry durable `generated.requested_by: human:<username>` + `generated.via: mcp_chat` provenance; Attested Computation concepts (`postgres`/`sqlite`) are executable read-only behind an admin toggle, returning caller-only receipts.
 - **MCP server** — Streamable HTTP transport, bearer-token auth, mounted in the same process as the WebUI.
@@ -32,7 +32,7 @@ Phase 1 ships all of the following together, in a single Python process:
 ### Locked user decisions (non-negotiable for phase 1)
 
 1. **OKF-native retrieval first.** Retrieval follows OKF's progressive-disclosure model: `index.md` at every directory, the librarian reads indexes and follows links; a frontmatter/metadata scan covers exact field/value lookups. An optional, additive embedding subsystem (0.12.0) layers semantic similarity search on top — extended to hybrid retrieval (0.19.0: FTS5 BM25 fused with the semantic leg, optional local rerank) — without changing the storage or retrieval model; with embeddings off, behavior is unchanged.
-2. **Plain-directory storage with git-like structure.** Libraries are ordinary directories (no database, no object store). Versioning uses **shadow-copy snapshots** under `.athenaeum/versions/` — per-operation pre-image copies enabling rollback, audit, and diffs. Real git is a documented upgrade path, not a phase-1 dependency.
+2. **Plain-directory storage with git history.** Libraries are ordinary directories (no database, no object store). Versioning is a **real git history** (0.22.0) inside each bundle — one auto-commit per write enabling diffs, revert, and an undoable reset.
 3. **Strict per-user isolation.** Each user has their own library and their own librarian. All filesystem access goes through a path-resolution helper rooted at the user's directory that rejects `..` escapes, absolute paths, and symlink escapes. User IDs in paths are opaque UUIDs, never usernames.
 
 ### Non-goals for phase 1
@@ -40,7 +40,6 @@ Phase 1 ships all of the following together, in a single Python process:
 Explicitly deferred (full list with rationale and upgrade paths in `roadmap.md`, phase sections and "Later / exploratory"):
 
 - OAuth 2.1 + PKCE for the MCP endpoint (bearer tokens ship first; the auth seam is designed so OAuth can be added without touching tool handlers).
-- Real git backend for versioning (shadow snapshots instead; lossless upgrade path).
 - Per-user OS processes/subprocesses (one shared process with per-user in-process librarians; the manager interface allows swapping later).
 - Multi-worker deployment (single-worker remains the deployment default). No longer fully deferred: the in-process concurrency foundation — agent run gate, per-root write lock, SQLite WAL + busy timeout, DB-backed embed-reconcile claims, middleware-composed seeds, optional stateless MCP HTTP — is implemented (`architecture.md` §7); the deployment itself and its remaining pieces are tracked in `roadmap.md`.
 - Streaming LLM responses.
@@ -57,6 +56,6 @@ Explicitly deferred (full list with rationale and upgrade paths in `roadmap.md`,
 ## Success criteria for phase 1
 
 - An external MCP client can authenticate with a bearer token and use all 6 tools against a configured librarian.
-- Every librarian write leaves the bundle OKF-conformant: concept file + regenerated `index.md` + `log.md` entry + shadow-copy snapshot, validated by the built-in validator.
-- A user can configure their librarian (named provider connections, API keys, per-agent connection select + model and prompt, library retention), browse their tree and graph, view logs and versions, and manage MCP tokens entirely from the WebUI.
+- Every librarian write leaves the bundle OKF-conformant: concept file + regenerated `index.md` + `log.md` entry + git auto-commit, validated by the built-in validator.
+- A user can configure their librarian (named provider connections, API keys, per-agent connection select + model and prompt, library retention), browse their tree and graph, view logs and history, and manage MCP tokens entirely from the WebUI.
 - No code path lets one user's session or token reach another user's library (enforced by tests).

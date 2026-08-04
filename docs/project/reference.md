@@ -16,7 +16,8 @@ library/                      # the bundle root (per user: data/users/<user_id>/
   subdir/
     index.md
     another-concept.md
-  .athenaeum/versions/        # athenaeum-internal snapshots; invisible to OKF consumers
+  .git/                       # athenaeum-internal commit history (0.22.0); invisible to OKF consumers
+  .athenaeum/versions/        # pre-0.22.0 snapshot remnants (inert, gitignored)
 ```
 
 - Directory organization is up to the producer (in athenaeum: the librarian).
@@ -144,7 +145,7 @@ Flat, date-grouped, newest-first:
 
 - Date headings MUST be ISO `YYYY-MM-DD`.
 - The leading bold word (`**Creation**`, `**Update**`, `**Deprecation**`, `**Move**`, `**Deletion**`, `**Initialization**`, `**Verification**`) is a convention, not a requirement.
-- Athenaeum keeps a **single root log.md**; entries carry the optional `(requested by agent:<label>)` suffix for per-agent attribution. `log.md` (spec-level, human/agent-readable history) and `.athenaeum/versions/` snapshots (system-level audit/rollback) coexist — they answer different questions.
+- Athenaeum keeps a **single root log.md**; entries carry the optional `(requested by agent:<label>)` suffix for per-agent attribution. `log.md` (spec-level, human/agent-readable history) and the bundle's git history (system-level audit/revert/reset, 0.22.0) coexist — they answer different questions; commit messages mirror the log entry text.
 - **Implementation deviation:** athenaeum's `log.md` is chronological (oldest first, newest appended at EOF) so appends stay O(1) — a deliberate deviation from the newest-first layout shown above, which is a spec §9 convention, not a conformance rule (the validator never enforced entry order and §8 does not cover it). Legacy newest-first files are flipped once on the first append; readers still get newest-first via `recent_entries`.
 
 ## 8. Conformance rules (§11)
@@ -161,13 +162,13 @@ Athenaeum's validator maps these to **6 error classes** (the MUSTs plus REQUIRED
 
 ## 9. Complete example: a concept as athenaeum writes it
 
-`projects/athenaeum/decision-shadow-versioning.md`, created by the librarian on behalf of an external agent (token label `coding-assistant`):
+`projects/athenaeum/decision-git-versioning.md`, created by the librarian on behalf of an external agent (token label `coding-assistant`):
 
 ```markdown
 ---
 type: Decision
-title: "Decision: shadow-copy versioning for libraries"
-description: Why athenaeum versions user libraries with shadow-copy snapshots instead of git.
+title: "Decision: git history for library versioning"
+description: Why athenaeum versions user libraries with a real git history instead of shadow-copy snapshots.
 tags: [athenaeum, versioning, architecture]
 status: stable
 stale_after: 2027-07-27
@@ -180,20 +181,22 @@ sources:
 
 # Context
 
-Athenaeum needed undo/rollback, an audit trail, and WebUI diffs for the
-per-user OKF bundles, without adding a git dependency.
+Athenaeum needed undo, an audit trail, and WebUI diffs for the per-user
+OKF bundles. Shadow-copy snapshots under `.athenaeum/versions/` provided
+that through 0.21.0, at the cost of storing every pre-image twice.
 
 # Decision
 
-Use shadow-copy snapshots under `.athenaeum/versions/` — a pre-image copy
-of every file touched by an operation plus a `meta.json` — rather than a
-real git backend, per the [implementation plan](/decisions/mvp-plan.md).[^mvp-plan]
+Keep the full history in a real git repository inside each bundle
+(0.22.0): one auto-commit per compound write with a deterministic
+message, per-commit diffs, revert, and an append-only reset — replacing
+the snapshot store, per the [implementation plan](/decisions/mvp-plan.md).[^mvp-plan]
 
 # Consequences
 
-Rollback is a copy-back; diffs are computed on demand with `difflib`.
-The upgrade path to real git is lossless because the bundle stays a plain
-directory. See also [compound writes](/architecture/compound-writes.md).
+Diffs, revert, and reset delegate to the git binary — no double storage,
+no difflib. Pre-0.22.0 `.athenaeum/versions/` data stays on disk, inert
+and gitignored. See also [compound writes](/architecture/compound-writes.md).
 
 [^mvp-plan]: ATHENAEUM_MVP implementation plan
 ```

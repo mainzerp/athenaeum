@@ -14,6 +14,7 @@ from athenaeum.computation import (
     check_read_only,
     execute,
     extract_sql,
+    run_sqlite,
 )
 from athenaeum.library.backend import LibraryBackend
 
@@ -187,6 +188,32 @@ def test_sqlite_missing_file_clean_error(tmp_path):
             "# Computation\n\n```sql\nSELECT 1\n```\n",
             None,
         )
+
+
+# --- sqlite dbname validation (URI metacharacter guard) -------------------------
+
+
+@pytest.mark.parametrize("dbname", ["x.db?mode=rw", "x#y", "", "x\x00y"])
+def test_run_sqlite_rejects_uri_metacharacters(dbname):
+    """`?`/`#`/NUL could re-parameterize the file:...?mode=ro URI; empty is useless."""
+    with pytest.raises(ComputationError, match="invalid sqlite database path"):
+        run_sqlite(dbname, "SELECT 1", {}, timeout_s=1, row_cap=10)
+
+
+def test_run_sqlite_rejection_happens_before_connect(tmp_path):
+    """A poisoned dbname must not even attempt the connect (defense in depth)."""
+    poisoned = f"{tmp_path / 'data.db'}?mode=rw"
+    with pytest.raises(ComputationError, match="invalid sqlite database path"):
+        run_sqlite(poisoned, "SELECT 1", {}, timeout_s=1, row_cap=10)
+
+
+def test_run_sqlite_valid_file_still_runs(tmp_path):
+    dbname = seed_sqlite(tmp_path)
+    result = run_sqlite(
+        str(dbname), "SELECT name FROM items WHERE n = :n", {"n": 0}, timeout_s=5, row_cap=10
+    )
+    assert result["rows"] == [["a"]]
+    assert result["truncated"] is False
 
 
 # --- postgres execution (fake psycopg) ------------------------------------------

@@ -5,7 +5,7 @@ LibraryBackend (section 3.2) — except ``run_computation``, which routes to
 the shared ComputationRunner (read-only, never a write action).
 ``agent_label`` is injected by the agent loop
 from request context, never by the LLM. index.md/log.md maintenance,
-init/reconcile/validate, and versioning are NOT LLM-callable.
+init/reconcile/validate, and the git history surface are NOT LLM-callable.
 """
 
 from __future__ import annotations

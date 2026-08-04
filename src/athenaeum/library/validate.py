@@ -26,6 +26,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from ..isolation import PathEscapeError, resolve_under
 from . import frontmatter as fm_mod
 from . import index as index_mod
 from . import links as links_mod
@@ -87,7 +88,11 @@ def validate_bundle(root: str | Path, scope: str | None = None) -> dict:
     for source, target, resolved in links_mod.iter_bundle_links(root):
         if not in_scope(source):
             continue
-        if not (root / resolved.lstrip("/")).exists():
+        try:
+            exists = resolve_under(root, resolved).exists()
+        except PathEscapeError:
+            exists = False  # escapes the root (e.g. symlink): broken by definition
+        if not exists:
             warnings.append(
                 {
                     "path": source,

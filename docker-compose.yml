@@ -16,6 +16,26 @@ services:
       # ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD: ${ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD:-}
     volumes:
       - athenaeum-data:/data # named volume; a bind mount (./data:/data) is a documented alternative
+    # Hardening: all runtime writes stay under the /data volume (app.db,
+    # libraries, embedding models); the rootfs and everything else is read-only.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m # multipart spool (512 MiB import), Python tempfile, git scratch
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G # headroom for onnxruntime local embeddings
+          pids: 256 # canonical form of the legacy pids_limit alias
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     restart: unless-stopped
 
 volumes:

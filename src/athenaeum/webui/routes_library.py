@@ -1,12 +1,17 @@
-"""Library browsing + whole-bundle transfer: tree, document, versions/diffs,
-log viewer, export (zip download), and import (replace-restore).
+"""Library browsing, git history, and whole-bundle transfer: tree (with the
+library-wide history section), document (with the per-document timeline and
+restore), per-commit diff, log viewer, export (zip download), and import
+(replace-restore). The standalone Time-Machine page is gone; its legacy
+``/library/time-machine`` URLs 301-redirect here.
 
 Read-only views over the plan §3.2 LibraryBackend surface. All paths are
 bundle-relative and scoped to the logged-in user's own library root, so
 cross-user access is structurally impossible (the path simply does not
 exist in another user's bundle and surfaces as 404). Export/import operate
 on the user's own bundle only; import is a writer class honoring the run
-gates and the per-root write lock (architecture §7).
+gates and the per-root write lock (architecture §7). History mutations
+(restore/revert/reset/pull) journal via ``journal_activity``, mirroring
+the import route's pattern.
 """
 
 from __future__ import annotations
@@ -19,20 +24,21 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse
 from starlette.background import BackgroundTask
 
 from athenaeum import db
 from athenaeum.activity import journal_activity
 from athenaeum.config import Settings
-from athenaeum.isolation import PathEscapeError
 from athenaeum.librarian.agent import KIND_CURATOR, KIND_LIBRARIAN
 from athenaeum.librarian.gate import AgentRunBusyError
 from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.librarian.tracing import RequestTelemetry, mint_request_id
 from athenaeum.library import transfer
+from athenaeum.library.gittool import GitError
 from athenaeum.webui import deps
 
 router = APIRouter(dependencies=[Depends(deps.csrf_protect)])
@@ -72,14 +78,48 @@ def tree_page(
     request: Request,
     conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
     settings: Annotated[Settings, Depends(deps.settings_dep)],
+    msg: str | None = None,
+    error: str | None = None,
 ):
     ctx = _backend(request, conn, settings)
     if ctx is None:
         return deps.login_redirect(conn)
     user, backend = ctx
     entries = backend.list_dir("/")
+    history_available = backend.history_available
+    commits, head = [], None
+    if history_available:
+        try:
+            commits = backend.list_commits()
+            head = backend.git_head()
+        except GitError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    cfg = db.get_config(conn, user["id"])
     return deps.templates.TemplateResponse(
-        request, "tree.html", {"user": user, "entries": entries, "root": "/"}
+        request,
+        "tree.html",
+        {
+            "user": user,
+            "entries": entries,
+            "root": "/",
+            "commits": commits,
+            "head": head,
+            # Slider targets: every commit except HEAD, oldest first.
+            "reset_points": [
+                {
+                    "sha": c["sha"],
+                    "short": c["short"],
+                    "timestamp": c["timestamp"],
+                    "subject": c["subject"],
+                }
+                for c in reversed(commits[1:])
+            ],
+            "history_configured": backend.history_configured,
+            "history_available": history_available,
+            "remote_configured": bool(cfg["git_remote_url"]),
+            "msg": msg,
+            "error": error,
+        },
     )
 
 
@@ -110,12 +150,47 @@ def document_page(
     conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
     settings: Annotated[Settings, Depends(deps.settings_dep)],
     path: str,
+    sha: str | None = None,
+    msg: str | None = None,
+    error: str | None = None,
 ):
     ctx = _backend(request, conn, settings)
     if ctx is None:
         return deps.login_redirect(conn)
     user, backend = ctx
-    doc = _read_document(backend, path)
+    history_available = backend.history_available
+    file_commits, viewed, diff, viewed_index = [], None, None, 0
+    head = None
+    if history_available:
+        try:
+            file_commits = backend.file_history(path)
+        except (ValueError, GitError):
+            # Reserved paths (index.md/log.md) get no timeline; the never-
+            # raise contract of file_history makes this cheap insurance.
+            file_commits = []
+        head = backend.git_head()
+    if sha and history_available:
+        if head and (head == sha or head.startswith(sha)):
+            # The viewed commit IS the live state: plain live view, no banner.
+            doc = _read_document(backend, path)
+        else:
+            try:
+                doc = backend.read_document_at(path, sha)
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(status_code=404, detail="Document not found") from exc
+            except GitError as exc:
+                raise HTTPException(status_code=404, detail="Commit not found") from exc
+            for index, entry in enumerate(file_commits):
+                if entry["sha"] == sha or entry["sha"].startswith(sha):
+                    viewed, viewed_index = entry, index
+                    break
+            if viewed is None:
+                # Commit outside the file's own log (hand-crafted URL); the
+                # template guards the empty timestamp.
+                viewed = {"sha": sha, "short": sha[:7], "timestamp": "", "subject": ""}
+            diff = backend.file_diff_at(sha, path)
+    else:
+        doc = _read_document(backend, path)
     fm = doc.get("frontmatter") or {}
     return deps.templates.TemplateResponse(
         request,
@@ -127,72 +202,16 @@ def document_page(
             "tags": fm.get("tags") or [],
             "trust": deps.trust_tier(fm),
             "stale": deps.is_stale(fm),
+            "file_commits": file_commits,
+            "viewed": viewed,
+            "viewed_index": viewed_index,
+            "diff": diff,
+            "history_configured": backend.history_configured,
+            "history_available": history_available,
+            "msg": msg,
+            "error": error,
         },
     )
-
-
-@router.get("/library/versions")
-def versions_page(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-):
-    ctx = _backend(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, backend = ctx
-    return deps.templates.TemplateResponse(
-        request,
-        "versions.html",
-        {"user": user, "versions": backend.list_versions()},
-    )
-
-
-@router.get("/library/versions/diff")
-def version_diff_page(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-    n: int,
-    path: str,
-):
-    ctx = _backend(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, backend = ctx
-    try:
-        diff = backend.diff_version(n, path)
-    except PathEscapeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid path") from exc
-    except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=404, detail="Version not found") from exc
-    return deps.templates.TemplateResponse(
-        request, "diff.html", {"user": user, "n": n, "path": path, "diff": diff}
-    )
-
-
-@router.post("/library/versions/{n}/rollback")
-def version_rollback(
-    request: Request,
-    n: int,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-):
-    """Restore the pre-image of a snapshot. Latest-only (CS-12): any older n
-    is a 400; the template only offers the button on the latest row."""
-    ctx = _backend(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, backend = ctx
-    try:
-        backend.rollback(n)
-    except PathEscapeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid path") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Version not found") from exc
-    return deps.redirect("/library/versions")
 
 
 @router.get("/library/log")
@@ -226,6 +245,281 @@ def log_content(
     return deps.templates.TemplateResponse(
         request, "log_content.html", {"user": user, "body": body}
     )
+
+
+# --- git history (timeline restore, library-wide mutations, diff) --------------
+
+_TREE_PAGE = "/library/tree"
+
+
+def _error_redirect(message: str):
+    return deps.redirect(f"{_TREE_PAGE}?{urlencode({'error': message})}")
+
+
+def _journal(
+    settings: Settings,
+    user_id: str,
+    tool: str,
+    arguments: str,
+    started_at: str,
+    start: float,
+    outcome: str,
+    error_text: str | None,
+) -> None:
+    """One activity-journal row for a history mutation (sync routes run
+    in the threadpool, so the synchronous journal write is legal here)."""
+    telemetry = RequestTelemetry(trace_id=mint_request_id())
+    journal_activity(
+        deps.db_path_for(settings),
+        trace_id=telemetry.trace_id,
+        user_id=user_id,
+        token_label="webui",
+        tool=tool,
+        arguments=arguments,
+        started_at=started_at,
+        duration_ms=(time.perf_counter() - start) * 1000,
+        outcome=outcome,
+        error_text=error_text,
+        telemetry=telemetry,
+    )
+
+
+@router.post("/library/document/restore")
+def document_restore(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    settings: Annotated[Settings, Depends(deps.settings_dep)],
+    manager: Annotated[LibrarianManager | None, Depends(deps.manager_dep)],
+    path: str = Form(...),
+    sha: str = Form(...),
+):
+    """Restore ONE document to its state at a commit (one new commit)."""
+    ctx = _backend(request, conn, settings)
+    if ctx is None:
+        return deps.login_redirect(conn)
+    user, backend = ctx
+    started_at, start = db.utcnow(), time.perf_counter()
+    outcome, error_text = "ok", None
+    try:
+        backend.restore_file_from_commit(path, sha)
+    except (GitError, ValueError) as exc:
+        outcome, error_text = "error", str(exc)
+        result = deps.redirect(f"/library/document?{urlencode({'path': path, 'error': str(exc)})}")
+    except Exception as exc:
+        outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
+        raise
+    else:
+        # Embedding/FTS reconcile on the next agent entry (import-route
+        # precedent); the seed cache self-heals via log.md mtime anyway.
+        if manager is not None:
+            manager.evict(user["id"])
+        seed_cache = getattr(request.app.state, "seed_cache", None)
+        if seed_cache is not None:
+            seed_cache.invalidate(user["id"])
+        result = deps.redirect(
+            f"/library/document?"
+            f"{urlencode({'path': path, 'msg': f'Restored to commit {sha[:7]}.'})}"
+        )
+    finally:
+        _journal(
+            settings,
+            user["id"],
+            "document_restore",
+            json.dumps({"path": path, "sha": sha}),
+            started_at,
+            start,
+            outcome,
+            error_text,
+        )
+    return result
+
+
+@router.get("/library/diff")
+def history_diff_page(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    settings: Annotated[Settings, Depends(deps.settings_dep)],
+    commit: str,
+):
+    ctx = _backend(request, conn, settings)
+    if ctx is None:
+        return deps.login_redirect(conn)
+    user, backend = ctx
+    try:
+        diff = backend.commit_diff(commit)
+    except GitError as exc:
+        raise HTTPException(status_code=404, detail="Commit not found") from exc
+    subject, short = "", commit[:7]
+    try:
+        for entry in backend.list_commits():
+            if entry["sha"] == commit or entry["sha"].startswith(commit):
+                subject, short = entry["subject"], entry["short"]
+                break
+    except GitError:
+        pass  # the diff above succeeded; the header falls back to the sha
+    return deps.templates.TemplateResponse(
+        request,
+        "diff.html",
+        {"user": user, "diff": diff, "short": short, "subject": subject},
+    )
+
+
+@router.post("/library/history/{sha}/revert")
+def history_revert(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    settings: Annotated[Settings, Depends(deps.settings_dep)],
+    sha: str,
+):
+    """Undo one commit (reverse-apply + one log-faithful commit)."""
+    ctx = _backend(request, conn, settings)
+    if ctx is None:
+        return deps.login_redirect(conn)
+    user, backend = ctx
+    started_at, start = db.utcnow(), time.perf_counter()
+    outcome, error_text = "ok", None
+    try:
+        backend.revert_commit(sha)
+    except GitError as exc:
+        outcome, error_text = "error", str(exc)
+        result = _error_redirect(str(exc))
+    except Exception as exc:
+        outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
+        raise
+    else:
+        result = deps.redirect(f"{_TREE_PAGE}?msg=Commit+reverted.")
+    finally:
+        _journal(
+            settings,
+            user["id"],
+            "time_machine_revert",
+            json.dumps({"sha": sha}),
+            started_at,
+            start,
+            outcome,
+            error_text,
+        )
+    return result
+
+
+@router.post("/library/history/reset")
+def history_reset(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    settings: Annotated[Settings, Depends(deps.settings_dep)],
+    sha: str = Form(...),
+):
+    """Reset the library to an earlier commit (append-only, undoable)."""
+    ctx = _backend(request, conn, settings)
+    if ctx is None:
+        return deps.login_redirect(conn)
+    user, backend = ctx
+    started_at, start = db.utcnow(), time.perf_counter()
+    outcome, error_text = "ok", None
+    try:
+        backend.reset_to_commit(sha)
+    except GitError as exc:
+        outcome, error_text = "error", str(exc)
+        result = _error_redirect(str(exc))
+    except Exception as exc:
+        outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
+        raise
+    else:
+        result = deps.redirect(f"{_TREE_PAGE}?msg=Library+reset.+Use+the+slider+again+to+undo.")
+    finally:
+        _journal(
+            settings,
+            user["id"],
+            "time_machine_reset",
+            json.dumps({"sha": sha}),
+            started_at,
+            start,
+            outcome,
+            error_text,
+        )
+    return result
+
+
+@router.post("/library/history/pull")
+def history_pull(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    settings: Annotated[Settings, Depends(deps.settings_dep)],
+    manager: Annotated[LibrarianManager | None, Depends(deps.manager_dep)],
+):
+    """Fast-forward pull from the configured remote (button only rendered
+    when one is configured; divergence surfaces as an error flash)."""
+    ctx = _backend(request, conn, settings)
+    if ctx is None:
+        return deps.login_redirect(conn)
+    user, backend = ctx
+    cfg = db.get_config(conn, user["id"])
+    if not cfg["git_remote_url"]:
+        return _error_redirect("No remote configured.")
+    started_at, start = db.utcnow(), time.perf_counter()
+    outcome, error_text = "ok", None
+    try:
+        backend.git_pull()
+    except GitError as exc:
+        outcome, error_text = "error", str(exc)
+        result = _error_redirect(str(exc))
+    except Exception as exc:
+        outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
+        raise
+    else:
+        # The WebUI route is the sole pull trigger: evict the cached
+        # librarian so the next agent run reconciles embeddings/FTS, and
+        # invalidate the per-request seed cache (belt and braces — the
+        # log.md mtime self-heal covers it anyway).
+        if manager is not None:
+            manager.evict(user["id"])
+        seed_cache = getattr(request.app.state, "seed_cache", None)
+        if seed_cache is not None:
+            seed_cache.invalidate(user["id"])
+        result = deps.redirect(f"{_TREE_PAGE}?msg=Pulled.")
+    finally:
+        _journal(
+            settings,
+            user["id"],
+            "time_machine_pull",
+            "{}",
+            started_at,
+            start,
+            outcome,
+            error_text,
+        )
+    return result
+
+
+# --- legacy Time-Machine URLs (folded into tree/document, 0.22.0) --------------
+# No login gate, no backend: plain 301s keep old bookmarks alive. A 301 on a
+# POST is re-issued as GET by browsers (method not preserved) — only reachable
+# from pre-upgrade stale pages; the router-level csrf_protect still runs first.
+
+
+@router.get("/library/time-machine")
+def time_machine_page_redirect():
+    return RedirectResponse(_TREE_PAGE, status_code=301)
+
+
+@router.get("/library/time-machine/diff")
+def time_machine_diff_redirect(commit: str):
+    return RedirectResponse(f"/library/diff?{urlencode({'commit': commit})}", status_code=301)
+
+
+@router.post("/library/time-machine/{sha}/revert")
+def time_machine_revert_redirect(sha: str):
+    return RedirectResponse(_TREE_PAGE, status_code=301)
+
+
+@router.post("/library/time-machine/reset")
+def time_machine_reset_redirect():
+    return RedirectResponse(_TREE_PAGE, status_code=301)
+
+
+@router.post("/library/time-machine/pull")
+def time_machine_pull_redirect():
+    return RedirectResponse(_TREE_PAGE, status_code=301)
 
 
 # --- whole-bundle export / import ----------------------------------------------
