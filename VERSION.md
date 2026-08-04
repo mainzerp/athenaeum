@@ -25,7 +25,8 @@ The version must stay in sync across:
 
 Trust surface: deterministic curator verification (trust tiers), durable
 librarian provenance, and sandboxed Attested Computation execution behind an
-admin toggle. (Commit hashes added at release time.)
+admin toggle. (Commits: `05273c9` feat(okf), `f4207d1` docs(lessons) —
+dogfooding findings F21/F22.)
 
 - **Curator trust tiers:** after every maintain/curate run (interactive or
   nightly scheduler), a deterministic post-step machine-confirms exactly the
