@@ -336,3 +336,39 @@
   unsichtbar), abgesichert durch Vertrags-Tests in `test_prompts.py`; (b)
   `links_after` meldet geschriebene Konzepte ohne eingehende Links
   deterministisch im Store/Update-Ergebnis.
+- **F21 — request_knowledge-Antwort enthielt Roh-Tool-Traces + falsche
+  Coverage-Gaps (2026-08-04, Beobachtung, REMOTE-Instanz 0.20.0, UNRESOLVED).**
+  Session-Start-Query (OKF/Curator/Librarian/Provenance) lieferte eine
+  Antwort, die rohe Zwischen-Tool-Calls als JSON-Blobs einbettete
+  (`{"path": "/athenaeum/versions/v0.4.2.md"}` -> "File not found",
+  "Path not a directory" fuer `/athenaeum/versions`, "search_semantic
+  requires a query string" trotz Query-aehnlichem Payload) und mit
+  Coverage-Gaps endete — obwohl der Seed-Tree genau diese
+  Versions-Dokumente listet und die Themen in der Library existieren.
+  Zwei Teilbefunde: (a) F10-Mechanik (Prozess-Fragmente im `content`)
+  in neuer Form — statt Synthese wird der Arbeits-Trace ausgegeben;
+  (b) `read_document` scheitert an Seed-gelisteten Pfaden — Verdacht auf
+  Pfadform-Mismatch (fuehrender Slash / `.md`-Suffix) oder Seed/Read-
+  Inkonsistenz. Fix-Kandidat: Read-Pfad-Normalisierung pruefen und der
+  Retrieval-Disziplin eine Regel "Seed-gelistete Pfade sind existent —
+  bei File-not-found Pfadform variieren, nicht Coverage-Gap melden"
+  pinnen.
+- **F22 — `links_after` meldet unbacklinked trotz behaupteter Verlinkung
+  (2026-08-04, Beobachtung, REMOTE-Instanz 0.20.0, UNRESOLVED).** Der
+  v0.21.0-Abschluss-Store (`/athenaeum/versions/v0.21.0`) behauptete in
+  der Summary "linked it from existing version v0.20.0 and the
+  store-extensions lessons" — das deterministische `links_after` zeigte
+  `unbacklinked: [/athenaeum/versions/v0.21.0]`, `healthy: false`.
+  F19/F20-Muster auf 0.20.0 weiterhin reproduzierbar: die DETEKTION
+  (links_after) funktioniert, aber der Librarian schreibt weiterhin
+  behauptete Backlinks, die der Link-Graph nicht sieht.
+- **Deployment-Kontext (2026-08-04):** Die Kimi-MCP-Config
+  (`~/.kimi-code/mcp.json`) zeigt auf `https://athenaeum.mzrsvr.net/mcp`
+  (REMOTE, lief 0.20.0) — die Dogfooding-Library lebt dort, nicht im
+  lokalen Dev-Container (localhost:8000, eigene app.db, Token-Label
+  `vscode_kimi`). Session-Start-Queries und Stores gehen an REMOTE;
+  lokale Rebuilds aendern daran nichts. Bei widerspruechlichem
+  MCP-Verhalten immer zuerst pruefen, WELCHE Instanz gemeint ist.
+  Nebenbefund: Auth-Fehler kommen als HTTP 200 mit JSON-RPC-Error im
+  SSE-Stream ("Invalid or revoked bearer token") — Clients, die nur
+  `result` auswerten, sehen faelschlich "leere" Antworten.
