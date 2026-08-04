@@ -938,8 +938,8 @@ pre.diff, pre.log {
   height: min(60vh, 560px);
 }
 
-/* 3D universe canvas (graph3d.js / trace replay): the starfield lives in the
-   WebGL scene (THREE.Points); the container is plain black behind it. */
+/* Universe canvas (graph page / trace replay): the canvas paints its own
+   starfield; the container is plain black behind it. */
 .graph-universe {
   background: #000000;
 }

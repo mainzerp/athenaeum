@@ -33,14 +33,23 @@
  *   direct neighbors and dims everything else.
  * Interaction: click a dot for an animated 2D zoom (ease-in-out, cancelable)
  * centered on it plus an info tooltip (label, folder path, link degree,
- * trust/stale); clicking the selected dot again navigates to the document.
+ * trust/stale); clicking the selected dot again navigates to the document
+ * (disabled with opts.navigate === false, used by the trace replay page).
  * Click a sector (or the center ring) to zoom to it; click empty space or
  * press Esc to return to the overview (the Fit view button does the same).
  * ?folder= / ?focus= deep links zoom straight to a sector / dot.
  *
+ * The mount handle also exposes setOverlay(...) + redraw(): an opt-in
+ * overlay channel for the trace replay page. Overlay shape:
+ * {accent, states: {id: "visited"|"hit"}, hopNumbers: {id: 1},
+ * hopEdges: [{source, target}], fadeRest: true, pulsePhase: false}.
+ * Visited/hit dots render in the accent color (visited larger with a hop
+ * badge, hits pulsing with pulsePhase), everything else fades when
+ * fadeRest is set, and hopEdges draw as accent arcs over the payload edges.
+ *
  * All placement is deterministic (FNV-1a hash seeds; never Math.random for
  * data dots — the starfield is hash-seeded too). The hash is a local copy of
- * the Graph3D.hash algorithm (graph3d.js is no longer loaded on this page).
+ * the Graph3D.hash algorithm (graph3d.js has been removed).
  */
 (function (global) {
   "use strict";
@@ -105,6 +114,12 @@
     edgeHiAlpha: 0.85,
     edgeHiWidthPx: 1.5,
     dimFactor: 0.12, // brightness of non-neighbor dots while one is active
+    // Trace-replay overlay (setOverlay): visited/hit accents + hop edges.
+    overlayFade: 0.15, // brightness multiplier for non-trace nodes (fadeRest)
+    visitedScale: 1.8, // visited dot radius factor
+    pulseMinAlpha: 0.35, // hit dot brightness in the pulse off-phase
+    hopEdgeAlpha: 0.9,
+    hopEdgeWidthPx: 2,
     // Hover/click hit-testing.
     hoverPx: 10, // screen px pick threshold around a dot
     // Deterministic pastel-neon palette on black, assigned per cluster id via
@@ -122,7 +137,7 @@
   };
 
   // FNV-1a 32-bit hash — identical algorithm to Graph3D.hash (graph3d.js),
-  // copied because the graph page no longer loads graph3d.js.
+  // kept locally because graph3d.js has been removed.
   function hash(id) {
     var h = 0x811c9dc5;
     var s = String(id);
@@ -219,6 +234,7 @@
     var activeNeighbors = null; // Set of node indexes linked to the active dot
     var view = { k: 1, tx: 0, ty: 0 }; // zoom transform over the base fit
     var tween = null;
+    var overlay = null; // trace-replay overlay (see setOverlay), null on the graph page
 
     // --- layout -------------------------------------------------------------
 
@@ -744,21 +760,65 @@
         ctx.stroke();
       });
 
-      // Document dots: exactly one per file (halo + solid core).
+      // Trace overlay hop edges: accent arcs over the payload edges, using
+      // the same center-bowed quadratic math; pairs with missing endpoints
+      // (hops pointing at documents not in the universe) are skipped.
+      if (overlay && overlay.hopEdges) {
+        var hopRgb = hexToRgb(overlay.accent || "#f1c40f");
+        overlay.hopEdges.forEach(function (he) {
+          var ha = layout.idxById[he.source];
+          var hb = layout.idxById[he.target];
+          if (ha == null || hb == null) return;
+          var hp1 = layout.pos[ha];
+          var hp2 = layout.pos[hb];
+          if (!hp1 || !hp2) return;
+          ctx.strokeStyle = rgba(hopRgb, CONFIG.hopEdgeAlpha);
+          ctx.lineWidth = CONFIG.hopEdgeWidthPx * px;
+          var hcx = ((hp1.x + hp2.x) / 2) * (1 - CONFIG.edgeBow);
+          var hcy = ((hp1.y + hp2.y) / 2) * (1 - CONFIG.edgeBow);
+          ctx.beginPath();
+          ctx.moveTo(hp1.x, hp1.y);
+          ctx.quadraticCurveTo(hcx, hcy, hp2.x, hp2.y);
+          ctx.stroke();
+        });
+      }
+
+      // Document dots: exactly one per file (halo + solid core). The trace
+      // overlay recolors visited/hit dots in the accent color and fades
+      // everything else when fadeRest is set.
+      var oStates = (overlay && overlay.states) || {};
+      var oHops = (overlay && overlay.hopNumbers) || {};
+      var oAccent = overlay && overlay.accent ? hexToRgb(overlay.accent) : null;
+      var oFade = !!(overlay && overlay.fadeRest);
       nodesIn.forEach(function (node, ni) {
         var p = layout.pos[ni];
         if (!p) return;
+        var state = overlay ? oStates[node.id] : null;
+        var hasHop = overlay && oHops[node.id] != null;
         var base = hexToRgb(layout.colors[node.cluster] || CONFIG.palette[CONFIG.palette.length - 1]);
+        if (state && oAccent) base = oAccent;
         var b = brightnessOf(node);
         if (dimmed && ni !== active && !nb[ni]) b *= CONFIG.dimFactor;
+        if (oFade && !state && !hasHop) b *= CONFIG.overlayFade;
+        if (state === "visited") b = Math.max(b, 1); // full brightness
+        if (state === "hit") b *= overlay.pulsePhase ? 1 : CONFIG.pulseMinAlpha;
+        var dr = CONFIG.dotRadius * (state === "visited" ? CONFIG.visitedScale : 1);
         ctx.fillStyle = rgba(base, Math.min(0.32 * b, 1));
         ctx.beginPath();
-        ctx.arc(p.x, p.y, CONFIG.dotRadius * CONFIG.dotHaloFactor, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, dr * CONFIG.dotHaloFactor, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = rgba(base, Math.min(0.95 * b, 1));
         ctx.beginPath();
-        ctx.arc(p.x, p.y, CONFIG.dotRadius, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, dr, 0, Math.PI * 2);
         ctx.fill();
+        // Hop-number badge above the visited dot (screen-constant size).
+        if (hasHop) {
+          ctx.fillStyle = rgba(oAccent || base, 0.95);
+          ctx.font = "600 " + 11 * px + "px sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(String(oHops[node.id]), p.x, p.y - dr * 2.2);
+        }
       });
 
       // Central anchor: accent glow + solid core + thin ring. The glow fades
@@ -967,8 +1027,11 @@
       if (best >= 0) {
         var node = ((data && data.nodes) || [])[best];
         if (best === selectedIdx) {
-          // Second click on the selected dot navigates to the document.
-          global.location.href = "/library/document?path=" + encodeURIComponent(node.id + ".md");
+          // Second click on the selected dot navigates to the document
+          // (disabled with opts.navigate === false, e.g. trace replay).
+          if (opts.navigate !== false) {
+            global.location.href = "/library/document?path=" + encodeURIComponent(node.id + ".md");
+          }
           return;
         }
         select(best);
@@ -1032,6 +1095,13 @@
       syncTip();
     }
 
+    // Trace-replay overlay channel: {accent, states, hopNumbers, hopEdges,
+    // fadeRest, pulsePhase} — null clears it. Only stores + re-renders.
+    function setOverlay(next) {
+      overlay = next || null;
+      render();
+    }
+
     function resize() {
       var w = container.clientWidth;
       var h = container.clientHeight;
@@ -1075,6 +1145,8 @@
       zoomToSector: zoomToSector,
       focusNode: focusNode,
       resetView: resetView,
+      setOverlay: setOverlay,
+      redraw: render,
       // Minimap glue: static scene geometry + the currently visible scene rect.
       getScene: function () {
         var nodesIn = (data && data.nodes) || [];

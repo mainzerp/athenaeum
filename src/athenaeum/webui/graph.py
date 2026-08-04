@@ -1,22 +1,12 @@
-"""Relations graph: /api/graph feeds the 3D universe (vendored 3d-force-graph).
+"""Relations graph: /api/graph/universe feeds the Sunburst view.
 
-Phase 5: one endpoint returning ``{nodes, folders, edges}`` — folders of
-every depth are emitted (depth 1 = star, depth >= 2 = planet), concepts
-become moons at any depth. Concept ``color``
-comes from trust/staleness, ``group`` from frontmatter ``type``, tooltip
-(``title``) from tags; ``trust_tier`` and ``stale`` are emitted for every
-node. Only absolute bundle-relative links (``/path/to/concept.md``) become
-edges; broken links are tolerated (skipped), per OKF §6. Containment edges
-are synthesized client-side from the ``folder``/``parent`` fields; this
-payload now feeds the ForceGraph3D detail/trace views only (default d3
-force layout client-side).
-
-``GET /api/graph/universe`` serves a separate flat payload for the graph
-page's particle (nebula) and sunburst views: every concept with its
-top-level ``cluster``, a character-count ``size``, the document link
+One flat payload ``{metric, clusters, nodes, edges}``: every concept with
+its top-level ``cluster``, a character-count ``size``, the document link
 ``edges``, and the selected ``?metric=`` (``recency`` or ``link_density``,
-default ``link_density``) pre-normalized to a 0..1 ``radius``. The legacy
-payload above stays byte-compatible.
+default ``link_density``) pre-normalized to a 0..1 ``radius``. Only absolute
+bundle-relative links (``/path/to/concept.md``) become edges; broken links
+are tolerated (skipped), per OKF §6. The trace replay page renders the same
+payload with its hop overlay.
 """
 
 from __future__ import annotations
@@ -37,14 +27,6 @@ router = APIRouter()
 
 # Markdown links whose target is an absolute bundle-relative .md path.
 _LINK_RE = re.compile(r"\[[^\]]*\]\((/[^)\s]+\.md)\)")
-
-# Node colors: staleness overrides trust tier (plan: color <- trust/stale).
-COLOR_STALE = "#e67e22"  # orange
-COLOR_TRUST = {
-    deps.TRUST_HUMAN: "#27ae60",  # green
-    deps.TRUST_MACHINE: "#2980b9",  # blue
-    deps.TRUST_UNVERIFIED: "#95a5a6",  # grey
-}
 
 _RESERVED = {"index.md", "log.md"}
 
@@ -94,60 +76,6 @@ def _folder_of(path: str) -> tuple[str, int]:
     return folder, depth
 
 
-def build_graph(backend: object) -> dict:
-    """Scan all concepts and return the 3D-universe ``{nodes, folders, edges}`` data."""
-    concepts, folders = _walk(backend)
-    known = {c["path"] for c in concepts}
-    nodes, edges, seen_edges = [], [], set()
-    for concept in concepts:
-        doc = backend.read_document(concept["path"])
-        fm = doc.get("frontmatter") or {}
-        concept_id = concept["path"][: -len(".md")]
-        tags = fm.get("tags") or []
-        if isinstance(tags, str):
-            tags = [tags]
-        stale = deps.is_stale(fm)
-        tier = deps.trust_tier(fm)
-        color = COLOR_STALE if stale else COLOR_TRUST[tier]
-        folder, depth = _folder_of(concept["path"])
-        nodes.append(
-            {
-                "id": concept_id,
-                "label": str(fm.get("title") or concept["name"][: -len(".md")]),
-                "group": str(fm.get("type") or "unknown"),
-                "color": color,
-                "title": ", ".join(str(t) for t in tags),  # tooltip <- tags
-                "folder": folder,
-                "depth": depth,
-                "kind": "moon",
-                "trust_tier": tier,
-                "stale": stale,
-            }
-        )
-        for target in set(_LINK_RE.findall(doc.get("body") or "")):
-            if target not in known:
-                continue  # consumers must tolerate broken links (OKF §6)
-            edge_key = (concept["path"], target)
-            if edge_key in seen_edges:
-                continue
-            seen_edges.add(edge_key)
-            edges.append({"from": concept_id, "to": target[: -len(".md")]})
-    folder_nodes = []
-    for entry in folders:
-        depth = len([seg for seg in entry["path"].split("/") if seg])
-        parent, _ = _folder_of(entry["path"])
-        folder_nodes.append(
-            {
-                "id": entry["path"],
-                "name": entry["name"],
-                "parent": parent,
-                "depth": depth,
-                "kind": "star" if depth == 1 else "planet",
-            }
-        )
-    return {"nodes": nodes, "folders": folder_nodes, "edges": edges}
-
-
 # --- flat universe payload (particle/sunburst views) -----------------------------
 
 # Allowed values for the universe endpoint's ``?metric=`` selector.
@@ -193,16 +121,16 @@ def _metric_value_raw(fm: dict) -> str | None:
 
 
 def build_universe(backend: object, metric: str = "link_density") -> dict:
-    """Flat, metric-tagged view of all concepts for the particle/sunburst views.
+    """Flat, metric-tagged view of all concepts for the sunburst view.
 
-    Same bundle walk as :func:`build_graph` (same O(N) cost, same
-    MAX_WALK_DEPTH guard). ``radius`` is the selected metric min-max-normalized
+    Iterative bundle walk via :func:`_walk` (bounded by MAX_WALK_DEPTH).
+    ``radius`` is the selected metric min-max-normalized
     to 0..1 (degenerate range -> 0.5 for every node); the raw input rides along
     as ``metric_value`` so the frontend stays metric-agnostic. ``size`` is a
     character count because ``list_dir`` exposes no byte size or mtime.
-    ``edges`` carries the document-to-document links (same ``_LINK_RE``
-    extraction as :func:`build_graph`, broken targets skipped) so the focused
-    cluster view can draw the link network; every edge endpoint is a node id.
+    ``edges`` carries the document-to-document links (``_LINK_RE``
+    extraction, broken targets skipped per OKF §6) so the view can draw the
+    link network; every edge endpoint is a node id.
 
     link_density is sqrt-scaled BEFORE normalization: raw degrees are heavily
     skewed (most nodes near 0, a few hubs far out), so min-max on raw degrees
@@ -239,8 +167,8 @@ def build_universe(backend: object, metric: str = "link_density") -> dict:
             }
         )
 
-    # Link density: out-degree from the same edges as build_graph, in-degree
-    # by inversion (broken targets are skipped there too, OKF §6).
+    # Link density: out-degree from the payload edges, in-degree by
+    # inversion (broken targets are skipped, OKF §6).
     in_degree: dict[str, int] = {}
     for targets in edges_out:
         for target in targets:
@@ -285,19 +213,6 @@ def build_universe(backend: object, metric: str = "link_density") -> dict:
         key=lambda e: (e["source"], e["target"]),
     )
     return {"metric": metric, "clusters": clusters, "nodes": nodes, "edges": edges}
-
-
-@router.get("/api/graph")
-def graph_data(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-):
-    user = deps.current_user(request, conn)
-    if user is None:
-        return deps.login_redirect(conn)
-    backend = deps.get_library_backend(settings, user, conn)
-    return build_graph(backend)
 
 
 @router.get("/api/graph/universe")

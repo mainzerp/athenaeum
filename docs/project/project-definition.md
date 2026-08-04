@@ -24,7 +24,7 @@ Phase 1 ships all of the following together, in a single Python process:
 
 - **MCP server** (FastMCP 3.x, Streamable HTTP) with exactly 7 external tools: `request_knowledge`, `store_knowledge`, `update_knowledge`, `library_status`, `library_maintain`, `library_curate` (0.5.0), `run_computation` (0.21.0).
 - **Librarian agent** — per-user, lazily created, idle-evicted; hand-rolled tool-calling loop over a pluggable `LLMProvider` (adapters: `openai`, `anthropic`, `gemini`, plus `openrouter` and `openai-compatible` which both reuse the OpenAI adapter).
-- **WebUI** (FastAPI + Jinja2 + htmx + Alpine.js + 3d-force-graph): provider-connection/agent/library config screens (named connections, one default, per-agent connection select), document tree, 3D relations universe, activity/log viewer, token management, admin user management.
+- **WebUI** (FastAPI + Jinja2 + htmx + Alpine.js): provider-connection/agent/library config screens (named connections, one default, per-agent connection select), document tree, relations universe (2D sunburst canvas), activity/log viewer, token management, admin user management.
 - **Configuration** — per-user provider connections and librarian config plus accounts in a single SQLite database (`data/app.db`); server settings via environment variables.
 - **Multi-user** — account system (first-run bootstrap + admin-created users, no self-registration), per-user libraries, per-user MCP bearer tokens, hard filesystem isolation.
 - **Scheduled curation** (0.11.0) — optional per-user nightly `library_maintain` + `library_curate` run at a fixed UTC time, configured in the WebUI (curator tab, per-user opt-out), journaled in Activity.

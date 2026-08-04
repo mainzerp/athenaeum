@@ -1479,48 +1479,6 @@ def test_document_restore_route_csrf_and_login(env):
     assert response.headers["location"] == "/login"
 
 
-def test_graph_endpoint(env):
-    client, _, data_root = env
-    make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-
-    assert client.get("/library/graph").status_code == 200
-    response = client.get("/api/graph")
-    assert response.status_code == 200
-    data = response.json()
-
-    nodes = {node["id"]: node for node in data["nodes"]}
-    assert "/concepts/alpha" in nodes
-    assert nodes["/concepts/alpha"]["group"] == "Concept"
-    assert nodes["/concepts/alpha"]["color"] == "#27ae60"  # human-reviewed
-    assert nodes["/concepts/alpha"]["title"] == "x, y"  # tooltip <- tags
-    assert nodes["/concepts/beta"]["color"] == "#e67e22"  # stale overrides trust
-
-    alpha = nodes["/concepts/alpha"]
-    assert alpha["folder"] == "/concepts"
-    assert alpha["depth"] == 1
-    assert alpha["kind"] == "moon"
-    assert alpha["trust_tier"] == "human-reviewed"
-    assert alpha["stale"] is False
-
-    beta = nodes["/concepts/beta"]
-    assert beta["stale"] is True
-    assert beta["trust_tier"] == "unverified"  # tier kept even on the stale branch
-
-    root_doc = nodes["/user-alice"]
-    assert root_doc["folder"] == "/"
-    assert root_doc["depth"] == 0
-    assert root_doc["kind"] == "moon"
-
-    assert data["folders"] == [
-        {"id": "/concepts", "name": "concepts", "parent": "/", "depth": 1, "kind": "star"}
-    ]
-
-    edges = {(e["from"], e["to"]) for e in data["edges"]}
-    assert ("/concepts/alpha", "/concepts/beta") in edges
-    assert all("arrows" not in e for e in data["edges"])  # vis vocabulary dropped
-
-
 def test_graph_pages_script_stack(env):
     client, backends, data_root = env
     user = make_user(data_root, "alice", "pw")
@@ -1532,7 +1490,7 @@ def test_graph_pages_script_stack(env):
     graph_page = client.get("/library/graph")
     assert graph_page.status_code == 200
     # sunburst-only graph page (SUNBURST-ONLY rework): pure 2D canvas, no
-    # vendored 3D stack — ForceGraph3D stays on the trace pages only
+    # vendored 3D stack (removed entirely with the trace replay rebuild)
     assert "/static/graph_sunburst.js" in graph_page.text
     assert "/static/minimap.js" in graph_page.text
     assert "/static/vendor/graph3d-vendor.min.js" not in graph_page.text
@@ -1553,14 +1511,18 @@ def test_graph_pages_script_stack(env):
     assert "graph-type-filters" not in graph_page.text
     assert 'id="graph-zoom"' not in graph_page.text  # zoom select removed (0.10.2)
 
+    # trace replay renders through the same sunburst module (no 3D stack)
     trace_page = client.get("/library/traces/t1")
     assert trace_page.status_code == 200
-    assert "/static/vendor/graph3d-vendor.min.js" in trace_page.text
+    assert "/static/graph_sunburst.js" in trace_page.text
     assert "/static/trace_replay.js" in trace_page.text
+    assert "/static/vendor/graph3d-vendor.min.js" not in trace_page.text
+    assert "/static/graph3d.js" not in trace_page.text
     assert "vis-network" not in trace_page.text
 
 
-def test_graph_endpoint_deep_hierarchy(env):
+def test_graph_universe_deep_hierarchy(env):
+    """Deep docs map to their top-level cluster and full parent folder path."""
     client, backends, data_root = env
     user = make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
@@ -1582,54 +1544,20 @@ def test_graph_endpoint_deep_hierarchy(env):
         }
     )
 
-    response = client.get("/api/graph")
+    response = client.get("/api/graph/universe")
     assert response.status_code == 200
     data = response.json()
 
-    folders = {f["id"]: f for f in data["folders"]}
-    assert folders["/concepts"] == {
-        "id": "/concepts",
-        "name": "concepts",
-        "parent": "/",
-        "depth": 1,
-        "kind": "star",
-    }
-    assert folders["/a"] == {"id": "/a", "name": "a", "parent": "/", "depth": 1, "kind": "star"}
-    assert folders["/a/b"] == {
-        "id": "/a/b",
-        "name": "b",
-        "parent": "/a",
-        "depth": 2,
-        "kind": "planet",
-    }
-    assert folders["/a/b/c"] == {
-        "id": "/a/b/c",
-        "name": "c",
-        "parent": "/a/b",
-        "depth": 3,
-        "kind": "planet",
-    }
-    # arbitrary folder depth is emitted, not just depth 3: any deeper folder is a planet
-    assert folders["/a/b/c/d"] == {
-        "id": "/a/b/c/d",
-        "name": "d",
-        "parent": "/a/b/c",
-        "depth": 4,
-        "kind": "planet",
-    }
-
     nodes = {node["id"]: node for node in data["nodes"]}
     deep = nodes["/a/b/c/deep"]
-    assert deep["kind"] == "moon"
-    assert deep["depth"] == 3
-    assert deep["folder"] == "/a/b/c"
+    assert deep["cluster"] == "a"
+    assert deep["parent_folder"] == "/a/b/c"
 
     deeper = nodes["/a/b/c/d/deeper"]
-    assert deeper["kind"] == "moon"
-    assert deeper["depth"] == 4
-    assert deeper["folder"] == "/a/b/c/d"
+    assert deeper["cluster"] == "a"
+    assert deeper["parent_folder"] == "/a/b/c/d"
 
-    edges = {(e["from"], e["to"]) for e in data["edges"]}
+    edges = {(e["source"], e["target"]) for e in data["edges"]}
     assert ("/concepts/alpha", "/a/b/c/deep") in edges
 
 
@@ -1645,7 +1573,7 @@ def test_graph_walk_depth_bounded(env, monkeypatch):
     backends[user["id"]] = FakeBackend(
         {"/a/b/c/d/deep.md": {"frontmatter": {"title": "Deep"}, "body": "body\n"}}
     )
-    response = client.get("/api/graph")
+    response = client.get("/api/graph/universe")
     assert response.status_code == 400
     assert "depth" in response.json()["detail"].lower()
 
@@ -1653,7 +1581,7 @@ def test_graph_walk_depth_bounded(env, monkeypatch):
     backends[user["id"]] = FakeBackend(
         {"/a/b/c/deep.md": {"frontmatter": {"title": "Deep"}, "body": "body\n"}}
     )
-    assert client.get("/api/graph").status_code == 200
+    assert client.get("/api/graph/universe").status_code == 200
 
 
 def _universe_docs():
@@ -1736,8 +1664,8 @@ def test_graph_universe_endpoint(env):
     assert nodes["/atlas/one"]["radius"] == 1.0
     assert nodes["/helix/three"]["radius"] == 0.0
 
-    # edges: document-to-document links (same extraction as /api/graph),
-    # every endpoint a node id, deterministic order
+    # edges: document-to-document links, every endpoint a node id,
+    # deterministic order
     node_ids = set(nodes)
     assert data["edges"] == [{"source": "/atlas/one", "target": "/atlas/two"}]
     assert all(e["source"] in node_ids and e["target"] in node_ids for e in data["edges"])

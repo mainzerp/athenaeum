@@ -53,8 +53,7 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/vendor/graph3d-vendor.min.js"></script>
-<script src="/static/graph3d.js"></script>
+<script src="/static/graph_sunburst.js"></script>
 <script src="/static/trace_replay.js"></script>
 <script>
   TraceReplay.replay("graph", {{ trace["trace_id"] | tojson }});

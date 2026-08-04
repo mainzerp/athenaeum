@@ -1,6 +1,6 @@
 # Athenaeum — single-stage image (plan section 8.1).
 # No frontend build: the WebUI is server-rendered (Jinja2); htmx loads from
-# CDN; the 3D graph stack (3d-force-graph) is vendored under webui/static/vendor.
+# CDN; the graph views are plain canvas scripts under webui/static.
 # The image contains only the Python app and carries no
 # secrets — ATHENAEUM_SECRET_KEY and all config arrive via env at runtime.
 # Pinned to a patch-level tag (verified on Docker Hub 2026-08-04). Stricter

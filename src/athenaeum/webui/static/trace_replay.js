@@ -2,13 +2,7 @@
   "use strict";
 
   var ACCENT = "#f1c40f";
-  var FADE_NODE_ALPHA = 0.15;
-  var FADE_LINK_ALPHA = 0.1;
-  var VISITED_SCALE = 1.8;
   var PULSE_INTERVAL_MS = 450;
-  var PULSE_MIN_ALPHA = 0.35;
-  var CAMERA_MS = 1500;
-  var CAMERA_OFFSET = 60;
   var RESERVED = { "index.md": true, "log.md": true };
   var WRITE_TOOLS = {
     write_concept: true,
@@ -17,6 +11,12 @@
     deprecate_concept: true,
     delete_concept: true,
   };
+
+  // Playback pacing follows the sunburst zoom tween duration.
+  function zoomMs() {
+    var sb = global.GraphSunburst;
+    return (sb && sb.CONFIG && sb.CONFIG.zoomMs) || 650;
+  }
 
   function nodeId(path) {
     if (typeof path !== "string" || !path) return null;
@@ -27,13 +27,6 @@
     if (typeof path !== "string" || !path.endsWith(".md")) return false;
     var name = path.slice(path.lastIndexOf("/") + 1);
     return !RESERVED[name];
-  }
-
-  function baseColor(node) {
-    if (typeof node.baseColor === "string") return node.baseColor;
-    if (typeof node.color === "string") return node.color;
-    if (node.color && typeof node.color.background === "string") return node.color.background;
-    return "#95a5a6";
   }
 
   function visitEvents(trace) {
@@ -127,72 +120,43 @@
     return links;
   }
 
-  function applyOverlay3D(ctrl, trace) {
-    var universe = ctrl.universe;
+  // Sunburst overlay object (graph_sunburst.js setOverlay): visited/hit
+  // states, first hop number per visited id, hop edges as {source, target}.
+  function buildOverlay(trace, universeNodeIds) {
+    var overlay = computeTraceOverlay(universeNodeIds, trace);
     var hops = visitedHops(trace);
-    var overlay = computeTraceOverlay(
-      universe.nodes.map(function (n) {
-        return n.id;
-      }),
-      trace
-    );
-    var visitedSet = {};
+    var states = {};
     overlay.visited.forEach(function (id) {
-      visitedSet[id] = true;
+      states[id] = "visited";
     });
-    var hitSet = {};
     overlay.hits.forEach(function (id) {
-      hitSet[id] = true;
+      states[id] = "hit";
     });
-    var firstHop = {};
+    var hopNumbers = {};
     hops.forEach(function (h) {
-      if (firstHop[h.id] == null) firstHop[h.id] = h.hop;
+      if (hopNumbers[h.id] == null) hopNumbers[h.id] = h.hop;
     });
-
-    universe.nodes.forEach(function (n) {
-      if (visitedSet[n.id]) {
-        n.__style = { color: ACCENT, alpha: 1, scale: VISITED_SCALE, badge: firstHop[n.id] };
-      } else if (hitSet[n.id]) {
-        n.__style = { color: ACCENT, alpha: 1, scale: 1, pulse: true };
-      } else {
-        n.__style = { color: baseColor(n), alpha: FADE_NODE_ALPHA };
-      }
+    var hopEdges = hopLinks(hops).map(function (l) {
+      return { source: l.source, target: l.target };
     });
-    universe.links.forEach(function (l) {
-      if (l.linkType === "hop") return;
-      var base = l.color || (l.linkType === "link" ? "#e2a84b" : "#8a8580");
-      l.__style = { color: base, alpha: FADE_LINK_ALPHA };
-    });
-    ctrl.refresh();
-    return overlay;
+    return {
+      accent: ACCENT,
+      states: states,
+      hopNumbers: hopNumbers,
+      hopEdges: hopEdges,
+      fadeRest: true,
+      pulsePhase: false,
+      hits: overlay.hits, // pulsed by startPulse; ignored by the sunburst renderer
+    };
   }
 
-  function startPulse(ctrl, hits) {
+  // Pulse hit nodes by toggling the stored overlay's phase and re-applying it.
+  function startPulse(ctrl, hits, overlay) {
     if (!hits.length) return null;
-    var phase = false;
     return setInterval(function () {
-      phase = !phase;
-      hits.forEach(function (id) {
-        var n = ctrl.nodeById(id);
-        if (n && n.__style && n.__style.pulse) {
-          n.__style.alpha = phase ? 1 : PULSE_MIN_ALPHA;
-          n.__style.scale = phase ? 1.3 : 1;
-        }
-      });
-      ctrl.refresh();
+      overlay.pulsePhase = !overlay.pulsePhase;
+      ctrl.setOverlay(overlay);
     }, PULSE_INTERVAL_MS);
-  }
-
-  function cameraToHop(ctrl, hop) {
-    var node = ctrl.nodeById(hop.id);
-    if (!node || node.x == null) return false;
-    var d = CAMERA_OFFSET;
-    ctrl.graph.cameraPosition(
-      { x: node.x + d, y: node.y + d * 0.6, z: node.z + d },
-      { x: node.x, y: node.y, z: node.z },
-      CAMERA_MS
-    );
-    return true;
   }
 
   function makePlayback(ctrl, hops, els) {
@@ -222,8 +186,7 @@
     function goTo(i) {
       if (i < 0 || i >= hops.length) return;
       idx = i;
-      ctrl.cancelAutoFit();
-      cameraToHop(ctrl, hops[idx]);
+      ctrl.focusNode(hops[idx].id, true);
       highlightTimeline(hops[idx]);
       updateUi();
     }
@@ -244,7 +207,7 @@
         }
         goTo(idx + 1);
         scheduleNext();
-      }, CAMERA_MS);
+      }, zoomMs());
     }
 
     function play() {
@@ -278,43 +241,61 @@
   }
 
   function replay(containerId, traceId) {
-    var graphRequest = fetch("/api/graph").then(function (r) {
+    var graphRequest = fetch("/api/graph/universe?metric=link_density").then(function (r) {
       return r.json();
     });
     var traceRequest = fetch("/api/traces/" + encodeURIComponent(traceId)).then(function (r) {
       return r.json();
     });
     return Promise.all([graphRequest, traceRequest]).then(function (results) {
-      var graphData = results[0];
+      var universeData = results[0];
       var trace = results[1];
-      var Graph3D = global.Graph3D;
-      if (!Graph3D) return null;
+      var GraphSunburst = global.GraphSunburst;
+      if (!GraphSunburst) return null;
 
-      var universe = Graph3D.buildUniverse(graphData);
-      var hops = visitedHops(trace);
-      universe.links = universe.links.concat(hopLinks(hops));
-
-      var ctrl = Graph3D.mount(document.getElementById(containerId), universe, {
-        navigate: false,
-        autoRotate: false,
+      var universeNodeIds = ((universeData && universeData.nodes) || []).map(function (n) {
+        return n.id;
       });
-      if (!ctrl) return null;
-
-      var overlay = applyOverlay3D(ctrl, trace);
-      var pulseTimer = startPulse(ctrl, overlay.hits);
-      var playback = makePlayback(ctrl, hops, {
+      var inUniverse = {};
+      universeNodeIds.forEach(function (id) {
+        inUniverse[id] = true;
+      });
+      // Playback only steps through nodes that exist in the universe.
+      var hops = visitedHops(trace).filter(function (h) {
+        return inUniverse[h.id];
+      });
+      var els = {
         play: document.getElementById("replay-play"),
         prev: document.getElementById("replay-prev"),
         next: document.getElementById("replay-next"),
         counter: document.getElementById("replay-counter"),
-      });
+      };
+
+      var container = document.getElementById(containerId);
+      var ctrl = GraphSunburst.mount(container, universeData, { navigate: false });
+      if (!ctrl) {
+        // Empty library: keep the controls wired so the UI never dead-ends.
+        if (container) {
+          var empty = document.createElement("p");
+          empty.className = "muted";
+          empty.textContent = "No documents in the library yet.";
+          container.appendChild(empty);
+        }
+        makePlayback({ focusNode: function () {} }, hops, els);
+        return null;
+      }
+
+      var overlay = buildOverlay(trace, universeNodeIds);
+      ctrl.setOverlay(overlay);
+      var pulseTimer = startPulse(ctrl, overlay.hits, overlay);
+      var playback = makePlayback(ctrl, hops, els);
 
       window.addEventListener("beforeunload", function () {
         playback.stop();
         if (pulseTimer) clearInterval(pulseTimer);
       });
 
-      return ctrl.graph;
+      return ctrl;
     });
   }
 
@@ -327,7 +308,7 @@
     searchHitNodes: searchHitNodes,
     computeTraceOverlay: computeTraceOverlay,
     hopLinks: hopLinks,
-    applyOverlay3D: applyOverlay3D,
+    buildOverlay: buildOverlay,
     replay: replay,
   };
   global.TraceReplay = api;

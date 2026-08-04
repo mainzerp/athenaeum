@@ -41,7 +41,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # Jinja2 templates and static assets ship inside the wheel (Docker image).
-athenaeum = ["webui/templates/*.html", "webui/static/*", "webui/static/vendor/*"]
+athenaeum = ["webui/templates/*.html", "webui/static/*"]
 
 [tool.ruff]
 target-version = "py312"
