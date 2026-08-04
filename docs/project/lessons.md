@@ -17,10 +17,10 @@
 - FastMCP Streamable HTTP session manager must be driven by the FastAPI
   `lifespan=` context manager — never startup/shutdown decorators (verified
   against fastmcp 3.4.5, `StarletteWithLifespan`).
-- Every mutation is a fixed-order compound write: snapshot pre-image →
-  concept file (write-then-rename, `.tmp` + fsync + atomic rename) →
-  regenerate affected `index.md` → append root `log.md`. Index/log are
-  automatic side effects, never LLM-callable.
+- Every mutation is a fixed-order compound write: concept file
+  (write-then-rename, `.tmp` + fsync + atomic rename) → regenerate affected
+  `index.md` → append root `log.md` → git auto-commit (best-effort, never
+  breaks the write). Index/log are automatic side effects, never LLM-callable.
 - PD-1: new settings default to Admin WebUI + database, never env vars.
 - When the external MCP surface changes, update `architecture.md`,
   `project-definition.md`, `README.md`, and `AGENTS.md` in the same change.
@@ -362,6 +362,12 @@
   F19/F20-Muster auf 0.20.0 weiterhin reproduzierbar: die DETEKTION
   (links_after) funktioniert, aber der Librarian schreibt weiterhin
   behauptete Backlinks, die der Link-Graph nicht sieht.
+- **F21 erneut bestaetigt (2026-08-04, REMOTE):** Session-Start-Query
+  (Git-Versionierung/Time-Machine/Isolation) lieferte wieder ein
+  Prozess-Fragment im `content` ("We have not read
+  /ha-agenthub/ha-agenthub-architecture-lessons.md. Let's read it.") plus
+  rohes Tool-Call-JSON — F10/F21-Mechanik weiterhin offen. Die gemeldeten
+  Coverage-Gaps waren diesmal plausibel (Themen waren echtes Neuland).
 - **Deployment-Kontext (2026-08-04):** Die Kimi-MCP-Config
   (`~/.kimi-code/mcp.json`) zeigt auf `https://athenaeum.mzrsvr.net/mcp`
   (REMOTE, lief 0.20.0) — die Dogfooding-Library lebt dort, nicht im
