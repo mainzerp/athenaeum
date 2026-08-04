@@ -16,6 +16,7 @@ import tempfile
 import pytest
 
 from athenaeum.librarian.agent import (
+    CURATOR_VERIFIER,
     FINAL_ANSWER_REQUEST,
     KIND_LIBRARIAN,
     MAX_PAYLOAD_EXCERPT,
@@ -83,13 +84,23 @@ class FakeBackend:
             for path, doc in self.docs.items()
         ]
 
-    def create_concept(self, path, frontmatter, body, *, agent_label=None) -> dict:
+    def create_concept(
+        self, path, frontmatter, body, *, agent_label=None, requested_by=None, via=None
+    ) -> dict:
         self.calls.append(("create_concept", path, agent_label))
         self.docs[path] = {"frontmatter": dict(frontmatter), "body": body}
         return {"id": path[: -len(".md")], "action": "created"}
 
     def edit_concept(
-        self, path, *, frontmatter_patch=None, remove_keys=None, new_body=None, agent_label=None
+        self,
+        path,
+        *,
+        frontmatter_patch=None,
+        remove_keys=None,
+        new_body=None,
+        agent_label=None,
+        requested_by=None,
+        via=None,
     ) -> dict:
         self.calls.append(("edit_concept", path, agent_label))
         doc = self.docs[path]
@@ -105,7 +116,7 @@ class FakeBackend:
         self.docs[new_path] = self.docs.pop(old_path)
         return {"id": new_path[: -len(".md")], "action": "moved", "links_rewritten": 0}
 
-    def deprecate_concept(self, path, *, agent_label=None) -> dict:
+    def deprecate_concept(self, path, *, agent_label=None, requested_by=None, via=None) -> dict:
         self.calls.append(("deprecate_concept", path, agent_label))
         self.docs[path]["frontmatter"]["status"] = "deprecated"
         return {"id": path[: -len(".md")], "action": "deprecated"}
@@ -114,6 +125,12 @@ class FakeBackend:
         self.calls.append(("delete_concept", path, agent_label))
         del self.docs[path]
         return {"id": path[: -len(".md")], "action": "deleted", "inbound_links": []}
+
+    def verify_concept(self, path, *, by, at=None, agent_label=None) -> dict:
+        self.calls.append(("verify_concept", path, by, agent_label))
+        entries = self.docs[path]["frontmatter"].setdefault("verified", [])
+        entries.append({"by": by, "at": at or "2026-08-04T00:00:00+00:00"})
+        return {"id": path[: -len(".md")], "action": "verified"}
 
     def link_check(self, path=None) -> list[dict]:
         self.calls.append(("link_check", path))
@@ -164,7 +181,9 @@ class ScriptedProvider:
         return self.responses.pop(0)
 
 
-def make_librarian(backend, provider, max_iterations=3, *, root=None) -> Librarian:
+def make_librarian(
+    backend, provider, max_iterations=3, *, root=None, computation_runner=None
+) -> Librarian:
     config = LibrarianConfig(
         user_id="user-1",
         llm=LLMConfig(provider="openai", model="m", api_key="k", max_iterations=max_iterations),
@@ -176,6 +195,7 @@ def make_librarian(backend, provider, max_iterations=3, *, root=None) -> Librari
         config,
         backend=backend,
         provider=provider,
+        computation_runner=computation_runner,
     )
 
 
@@ -216,6 +236,58 @@ async def test_multi_round_tool_dispatch_and_answer():
     tool_messages = [m for m in second_call_messages if m["role"] == "tool"]
     assert tool_messages[0]["tool_call_id"] == "c1"
     assert "concepts" in tool_messages[0]["content"]
+
+
+async def test_request_loop_runs_computation(tmp_path):
+    """The internal run_computation tool: the loop gets the receipt, answers
+    from it, and the tracker records nothing (read-only action)."""
+    import sqlite3
+
+    from athenaeum import db as db_module
+    from athenaeum.computation import ComputationRunner
+
+    target = tmp_path / "target.db"
+    conn = sqlite3.connect(target)
+    conn.execute("CREATE TABLE items (name TEXT)")
+    conn.executemany("INSERT INTO items VALUES (?)", [("a",), ("b",)])
+    conn.commit()
+    conn.close()
+    db_path = tmp_path / "app.db"
+    db_module.init_db(db_path)
+    with db_module.connect(db_path) as conn:
+        row = db_module.create_runtime_connection(
+            conn, label="L", runtime="sqlite", dbname=str(target)
+        )
+        db_module.set_app_setting(conn, "computation_execution_enabled", "1")
+    backend = FakeBackend(
+        docs={
+            "/q.md": {
+                "frontmatter": {"title": "Q", "type": "Attested Computation", "runtime": "sqlite"},
+                "body": "# Computation\n\n```sql\nSELECT count(*) AS n FROM items\n```\n",
+            }
+        }
+    )
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc("c1", "run_computation", {"path": "/q.md", "connection_id": row["id"]})
+                ]
+            ),
+            LLMResponse(text="There are 2 items [/q.md]."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, computation_runner=ComputationRunner(db_path))
+
+    result = await librarian.handle_request("how many items?")
+
+    assert result["answer"] == "There are 2 items [/q.md]."
+    # the receipt reached the model as the tool result
+    second_call_messages = provider.calls[1][0]
+    tool_message = [m for m in second_call_messages if m["role"] == "tool"][0]
+    assert '"row_count": 1' in tool_message["content"]
+    # read-only: no read_document tracking, no write tracking
+    assert result["concepts"] == []
 
 
 async def test_cap_enforcement_final_answer_without_tools():
@@ -259,6 +331,7 @@ async def test_maintain_noop_when_healthy_without_llm_call():
         "actions": [],
         "summary": "Library is healthy; no maintenance needed.",
         "healthy": True,
+        "verified": [],
     }
     assert provider.calls == []  # no LLM call on the no-op path
 
@@ -291,13 +364,79 @@ async def test_maintain_runs_loop_on_orphaned_bundle():
     assert result["summary"] == (
         "Wired the orphan into the hub."
         "\n\nPost-run check: the library still has open health issues."
+        "\n\nPost-run verification: machine-confirmed 1 repaired concept(s)."
     )
     assert result["actions"] == [{"id": "/hub", "title": "Hub", "action": "updated"}]
+    # the deterministic post-step machine-confirmed exactly the repaired concept
+    assert result["verified"] == [{"id": "/hub", "by": CURATOR_VERIFIER}]
+    assert ("verify_concept", "/hub.md", CURATOR_VERIFIER, "agent-y") in backend.calls
     assert result["healthy"] is False  # fake backend stays unhealthy
     assert ("edit_concept", "/hub.md", "agent-y") in backend.calls
     # preamble carries the health report + caller instructions
     task_prompt = provider.calls[0][0][1]["content"]
     assert "/orphan" in task_prompt and "fix orphans" in task_prompt
+
+
+async def test_maintain_verifies_only_updated_writes():
+    """Creations, moves, deprecations, deletes are NOT machine-confirmed."""
+    docs = {
+        "/orphan.md": {"frontmatter": {"title": "Orphan", "type": "Note"}, "body": "o"},
+        "/old.md": {"frontmatter": {"title": "Old", "type": "Note"}, "body": "o"},
+    }
+    backend = FakeBackend(docs=docs, healthy=False)
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "n",
+                        },
+                    ),
+                    tc("c2", "deprecate_concept", {"path": "/old.md"}),
+                    tc("c3", "move_concept", {"old_path": "/orphan.md", "new_path": "/moved.md"}),
+                ]
+            ),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_maintain()
+
+    assert result["verified"] == []
+    assert "Post-run verification" not in result["summary"]
+    assert not any(call[0] == "verify_concept" for call in backend.calls)
+
+
+async def test_maintain_verification_failure_never_fails_run(monkeypatch):
+    """A verify_concept failure is logged and skipped; the run still succeeds."""
+    docs = {"/hub.md": {"frontmatter": {"title": "Hub", "type": "Note"}, "body": "h"}}
+    backend = FakeBackend(docs=docs, healthy=False)
+
+    def boom(path, *, by, at=None, agent_label=None):
+        raise RuntimeError("verify exploded")
+
+    monkeypatch.setattr(backend, "verify_concept", boom)
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[tc("c1", "edit_concept", {"path": "/hub.md", "new_body": "h2"})]
+            ),
+            LLMResponse(text="repaired"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_maintain()
+
+    assert result["verified"] == []
+    assert result["actions"] == [{"id": "/hub", "title": "Hub", "action": "updated"}]
+    assert "Post-run verification" not in result["summary"]
 
 
 async def test_handle_store_tracks_writes_and_injects_agent_label():
@@ -1267,6 +1406,7 @@ async def test_curate_noop_when_well_organized_without_llm_call(tmp_path):
     assert result["actions"] == []
     assert result["summary"] == "Library is well-organized; nothing to curate."
     assert result["organized"] is True
+    assert result["verified"] == []
     assert result["findings"]["concepts_scanned"] == 0
     assert result["health_after"] == {"healthy": True, "orphans": 0}
     assert provider.calls == []  # no LLM call on the no-op path
@@ -1296,8 +1436,11 @@ async def test_curate_runs_loop_on_findings(tmp_path):
         "Enriched the thin concept."
         "\n\nPost-run check: open findings remain (see 'findings'); unaddressed "
         "findings are re-reported on the next run until fixed."
+        "\n\nPost-run verification: machine-confirmed 1 repaired concept(s)."
     )
     assert result["actions"] == [{"id": "/thin", "title": "Thin", "action": "updated"}]
+    # the same deterministic post-step backs curate runs (happy path)
+    assert result["verified"] == [{"id": "/thin", "by": CURATOR_VERIFIER}]
     assert result["organized"] is False  # scanned files unchanged by the fake backend
     # L15: findings are the POST-run report (same epoch as 'organized')
     assert result["findings"]["thin_concepts"] == [
@@ -1612,8 +1755,13 @@ async def test_maintain_against_real_backend(tmp_path):
 
     assert result["summary"] == (
         "Wired the orphan into the hub.\n\nPost-run check: the library is now healthy."
+        "\n\nPost-run verification: machine-confirmed 1 repaired concept(s)."
     )
     assert result["actions"] == [{"id": "/hub", "title": "Hub", "action": "updated"}]
+    # real backend: the repaired concept's frontmatter gained the verified entry
+    assert result["verified"] == [{"id": "/hub", "by": CURATOR_VERIFIER}]
+    verified = backend.read_document("/hub.md")["frontmatter"]["verified"]
+    assert [entry["by"] for entry in verified] == [CURATOR_VERIFIER]
     # real backend re-validates after the edit: /orphan gained an inbound
     # link, /hub an outbound one, and no broken links remain
     assert result["healthy"] is True
@@ -1641,8 +1789,10 @@ async def test_curate_against_real_backend(tmp_path):
     assert result["summary"] == (
         "Enriched the stub."
         "\n\nPost-run check: no open findings remain; the library is well-organized."
+        "\n\nPost-run verification: machine-confirmed 1 repaired concept(s)."
     )
     assert result["actions"] == [{"id": "/stub", "title": "Stub", "action": "updated"}]
+    assert result["verified"] == [{"id": "/stub", "by": CURATOR_VERIFIER}]
     # the enrichment cleared the only finding: converged on the post-run scan
     assert result["organized"] is True
     # L15: findings are the POST-run report — the fixed thin concept is gone
@@ -1984,6 +2134,7 @@ async def test_curate_summary_and_findings_share_post_run_epoch(tmp_path):
     assert result["summary"] == (
         "Enriched the thin concept."
         "\n\nPost-run check: no open findings remain; the library is well-organized."
+        "\n\nPost-run verification: machine-confirmed 1 repaired concept(s)."
     )
 
 

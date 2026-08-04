@@ -684,3 +684,102 @@ def test_token_lifecycle(conn, tmp_path):
     # second revoke is a no-op
     assert not db.revoke_token(conn, user["id"], token["id"])
     assert [t["id"] for t in db.list_tokens(conn, user["id"])] == [token["id"]]
+
+
+# --- runtime connections (Attested Computations) -------------------------------
+
+
+def test_runtime_connections_table_created(conn):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_connections'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_runtime_connection_crud_and_write_only_password(conn):
+    password_enc = security.encrypt_secret("pg-password", "server-secret-key")
+    created = db.create_runtime_connection(
+        conn,
+        label="Analytics",
+        runtime="postgres",
+        host="pg.internal",
+        port=5432,
+        dbname="analytics",
+        username="ro_user",
+        password_enc=password_enc,
+    )
+    assert created["id"]
+    # get returns the full row (execution path needs the ciphertext)
+    fetched = db.get_runtime_connection(conn, created["id"])
+    assert fetched["label"] == "Analytics"
+    assert fetched["password_enc"] == password_enc
+    assert security.decrypt_secret(fetched["password_enc"], "server-secret-key") == "pg-password"
+    # the list view never carries the ciphertext (write-only)
+    listed = db.list_runtime_connections(conn)
+    assert [row["id"] for row in listed] == [created["id"]]
+    assert "password_enc" not in listed[0].keys()
+    assert listed[0]["password_set"] == 1
+    # update with password_enc=None keeps the stored ciphertext
+    db.update_runtime_connection(
+        conn,
+        created["id"],
+        label="Analytics RO",
+        runtime="postgres",
+        host="pg2.internal",
+        port=5433,
+        dbname="analytics",
+        username="ro_user2",
+    )
+    updated = db.get_runtime_connection(conn, created["id"])
+    assert updated["label"] == "Analytics RO"
+    assert updated["host"] == "pg2.internal" and updated["port"] == 5433
+    assert updated["password_enc"] == password_enc
+    db.delete_runtime_connection(conn, created["id"])
+    assert db.get_runtime_connection(conn, created["id"]) is None
+    assert db.list_runtime_connections(conn) == []
+
+
+def test_runtime_connection_sqlite_shape(conn):
+    created = db.create_runtime_connection(
+        conn, label="Local file", runtime="sqlite", dbname="/abs/path/data.db"
+    )
+    assert created["host"] is None and created["port"] is None
+    assert created["username"] is None and created["password_enc"] is None
+    assert db.list_runtime_connections(conn)[0]["password_set"] == 0
+
+
+def test_runtime_connections_migration_on_preexisting_db(tmp_path):
+    """init_db adds the NEW table to a database that predates it (A13)."""
+    db_path = tmp_path / "app.db"
+    with sqlite3.connect(db_path) as raw:
+        raw.executescript(
+            """
+            CREATE TABLE users (
+              id TEXT PRIMARY KEY,
+              username TEXT UNIQUE NOT NULL,
+              password_hash TEXT NOT NULL,
+              is_admin INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+            INSERT INTO users (id, username, password_hash, created_at)
+            VALUES ('u1', 'alice', 'h', '2026-01-01T00:00:00Z');
+            """
+        )
+    db.init_db(db_path)
+    db.init_db(db_path)  # idempotent
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_connections'"
+        ).fetchone()
+        assert row is not None
+        created = db.create_runtime_connection(conn, label="L", runtime="sqlite", dbname="/x.db")
+        assert created["id"]
+    finally:
+        conn.close()
+
+
+def test_computation_execution_toggle_defaults_off(conn):
+    assert db.get_app_setting(conn, "computation_execution_enabled", "0") == "0"
+    db.set_app_setting(conn, "computation_execution_enabled", "1")
+    assert db.get_app_setting(conn, "computation_execution_enabled", "0") == "1"

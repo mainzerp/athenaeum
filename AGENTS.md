@@ -27,6 +27,7 @@ This project runs an Athenaeum instance as MCP server (`athenaeum` in the Kimi C
 | `mcp__athenaeum__store_knowledge` | Persist NEW durable knowledge: decisions, lessons, patterns, project context (`kind_hint: "lessons"`, `relates_to: ["athenaeum"]`). |
 | `mcp__athenaeum__update_knowledge` | Correct or modify EXISTING knowledge (free-text instruction; the librarian locates the target). |
 | `mcp__athenaeum__library_status` | Check library health — deterministic, no LLM. `mcp__athenaeum__library_curate` / `mcp__athenaeum__library_maintain` repair taxonomy and graph health. |
+| `mcp__athenaeum__run_computation` | Execute an Attested Computation concept's SQL read-only against an admin-configured connection (admin execution toggle, default off); returns the verified receipt. |
 
 Rules:
 

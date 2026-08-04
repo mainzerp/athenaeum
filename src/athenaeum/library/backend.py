@@ -406,15 +406,27 @@ class LibraryBackend:
     # ----------------------------------------------------------------- writes
 
     def create_concept(
-        self, path: str, frontmatter: dict, body: str, *, agent_label: str | None = None
+        self,
+        path: str,
+        frontmatter: dict,
+        body: str,
+        *,
+        agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> dict:
         with self._write_lock():
             abs_path = self._guard_concept_path(path)
             if abs_path.exists():
                 raise FileExistsError(f"concept already exists: {path!r}")
             fm = dict(frontmatter)
+            # Concepts are born unverified (R9); verify_concept is the sole
+            # writer of 'verified', so a caller-supplied key is silently dropped.
+            fm.pop("verified", None)
             self._require_type(fm)
-            fm["generated"] = {"by": self.actor, "at": self._now()}
+            # Caller-supplied 'generated' (incl. forged sub-keys) is replaced
+            # wholesale; only the trusted parameters add provenance sub-keys.
+            self._inject_generated(fm, requested_by=requested_by, via=via, preserve=False)
             bundle = self._bundle_path(path)
             self._snapshot("create", [bundle, *self._affected_paths(bundle)])
             write_text_atomic(abs_path, fm_mod.dump_document(fm, body))
@@ -436,6 +448,8 @@ class LibraryBackend:
         remove_keys: list[str] | None = None,
         new_body: str | None = None,
         agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> dict:
         with self._write_lock():
             abs_path = self._guard_concept_path(path)
@@ -451,7 +465,9 @@ class LibraryBackend:
             for key in remove_keys or []:
                 fm.pop(key, None)
             self._require_type(fm)
-            fm["generated"] = {"by": self.actor, "at": self._now()}
+            # preserve=True: an edit without a new requester keeps existing
+            # requested_by/via provenance; a new requester overwrites them.
+            self._inject_generated(fm, requested_by=requested_by, via=via, preserve=True)
             bundle = self._bundle_path(path)
             self._snapshot("update", [bundle, *self._affected_paths(bundle)])
             write_text_atomic(
@@ -466,6 +482,47 @@ class LibraryBackend:
             )
             self.seed_cache = None
             return {"id": bundle[:-3], "action": "updated"}
+
+    def verify_concept(
+        self, path: str, *, by: str, at: str | None = None, agent_label: str | None = None
+    ) -> dict:
+        """Append one ``{by, at}`` entry to the concept's ``verified`` list.
+
+        The sole writer of ``verified`` (create_concept strips a supplied key;
+        edit_concept refuses it). Append-only (reference.md: a bare mapping is
+        normalized to a one-element list on read, then merged). ``generated``
+        is deliberately NOT touched: verification is metadata, not a meaningful
+        content change, so ``generated.at`` keeps marking the last content
+        change. Accepted side effect: the write re-dumps the whole frontmatter
+        mapping — a bare ``verified`` migrates to list form (its
+        ``verified-bare-mapping`` warning disappears) and flow style/quoting
+        normalize; unknown keys are never dropped.
+        """
+        with self._write_lock():
+            abs_path = self._guard_concept_path(path)
+            if not abs_path.is_file():
+                raise FileNotFoundError(f"no such concept: {path!r}")
+            if not isinstance(by, str) or not by:
+                raise ValueError("verifier 'by' must be a non-empty string")
+            fm, body = fm_mod.split_document(abs_path.read_text(encoding="utf-8"))
+            entries = fm.get("verified")
+            if not isinstance(entries, list):
+                entries = []  # junk scalar: replaced, not merged
+            entries.append({"by": by, "at": at or self._now()})
+            fm["verified"] = entries
+            bundle = self._bundle_path(path)
+            self._snapshot("verify", [bundle, *self._affected_paths(bundle)])
+            write_text_atomic(abs_path, fm_mod.dump_document(fm, body))
+            # No _regenerate_chain: index.md entries carry only title and
+            # description, so a verified-only change alters no index.
+            log_mod.append_entry(
+                self.root,
+                "Verification",
+                f"Verified [{fm.get('title') or bundle[:-3]}]({bundle}) (verifier: {by}).",
+                agent_label=agent_label,
+            )
+            self.seed_cache = None
+            return {"id": bundle[:-3], "action": "verified"}
 
     def move_concept(self, old_path: str, new_path: str, *, agent_label: str | None = None) -> dict:
         with self._write_lock():
@@ -498,14 +555,21 @@ class LibraryBackend:
             self.seed_cache = None
             return {"id": new_bundle[:-3], "action": "moved", "links_rewritten": rewritten}
 
-    def deprecate_concept(self, path: str, *, agent_label: str | None = None) -> dict:
+    def deprecate_concept(
+        self,
+        path: str,
+        *,
+        agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
+    ) -> dict:
         with self._write_lock():
             abs_path = self._guard_concept_path(path)
             if not abs_path.is_file():
                 raise FileNotFoundError(f"no such concept: {path!r}")
             fm, body = fm_mod.split_document(abs_path.read_text(encoding="utf-8"))
             fm["status"] = "deprecated"
-            fm["generated"] = {"by": self.actor, "at": self._now()}
+            self._inject_generated(fm, requested_by=requested_by, via=via, preserve=True)
             bundle = self._bundle_path(path)
             self._snapshot("deprecate", [bundle, *self._affected_paths(bundle)])
             write_text_atomic(abs_path, fm_mod.dump_document(fm, body))
@@ -649,6 +713,25 @@ class LibraryBackend:
     @staticmethod
     def _now() -> str:
         return datetime.now(UTC).isoformat(timespec="seconds")
+
+    def _inject_generated(
+        self, fm: dict, *, requested_by: str | None, via: str | None, preserve: bool
+    ) -> None:
+        """Write the ``generated`` mapping for a compound write.
+
+        ``generated.by`` stays ``self.actor`` in every path. ``preserve=True``
+        (edit/deprecate) keeps existing provenance sub-keys when no new
+        requester is supplied; ``preserve=False`` (create) replaces a
+        caller-supplied ``generated`` wholesale.
+        """
+        generated = dict(fm.get("generated") or {}) if preserve else {}
+        generated["by"] = self.actor
+        generated["at"] = self._now()
+        if requested_by is not None:
+            generated["requested_by"] = requested_by
+        if via is not None:
+            generated["via"] = via
+        fm["generated"] = generated
 
     @staticmethod
     def _ancestor_dirs(bundle_path: str) -> list[str]:

@@ -145,6 +145,37 @@ def test_verified_bare_mapping_is_warning_not_error(tmp_path):
     assert not report["errors"]
 
 
+def test_verified_missing_by_warning(tmp_path):
+    """R6: a verified[] entry without a truthy 'by' gets its own warning."""
+    write(
+        tmp_path,
+        "/a.md",
+        "---\ntype: Concept\nverified:\n  - at: 2026-01-01T00:00:00Z\n---\nx\n",
+    )
+    report = validate_bundle(tmp_path)
+    warnings = codes(report, "warnings")
+    assert "verified-missing-by" in warnings
+    # no double warning: _check_actor is skipped for the by-less entry
+    assert "non-conventional-actor" not in warnings
+
+
+def test_verified_junk_scalar_entry_warns(tmp_path):
+    write(tmp_path, "/a.md", "---\ntype: Concept\nverified:\n  - just-a-string\n---\nx\n")
+    report = validate_bundle(tmp_path)
+    assert "verified-missing-by" in codes(report, "warnings")
+
+
+def test_verified_proper_entry_has_no_missing_by_warning(tmp_path):
+    write(
+        tmp_path,
+        "/a.md",
+        "---\ntype: Concept\nverified:\n  - by: human:alice\n"
+        "    at: 2026-01-01T00:00:00Z\n---\nx\n",
+    )
+    report = validate_bundle(tmp_path)
+    assert "verified-missing-by" not in codes(report, "warnings")
+
+
 def test_missing_recommended_and_actor_warnings(tmp_path):
     write(tmp_path, "/a.md", "---\ntype: Concept\ngenerated:\n  by: librarian\n---\nbody\n")
     report = validate_bundle(tmp_path)
@@ -184,3 +215,19 @@ def test_conformant_concept_has_no_errors(tmp_path):
     write(tmp_path, "/b.md", "---\ntype: Concept\ntitle: B\ndescription: d\n---\n[a](/a.md)\n")
     report = validate_bundle(tmp_path)
     assert report["errors"] == []
+
+
+def test_generated_with_provenance_subkeys_validates_clean(tmp_path):
+    """generated.requested_by/via are athenaeum extension sub-keys: tolerated."""
+    write(
+        tmp_path,
+        "/a.md",
+        "---\ntype: Concept\ntitle: A\ndescription: d\n"
+        "generated:\n  by: athenaeum-librarian/0.1.0\n  at: 2026-07-28T10:00:00+00:00\n"
+        "  requested_by: human:alice\n  via: mcp_chat\n"
+        "---\n[b](/b.md)\n",
+    )
+    write(tmp_path, "/b.md", "---\ntype: Concept\ntitle: B\ndescription: d\n---\n[a](/a.md)\n")
+    report = validate_bundle(tmp_path)
+    assert report["errors"] == []
+    assert report["warnings"] == []

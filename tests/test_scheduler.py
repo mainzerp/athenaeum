@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 import pytest
 
 from athenaeum import db as db_module
+from athenaeum.librarian.agent import CURATOR_VERIFIER
 from athenaeum.librarian.gate import AgentRunBusyError
 from athenaeum.librarian.llm import LLMResponse, ToolCall
 from athenaeum.librarian.manager import LibrarianManager
@@ -315,6 +316,32 @@ async def test_noop_curate_rebaselines_last_run(tmp_path):
         assert db_module.get_config(conn, "user-a")["curate_last_run_at"] == last_run
     finally:
         conn.close()
+
+
+async def test_nightly_run_verifies_repaired_concepts(tmp_path):
+    """The nightly curator machine-confirms the concepts it repaired — with
+    the SAME athenaeum-curator/<version> actor as interactive MCP runs."""
+    scripts = [
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="edit_concept",
+                    arguments={"path": "/a.md", "new_body": "fixed"},
+                )
+            ]
+        ),
+        LLMResponse(text="repaired"),
+    ]
+    scheduler, manager, backend, providers, db_path = make_stack(
+        tmp_path, healthy=False, provider_scripts=scripts
+    )
+    backend.docs["/a.md"] = {"frontmatter": {"title": "A", "type": "Note"}, "body": "old"}
+    await scheduler.tick(at(DAY1, "02:59"))
+    await scheduler.tick(at(DAY1, "03:00"))
+    verified = backend.docs["/a.md"]["frontmatter"]["verified"]
+    assert [entry["by"] for entry in verified] == [CURATOR_VERIFIER]
+    assert ("verify_concept", "/a.md", CURATOR_VERIFIER, SCHEDULER_LABEL) in backend.calls
 
 
 async def test_error_path_journals_errors_and_continues(tmp_path):

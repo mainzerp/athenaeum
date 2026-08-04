@@ -11,11 +11,11 @@ Error classes (6, spec section 11 / analysis section 1.5):
 6. ``bad-status`` — ``status`` outside {draft, stable, deprecated}.
 
 Warning classes (9): ``broken-link``, ``missing-recommended``,
-``non-conventional-actor``, ``verified-bare-mapping``, ``malformed-date``,
-``index-drift``, ``footnote-mismatch``, plus ``orphan`` (no inbound and no
-outbound bundle links; deprecated concepts are never reported — they are
-pending removal, not graph citizens to wire in). Broken links are warnings,
-never errors (spec 6.1).
+``non-conventional-actor``, ``verified-bare-mapping``, ``verified-missing-by``,
+``malformed-date``, ``index-drift``, ``footnote-mismatch``, plus ``orphan``
+(no inbound and no outbound bundle links; deprecated concepts are never
+reported — they are pending removal, not graph citizens to wire in). Broken
+links are warnings, never errors (spec 6.1).
 """
 
 from __future__ import annotations
@@ -228,12 +228,22 @@ def _check_concept(
     verified = fm.get("verified")
     if isinstance(verified, list):
         for entry in verified:
-            if isinstance(entry, dict):
+            if not isinstance(entry, dict) or not entry.get("by"):
+                # Skip _check_actor here: a missing 'by' would also trip
+                # non-conventional-actor on None (double warning).
+                warnings.append(
+                    _entry(rel, "verified-missing-by", "verified[] entry requires 'by'")
+                )
+            else:
                 _check_actor(rel, entry.get("by"), warnings)
-                if entry.get("at") is not None and not _is_datetime(entry["at"]):
-                    warnings.append(
-                        _entry(rel, "malformed-date", f"verified[].at malformed: {entry['at']!r}")
-                    )
+            if (
+                isinstance(entry, dict)
+                and entry.get("at") is not None
+                and not _is_datetime(entry["at"])
+            ):
+                warnings.append(
+                    _entry(rel, "malformed-date", f"verified[].at malformed: {entry['at']!r}")
+                )
 
     if fm.get("stale_after") is not None and not _is_date(fm["stale_after"]):
         warnings.append(

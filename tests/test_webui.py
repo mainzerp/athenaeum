@@ -1842,6 +1842,11 @@ def test_admin_pages_require_admin(env):
     assert client.get("/admin/users").status_code == 403
     assert client.get("/admin/server").status_code == 403
     assert client.post("/admin/server", data={}).status_code == 403
+    assert client.get("/admin/connections").status_code == 403
+    assert client.post("/admin/connections", data={}).status_code == 403
+    assert client.get("/admin/connections/some-id/edit").status_code == 403
+    assert client.post("/admin/connections/some-id/delete", data={}).status_code == 403
+    assert client.post("/admin/connections/some-id/test", data={}).status_code == 403
 
 
 def test_admin_server_stateless_http_roundtrip(env):
@@ -1877,6 +1882,141 @@ def test_admin_server_stateless_http_roundtrip(env):
         assert db_module.get_app_setting(conn, "mcp_stateless_http") == "0"
     finally:
         conn.close()
+
+
+def test_admin_server_computation_toggle_roundtrip(env):
+    client, _, data_root = env
+    make_user(data_root, "owner", "pw", admin=True)
+    login(client, "owner", "pw")
+    db_path = Path(data_root) / "app.db"
+
+    page = client.get("/admin/server")
+    assert page.status_code == 200
+    assert "computation_execution_enabled" in page.text
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.get_app_setting(conn, "computation_execution_enabled", "0") == "0"
+    finally:
+        conn.close()
+
+    response = client.post("/admin/server", data={"computation_execution_enabled": "1"})
+    assert response.status_code == 303
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.get_app_setting(conn, "computation_execution_enabled") == "1"
+    finally:
+        conn.close()
+
+
+def test_admin_connections_crud_and_write_only_password(env):
+    client, _, data_root = env
+    make_user(data_root, "owner", "pw", admin=True)
+    login(client, "owner", "pw")
+    db_path = Path(data_root) / "app.db"
+
+    page = client.get("/admin/connections")
+    assert page.status_code == 200
+    assert "No connections yet" in page.text
+
+    # create a postgres connection with a password
+    response = client.post(
+        "/admin/connections",
+        data={
+            "label": "Analytics",
+            "runtime": "postgres",
+            "host": "pg.internal",
+            "port": "5432",
+            "dbname": "analytics",
+            "username": "ro_user",
+            "password": "pg-secret",
+        },
+    )
+    assert response.status_code == 303
+    conn = db_module.connect(db_path)
+    try:
+        rows = db_module.list_runtime_connections(conn)
+        assert len(rows) == 1
+        connection_id = rows[0]["id"]
+        stored = db_module.get_runtime_connection(conn, connection_id)
+    finally:
+        conn.close()
+    assert stored["password_enc"]  # stored encrypted...
+    assert stored["password_enc"] != "pg-secret"
+    assert "pg-secret" not in client.get("/admin/connections").text  # ...never rendered
+
+    # edit with an empty password field keeps the stored ciphertext
+    response = client.post(
+        f"/admin/connections/{connection_id}/edit",
+        data={
+            "label": "Analytics RO",
+            "runtime": "postgres",
+            "host": "pg2.internal",
+            "port": "5433",
+            "dbname": "analytics",
+            "username": "ro_user",
+            "password": "",
+        },
+    )
+    assert response.status_code == 303
+    conn = db_module.connect(db_path)
+    try:
+        updated = db_module.get_runtime_connection(conn, connection_id)
+    finally:
+        conn.close()
+    assert updated["label"] == "Analytics RO"
+    assert updated["password_enc"] == stored["password_enc"]
+
+    # validation: postgres requires host/port/dbname/username
+    response = client.post(
+        "/admin/connections",
+        data={"label": "Broken", "runtime": "postgres", "host": "", "port": "", "dbname": ""},
+    )
+    assert response.status_code == 400
+
+    # delete
+    response = client.post(f"/admin/connections/{connection_id}/delete")
+    assert response.status_code == 303
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.list_runtime_connections(conn) == []
+    finally:
+        conn.close()
+
+
+def test_admin_connections_sqlite_create_and_test_probe(env, tmp_path):
+    client, _, data_root = env
+    make_user(data_root, "owner", "pw", admin=True)
+    login(client, "owner", "pw")
+    db_path = Path(data_root) / "app.db"
+
+    import sqlite3 as sqlite3_mod
+
+    target = tmp_path / "probe.db"
+    conn = sqlite3_mod.connect(target)
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    response = client.post(
+        "/admin/connections",
+        data={"label": "Local", "runtime": "sqlite", "dbname": str(target)},
+    )
+    assert response.status_code == 303
+    conn = db_module.connect(db_path)
+    try:
+        connection_id = db_module.list_runtime_connections(conn)[0]["id"]
+    finally:
+        conn.close()
+
+    response = client.post(f"/admin/connections/{connection_id}/test")
+    assert response.status_code == 200
+    assert "Connection OK" in response.text
+
+    # sqlite requires the file path
+    response = client.post(
+        "/admin/connections", data={"label": "Broken", "runtime": "sqlite", "dbname": ""}
+    )
+    assert response.status_code == 400
 
 
 def test_create_app_passes_stateless_http_flag(env, monkeypatch):

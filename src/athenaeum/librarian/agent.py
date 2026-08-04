@@ -84,6 +84,11 @@ class _ProviderRunError(Exception):
 KIND_LIBRARIAN = "librarian"  # handle_request/handle_store/handle_update
 KIND_CURATOR = "curator"  # handle_maintain/handle_curate
 
+# Verifier actor for the deterministic post-curation verification (F18-pattern
+# post-step): the SAME string for interactive MCP runs and nightly scheduler
+# runs — the curator machine-confirms, humans review outside the loop.
+CURATOR_VERIFIER = f"athenaeum-curator/{__version__}"
+
 
 NO_WRITE_NUDGE = (
     "\n\nYou finished without writing anything. That is a failed store: apply "
@@ -161,6 +166,13 @@ def _post_run_note(converged: bool, done: str, remaining: str) -> str:
     return f"\n\nPost-run check: {done if converged else remaining}"
 
 
+def _verification_note(verified: list[dict]) -> str:
+    """Deterministic post-run verification line; "" when nothing was verified."""
+    if not verified:
+        return ""
+    return f"\n\nPost-run verification: machine-confirmed {len(verified)} repaired concept(s)."
+
+
 def _parse_follow_ups(text: str) -> list[str]:
     """Extract bullets under a '## Follow-ups' heading, if the model emitted one."""
     follow_ups: list[str] = []
@@ -232,11 +244,15 @@ class Librarian:
         embedding_service: EmbeddingService | None = None,
         run_gate: RunGate | None = None,
         reranker=None,
+        computation_runner=None,
     ) -> None:
         self.root = Path(root)
         self.config = config
         self._embed = embedding_service
         self._reranker = reranker
+        # Shared ComputationRunner (manager-built); None in standalone/tests:
+        # the internal run_computation tool then reports "not available".
+        self._computation_runner = computation_runner
         self._embed_reconcile_pending = False
         # A5: strong reference to the in-flight reconcile task (GC could
         # otherwise destroy a fire-and-forget task mid-run) plus its owning
@@ -303,15 +319,37 @@ class Librarian:
     # --- agent loop -----------------------------------------------------
 
     async def _dispatch_tracked(
-        self, name: str, args: dict, agent_label: str | None, tracker: _Tracker
+        self,
+        name: str,
+        args: dict,
+        agent_label: str | None,
+        tracker: _Tracker,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> Any:
         session = _trace_var.get()
         if session is None:
-            result = await dispatch(name, args, self.backend, agent_label)
+            result = await dispatch(
+                name,
+                args,
+                self.backend,
+                agent_label,
+                requested_by=requested_by,
+                via=via,
+                computation_runner=self._computation_runner,
+            )
         else:
             start = time.perf_counter()
             try:
-                result = await dispatch(name, args, self.backend, agent_label)
+                result = await dispatch(
+                    name,
+                    args,
+                    self.backend,
+                    agent_label,
+                    requested_by=requested_by,
+                    via=via,
+                    computation_runner=self._computation_runner,
+                )
             except Exception as exc:
                 # Record the failed hop, then re-raise so the loop's catch
                 # still feeds the error back to the model.
@@ -342,6 +380,8 @@ class Librarian:
         *,
         llm_config: LLMConfig | None = None,
         provider: LLMProvider | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> _RunResult:
         """Hand-rolled tool-calling loop (plan section 3.4)."""
         llm_config = llm_config or self.config.llm
@@ -384,7 +424,12 @@ class Librarian:
             for call in response.tool_calls:
                 try:
                     result = await self._dispatch_tracked(
-                        call.name, call.arguments, agent_label, tracker
+                        call.name,
+                        call.arguments,
+                        agent_label,
+                        tracker,
+                        requested_by=requested_by,
+                        via=via,
                     )
                     # A11: bound the model-facing copy; the server-side trace
                     # record was already written by _dispatch_tracked.
@@ -587,7 +632,13 @@ class Librarian:
                 answer["follow_ups"] = follow_ups
             return answer
 
-    async def _run_write_task(self, task: str, agent_label: str | None) -> _RunResult:
+    async def _run_write_task(
+        self,
+        task: str,
+        agent_label: str | None,
+        requested_by: str | None = None,
+        via: str | None = None,
+    ) -> _RunResult:
         """Run a write-intent task; retry once when nothing was written (F11).
 
         L1: a run counts as successful ONLY when at least one write landed —
@@ -595,17 +646,23 @@ class Librarian:
         L2: a mid-loop provider failure after landed writes returns a
         partial-success result (``partial=True``) instead of raising.
         """
-        result = await self._run_write_once(task, agent_label)
+        result = await self._run_write_once(task, agent_label, requested_by, via)
         if self._stored_entries(result.tracker):
             return result
-        retry = await self._run_write_once(task + NO_WRITE_NUDGE, agent_label)
+        retry = await self._run_write_once(task + NO_WRITE_NUDGE, agent_label, requested_by, via)
         if self._stored_entries(retry.tracker):
             return retry
         raise LibrarianNoWriteError("librarian completed the write task without writing anything")
 
-    async def _run_write_once(self, task: str, agent_label: str | None) -> _RunResult:
+    async def _run_write_once(
+        self,
+        task: str,
+        agent_label: str | None,
+        requested_by: str | None = None,
+        via: str | None = None,
+    ) -> _RunResult:
         try:
-            return await self._run(task, agent_label)
+            return await self._run(task, agent_label, requested_by=requested_by, via=via)
         except _ProviderRunError as exc:
             logger.warning(
                 "provider failed mid-run; keeping %d landed write(s)", len(exc.tracker.writes)
@@ -681,6 +738,8 @@ class Librarian:
         images: list[dict] | None = None,
         *,
         agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> dict:
         # D3.2: two-phase payload archive. The "received" record is written
         # BEFORE the run-gate acquire so busy rejections are recorded too;
@@ -738,7 +797,7 @@ class Librarian:
                     "bullet per resolved contradiction, or '- none'. "
                     "When done, summarize what you stored and where."
                 )
-                result = await self._run_write_task(task, agent_label)
+                result = await self._run_write_task(task, agent_label, requested_by, via)
                 response = await self._write_result(result, report_contradictions=True)
                 record["outcome"] = "partial" if response.get("partial") else "ok"
                 record["stored"] = response["stored"]
@@ -763,6 +822,8 @@ class Librarian:
         instruction: str,
         *,
         agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> dict:
         async with self._run_gate.acquire(self.config.user_id, KIND_LIBRARIAN, wait=False):
             self._maybe_embed_reconcile()
@@ -784,7 +845,7 @@ class Librarian:
                 "standing side by side. Index and log maintenance is automatic. "
                 "When done, summarize what you changed and where."
             )
-            result = await self._run_write_task(task, agent_label)
+            result = await self._run_write_task(task, agent_label, requested_by, via)
             return await self._write_result(result)
 
     async def _write_result(
@@ -898,9 +959,13 @@ class Librarian:
                     "actions": [],
                     "summary": "Library is healthy; no maintenance needed.",
                     "healthy": True,
+                    "verified": [],
                 }
             task = build_maintain_preamble(status, instructions)
             result = await self._run(task, agent_label)
+            # Epoch ordering (L15): verification lands BEFORE the final rescan,
+            # so the post-run status and the verified receipts share one epoch.
+            verified = await self._verify_repairs(result.tracker, agent_label)
             final_status = await asyncio.to_thread(self.backend.status)
             healthy = bool(final_status.get("healthy"))
             return {
@@ -912,9 +977,43 @@ class Librarian:
                     healthy,
                     "the library is now healthy.",
                     "the library still has open health issues.",
-                ),
+                )
+                + _verification_note(verified),
                 "healthy": healthy,
+                "verified": verified,
             }
+
+    async def _verify_repairs(self, tracker: _Tracker, agent_label: str | None) -> list[dict]:
+        """Post-run verification (F18-pattern deterministic post-step); never raises.
+
+        Machine-confirms exactly the concepts the curator run REPAIRED —
+        tracker writes with action ``updated`` (content repairs via
+        edit_concept on pre-existing concepts; never creations, deprecations,
+        deletes, or moves). Calls the backend directly, bypassing
+        _dispatch_tracked: no tracker pollution, no embedding-sync input
+        (verified is metadata-only; the embedding content hash covers
+        title/description/body, never frontmatter trust keys). A per-concept
+        failure is logged and skipped — verification must never fail a
+        completed curator run (_semantic_duplicates never-raise precedent).
+        """
+        receipts: list[dict] = []
+        for write in tracker.writes:
+            if write["action"] != "updated":
+                continue
+            try:
+                await asyncio.to_thread(
+                    self.backend.verify_concept,
+                    write["id"] + ".md",
+                    by=CURATOR_VERIFIER,
+                    agent_label=agent_label,
+                )
+            except Exception:
+                logger.warning(
+                    "post-run verification failed for %s; skipping", write["id"], exc_info=True
+                )
+                continue
+            receipts.append({"id": write["id"], "by": CURATOR_VERIFIER})
+        return receipts
 
     def _semantic_duplicates(self, since: str | None) -> list[dict]:
         """Embedding-similarity duplicate pass over cached vectors; never raises.
@@ -997,6 +1096,7 @@ class Librarian:
                     "actions": [],
                     "summary": "Library is well-organized; nothing to curate.",
                     "organized": True,
+                    "verified": [],
                     "findings": report,
                     "health_after": {
                         "healthy": bool(status.get("healthy")),
@@ -1012,6 +1112,8 @@ class Librarian:
                 llm_config=self._curate_llm(),
                 provider=self._curate_provider_or_default(),
             )
+            # Epoch ordering (L15): verification lands BEFORE the final rescan.
+            verified = await self._verify_repairs(result.tracker, agent_label)
             # L15: re-scan post-run so the response reports ONE epoch — what
             # remains after the run, not the pre-run state the LLM narrated.
             final = await asyncio.to_thread(self.backend.organization_findings)
@@ -1032,8 +1134,10 @@ class Librarian:
                     "no open findings remain; the library is well-organized.",
                     "open findings remain (see 'findings'); unaddressed findings are "
                     "re-reported on the next run until fixed.",
-                ),
+                )
+                + _verification_note(verified),
                 "organized": organized,
+                "verified": verified,
                 "findings": final,
                 "health_after": {
                     "healthy": bool(final_status.get("healthy")),

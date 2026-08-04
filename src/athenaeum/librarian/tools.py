@@ -1,7 +1,9 @@
 """LLM-facing internal toolset: JSON schemas + dispatch onto LibraryBackend.
 
-Contract: plan section 3.3. Exactly 10 tools, dispatched 1:1 onto the
-LibraryBackend (section 3.2). ``agent_label`` is injected by the agent loop
+Contract: plan section 3.3. Exactly 11 tools, dispatched 1:1 onto the
+LibraryBackend (section 3.2) — except ``run_computation``, which routes to
+the shared ComputationRunner (read-only, never a write action).
+``agent_label`` is injected by the agent loop
 from request context, never by the LLM. index.md/log.md maintenance,
 init/reconcile/validate, and versioning are NOT LLM-callable.
 """
@@ -20,7 +22,14 @@ class Backend(Protocol):
     def search_metadata(self, field: str | None = None, value: str | None = None) -> list[dict]: ...
     async def search_semantic(self, query: str, limit: int = 8) -> list[dict]: ...
     def create_concept(
-        self, path: str, frontmatter: dict, body: str, *, agent_label: str | None = None
+        self,
+        path: str,
+        frontmatter: dict,
+        body: str,
+        *,
+        agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> dict: ...
     def edit_concept(
         self,
@@ -30,11 +39,20 @@ class Backend(Protocol):
         remove_keys: list[str] | None = None,
         new_body: str | None = None,
         agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
     ) -> dict: ...
     def move_concept(
         self, old_path: str, new_path: str, *, agent_label: str | None = None
     ) -> dict: ...
-    def deprecate_concept(self, path: str, *, agent_label: str | None = None) -> dict: ...
+    def deprecate_concept(
+        self,
+        path: str,
+        *,
+        agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
+    ) -> dict: ...
     def delete_concept(self, path: str, *, agent_label: str | None = None) -> dict: ...
     def link_check(self, path: str | None = None) -> list[dict]: ...
     def status(self) -> dict: ...
@@ -214,11 +232,39 @@ TOOL_SCHEMAS: list[dict] = [
         ),
         "parameters": _params({"path": _PATH}),
     },
+    {
+        "name": "run_computation",
+        "description": (
+            "Execute an Attested Computation concept's SQL (its body "
+            "# Computation fence) read-only against an admin-configured "
+            "connection and return the verified receipt (columns, rows, "
+            "row_count, truncated). Use it to answer with current verified "
+            "figures instead of quoting stored results. Requires the admin "
+            "execution toggle; a disabled or unavailable execution is a "
+            "coverage gap, not an error to narrate."
+        ),
+        "parameters": _params(
+            {
+                "path": _PATH,
+                "connection_id": {
+                    "type": "string",
+                    "description": "Admin-configured runtime connection id.",
+                },
+                "parameters": {
+                    "type": "object",
+                    "description": "Values for the concept's declared parameters.",
+                },
+            },
+            ["path", "connection_id"],
+        ),
+    },
 ]
 
 _SCHEMA_BY_NAME = {t["name"]: t for t in TOOL_SCHEMAS}
 
 # Write ops, mapped to the store/maintain action vocabulary of plan section 3.1.
+# run_computation is deliberately NOT here: it is a READ action — no tracker
+# entry, no no-write detection interference, no embedding-sync input.
 WRITE_ACTIONS = {
     "write_concept": "created",
     "edit_concept": "updated",
@@ -249,6 +295,9 @@ async def dispatch(
     args: dict[str, Any],
     backend: Backend,
     agent_label: str | None = None,
+    requested_by: str | None = None,
+    via: str | None = None,
+    computation_runner=None,
 ) -> Any:
     """Dispatch one LLM tool call onto the backend (1:1 mapping, plan section 3.3).
 
@@ -276,6 +325,8 @@ async def dispatch(
             args["frontmatter"],
             args["body"],
             agent_label=agent_label,
+            requested_by=requested_by,
+            via=via,
         )
     if name == "edit_concept":
         return await asyncio.to_thread(
@@ -285,6 +336,8 @@ async def dispatch(
             remove_keys=args.get("remove_keys"),
             new_body=args.get("new_body"),
             agent_label=agent_label,
+            requested_by=requested_by,
+            via=via,
         )
     if name == "move_concept":
         return await asyncio.to_thread(
@@ -292,7 +345,11 @@ async def dispatch(
         )
     if name == "deprecate_concept":
         return await asyncio.to_thread(
-            backend.deprecate_concept, args["path"], agent_label=agent_label
+            backend.deprecate_concept,
+            args["path"],
+            agent_label=agent_label,
+            requested_by=requested_by,
+            via=via,
         )
     if name == "delete_concept":
         return await asyncio.to_thread(
@@ -306,5 +363,18 @@ async def dispatch(
         limit = args.get("limit")
         return await backend.search_semantic(
             query=args["query"], limit=limit if limit is not None else 8
+        )
+    if name == "run_computation":
+        # READ action (never in WRITE_ACTIONS): the receipt dict has no "id"
+        # key, so the tracker guard cannot fire either. The backend is the
+        # concrete LibraryBackend — the runner only needs read_document.
+        if computation_runner is None:
+            raise ValueError("computation execution is not available")
+        return await asyncio.to_thread(
+            computation_runner.run,
+            backend,
+            args["path"],
+            args["connection_id"],
+            args.get("parameters"),
         )
     raise ValueError(f"Unknown tool {name!r}")

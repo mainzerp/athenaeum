@@ -34,6 +34,7 @@ ALL_TOOLS = {
     "library_status",
     "library_maintain",
     "library_curate",
+    "run_computation",
 }
 
 
@@ -168,7 +169,7 @@ async def test_mcp_auth_reject_revoked_token(running_app, admin_user, test_setti
 
 
 async def test_mcp_roundtrip_with_real_token(running_app, admin_user, test_settings):
-    """Bearer token -> real user; all 6 tools; status works unconfigured."""
+    """Bearer token -> real user; all 7 tools; status works unconfigured."""
     plaintext = _create_token(test_settings.data_root, admin_user["id"])
 
     async with _mcp_client(running_app, token=plaintext) as client:

@@ -102,6 +102,90 @@ def test_edit_never_touches_verified(tmp_path):
         backend.edit_concept("/a.md", frontmatter_patch={"verified": []})
     with pytest.raises(ValueError, match="verified"):
         backend.edit_concept("/a.md", remove_keys=["verified"])
+    # The guard stays: verify_concept is the ONLY path that writes 'verified'.
+    result = backend.verify_concept("/a.md", by="athenaeum-curator/0.1.0")
+    assert result == {"id": "/a", "action": "verified"}
+    assert backend.read_document("/a.md")["frontmatter"]["verified"]
+
+
+def test_create_concept_strips_caller_supplied_verified(tmp_path):
+    """R9: concepts are born unverified; verify_concept is the sole writer."""
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md",
+        {"type": "Concept", "verified": [{"by": "human:mallory", "at": "2026-01-01T00:00:00Z"}]},
+        "x\n",
+    )
+    assert "verified" not in backend.read_document("/a.md")["frontmatter"]
+
+
+def test_verify_concept_appends_without_generated_refresh(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept", "title": "A"}, "x\n")
+    backend._now = lambda: "2099-01-01T00:00:00+00:00"
+    before = backend.read_document("/a.md")["frontmatter"]["generated"]
+    result = backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0")
+    assert result == {"id": "/a", "action": "verified"}
+    fm = backend.read_document("/a.md")["frontmatter"]
+    assert fm["verified"] == [{"by": "athenaeum-curator/0.2.0", "at": "2099-01-01T00:00:00+00:00"}]
+    # verification is metadata: 'generated' stays byte-identical (no refresh)
+    assert fm["generated"] == before
+
+
+def test_verify_concept_merges_bare_mapping(tmp_path):
+    backend = make_backend(tmp_path)
+    root = tmp_path / "lib"
+    (root / "a.md").write_text(
+        "---\ntype: Concept\nverified:\n  by: human:alice\n  at: 2026-01-01T00:00:00Z\n---\nx\n",
+        encoding="utf-8",
+    )
+    backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0", at="2026-02-02T00:00:00+00:00")
+    verified = backend.read_document("/a.md")["frontmatter"]["verified"]
+    # YAML parses the ISO 'at' of the original entry into a datetime; the
+    # appended entry keeps the exact string passed in.
+    assert [entry["by"] for entry in verified] == ["human:alice", "athenaeum-curator/0.2.0"]
+    assert str(verified[0]["at"]) == "2026-01-01 00:00:00+00:00"
+    assert verified[1]["at"] == "2026-02-02T00:00:00+00:00"
+
+
+def test_verify_concept_appends_to_existing_list(tmp_path):
+    backend = make_backend(tmp_path)
+    root = tmp_path / "lib"
+    (root / "a.md").write_text(
+        "---\ntype: Concept\nverified:\n  - by: human:alice\n"
+        "    at: 2026-01-01T00:00:00Z\n---\nx\n",
+        encoding="utf-8",
+    )
+    backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0", at="2026-02-02T00:00:00+00:00")
+    backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0", at="2026-03-03T00:00:00+00:00")
+    verified = backend.read_document("/a.md")["frontmatter"]["verified"]
+    assert [entry["by"] for entry in verified] == [
+        "human:alice",
+        "athenaeum-curator/0.2.0",
+        "athenaeum-curator/0.2.0",
+    ]
+
+
+def test_verify_concept_snapshot_and_log(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept", "title": "A"}, "x\n")
+    backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0", agent_label="bot-1")
+    root = tmp_path / "lib"
+    assert (root / ".athenaeum" / "versions" / "000002" / "meta.json").exists()
+    log = read_log(root)
+    assert "**Verification**" in log
+    assert "(verifier: athenaeum-curator/0.2.0)" in log
+    assert "(requested by agent:bot-1)" in log
+
+
+def test_verify_concept_refusals(tmp_path):
+    backend = make_backend(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        backend.verify_concept("/missing.md", by="athenaeum-curator/0.2.0")
+    backend.create_concept("/a.md", {"type": "Concept"}, "x\n")
+    for bad in ("", None, 42):
+        with pytest.raises(ValueError, match="by"):
+            backend.verify_concept("/a.md", by=bad)
 
 
 def test_update_paths_refresh_generated_at(tmp_path):
@@ -229,6 +313,86 @@ def test_agent_label_suffix_in_log(tmp_path):
     assert "(requested by agent:bot-1)" in read_log(tmp_path / "lib")
     # generated.by stays the librarian actor regardless of agent label
     assert backend.read_document("/a.md")["frontmatter"]["generated"]["by"] == ACTOR
+
+
+# --- generated provenance (requested_by / via) -------------------------------
+
+
+def test_create_injects_requested_by_and_via(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md", {"type": "Concept"}, "x\n", requested_by="human:alice", via="mcp_chat"
+    )
+    generated = backend.read_document("/a.md")["frontmatter"]["generated"]
+    assert generated["requested_by"] == "human:alice"
+    assert generated["via"] == "mcp_chat"
+    assert generated["by"] == ACTOR
+
+
+def test_create_replaces_forged_generated_wholesale(tmp_path):
+    """A caller-supplied generated mapping (incl. forged sub-keys) never survives."""
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md",
+        {"type": "Concept", "generated": {"by": "human:mallory", "requested_by": "human:mallory"}},
+        "x\n",
+        requested_by="human:alice",
+        via="mcp_chat",
+    )
+    generated = backend.read_document("/a.md")["frontmatter"]["generated"]
+    assert generated["by"] == ACTOR
+    assert generated["requested_by"] == "human:alice"
+    assert set(generated) == {"by", "at", "requested_by", "via"}
+
+
+def test_edit_preserves_provenance_without_new_requester(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md", {"type": "Concept"}, "x\n", requested_by="human:alice", via="mcp_chat"
+    )
+    backend.edit_concept("/a.md", frontmatter_patch={"description": "d"})  # curator edit
+    generated = backend.read_document("/a.md")["frontmatter"]["generated"]
+    assert generated["requested_by"] == "human:alice"
+    assert generated["via"] == "mcp_chat"
+
+
+def test_edit_with_new_requester_overwrites_and_refreshes(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md", {"type": "Concept"}, "x\n", requested_by="human:alice", via="mcp_chat"
+    )
+    backend._now = lambda: "2099-01-01T00:00:00+00:00"
+    backend.edit_concept(
+        "/a.md",
+        frontmatter_patch={"description": "d"},
+        requested_by="human:bob",
+        via="mcp_chat",
+    )
+    generated = backend.read_document("/a.md")["frontmatter"]["generated"]
+    assert generated["requested_by"] == "human:bob"
+    assert generated["at"] == "2099-01-01T00:00:00+00:00"
+
+
+def test_deprecate_preserves_provenance(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md", {"type": "Concept"}, "x\n", requested_by="human:alice", via="mcp_chat"
+    )
+    backend.deprecate_concept("/a.md")
+    generated = backend.read_document("/a.md")["frontmatter"]["generated"]
+    assert generated["requested_by"] == "human:alice"
+    assert generated["via"] == "mcp_chat"
+
+
+def test_verify_concept_preserves_provenance(tmp_path):
+    """The F1 post-step never touches generated: requested_by survives curation."""
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md", {"type": "Concept"}, "x\n", requested_by="human:alice", via="mcp_chat"
+    )
+    before = backend.read_document("/a.md")["frontmatter"]["generated"]
+    backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0")
+    assert backend.read_document("/a.md")["frontmatter"]["generated"] == before
 
 
 def test_reconcile_repairs_stale_index(tmp_path):

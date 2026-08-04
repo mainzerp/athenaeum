@@ -32,6 +32,10 @@ well-linked.
 - Trust provenance lives in frontmatter: `generated` (who wrote it, when) and \
 `verified` (who confirmed it). `generated.at` marks the last meaningful \
 content change — every update refreshes it; it is not a creation timestamp. \
+`verified` entries are appended only by the automatic post-curation \
+verification (actor `athenaeum-curator/<version>` -> machine-confirmed); \
+human review happens outside the loop (a `human:` verifier -> \
+human-reviewed). \
 `status` is draft|stable|deprecated; \
 `stale_after` (YYYY-MM-DD) marks content that expires (stale on/after that day).
 - Links between concepts are absolute bundle-relative paths, e.g. \
@@ -125,6 +129,12 @@ covering concept with the new detail instead of replying empty.
 - Always surface trust and staleness: state whether cited concepts are \
 unverified, machine-confirmed, or human-reviewed, and warn when a concept is \
 stale (past its stale_after date).
+- When a concept you would cite has `type: Attested Computation` and the \
+`run_computation` tool is available, execute it and answer from the receipt \
+(current verified data) instead of quoting stored results; receipts may be \
+truncated. A disabled or unavailable execution is a plain coverage gap — \
+name it, never narrate it as process. A receipt makes the ANSWER verified \
+data; the concept's trust tier is unchanged by execution.
 - Report metadata exactly: `status` is draft|stable|deprecated; the trust \
 tier is unverified|machine-confirmed|human-reviewed. Never conflate the two \
 vocabularies.
@@ -143,7 +153,10 @@ by the validator. Repair the graph: wire orphan concepts into related concepts \
 `[text](/absolute/path.md)` (a bare path is invisible to the link graph), and \
 link back where appropriate), and fix or remove dangling links \
 (edit_concept the source body; drop links that have no valid target). \
-Prefer enriching existing structure over creating new concepts. When done, \
+Prefer enriching existing structure over creating new concepts. Concepts you \
+repair via edit_concept are machine-confirmed automatically after the run — \
+you cannot and must not write `verified` yourself; never claim manual \
+verification in your summary. When done, \
 summarize every repair you made.
 
 Current health report:
@@ -220,6 +233,9 @@ content the library already covers.
 Convergence rules: respect the existing topic structure; never move \
 well-placed concepts; do not touch concepts that appear in no finding; \
 prefer enriching over creating; create no new concepts during curation. \
+Concepts you repair via edit_concept are machine-confirmed automatically \
+after the run — you cannot and must not write `verified` yourself; never \
+claim manual verification in your summary. \
 When done, summarize every move, enrichment, and merge you made.
 
 Current organization report:

@@ -54,8 +54,8 @@ A concept carrying just `type` is fully conformant.
 
 | Field | Notes |
 |---|---|
-| `generated` | `{ by, at }`. `by` is REQUIRED within `generated` (an actor, §7); `at` is an ISO 8601 datetime of the last meaningful content change. |
-| `verified` | List of `{ by, at }` verification events. A **bare mapping MUST be accepted as a one-element list** (athenaeum normalizes on read). Independent of `generated.at`. |
+| `generated` | `{ by, at }`. `by` is REQUIRED within `generated` (an actor, §7); `at` is an ISO 8601 datetime of the last meaningful content change. **Athenaeum extension sub-keys** (extension rule §4.1): `requested_by` (`human:<username>` — the local account whose MCP token requested the write) and `via` (`mcp_chat`); both are preserved on later edits/deprecations unless a new requester is supplied. |
+| `verified` | List of `{ by, at }` verification events. A **bare mapping MUST be accepted as a one-element list** (athenaeum normalizes on read). Independent of `generated.at`. **Athenaeum writer:** only the automatic post-curation verification (actor `athenaeum-curator/<version>`) appends entries — concepts are born unverified and `edit_concept` never touches `verified`; human review happens outside the loop (`human:` verifier). |
 
 **Trust tiers**, derived from `verified` (advisory, never access control):
 
@@ -96,6 +96,8 @@ Consumers resolve attribution through the matching `sources` entry, not by parsi
 | `computation` | Optional path to a file holding the computation; absent means the body `# Computation` fence is the computation. |
 | `executor` | `resource` (run instructions/code) + `receipt` (fields a run must return). |
 | `attester` | `resource`: deterministic (no-LLM) code that inspects a receipt and returns a verdict. |
+
+**Athenaeum v1 execution semantics** (sandbox): runtimes `postgres` and `sqlite` only — every other runtime is refused with an explicit v1 error; the body `# Computation` fenced SQL block only (a frontmatter `computation` path is refused); a single read-only statement (first keyword `SELECT` or `WITH`, at most one trailing semicolon — a semicolon inside a string literal is also rejected in v1); placeholder conventions `%(name)s` (postgres) / `:name` (sqlite), always driver-bound; connection-level read-only enforcement (postgres READ ONLY transaction + server-side statement timeout; sqlite `mode=ro` + `PRAGMA query_only` + interrupt timeout) plus a fixed row cap (500). Execution requires the admin toggle (`computation_execution_enabled`, default off) and runs against admin-managed shared connections (Fernet-encrypted credentials, decrypted only in process memory). The receipt `{ runtime, connection_id, columns, rows, row_count, truncated, duration_ms, executed_at }` is returned to the caller only — v1 never writes receipts back into frontmatter.
 
 ### Extension rule (§4.1)
 
@@ -141,7 +143,7 @@ Flat, date-grouped, newest-first:
 ```
 
 - Date headings MUST be ISO `YYYY-MM-DD`.
-- The leading bold word (`**Creation**`, `**Update**`, `**Deprecation**`, `**Move**`, `**Deletion**`, `**Initialization**`) is a convention, not a requirement.
+- The leading bold word (`**Creation**`, `**Update**`, `**Deprecation**`, `**Move**`, `**Deletion**`, `**Initialization**`, `**Verification**`) is a convention, not a requirement.
 - Athenaeum keeps a **single root log.md**; entries carry the optional `(requested by agent:<label>)` suffix for per-agent attribution. `log.md` (spec-level, human/agent-readable history) and `.athenaeum/versions/` snapshots (system-level audit/rollback) coexist — they answer different questions.
 - **Implementation deviation:** athenaeum's `log.md` is chronological (oldest first, newest appended at EOF) so appends stay O(1) — a deliberate deviation from the newest-first layout shown above, which is a spec §9 convention, not a conformance rule (the validator never enforced entry order and §8 does not cover it). Legacy newest-first files are flipped once on the first append; readers still get newest-first via `recent_entries`.
 
@@ -155,7 +157,7 @@ A bundle is conformant with OKF v0.2 if:
 
 Consumers MUST NOT reject a bundle for: missing optional fields, unknown `type` values, unknown frontmatter keys, broken links, or missing `index.md` files. Consumers MUST treat a bare `verified` mapping as a one-element list and MUST NOT reject a concept for missing any optional family.
 
-Athenaeum's validator maps these to **6 error classes** (the MUSTs plus REQUIRED-within fields and enum checks) and **8 warning classes** (conventions) — see `architecture.md` §5.
+Athenaeum's validator maps these to **6 error classes** (the MUSTs plus REQUIRED-within fields and enum checks) and **9 warning classes** (conventions) — see `architecture.md` §5.
 
 ## 9. Complete example: a concept as athenaeum writes it
 
@@ -198,7 +200,7 @@ directory. See also [compound writes](/architecture/compound-writes.md).
 
 Notes on the example:
 
-- `generated.by` follows the tool actor convention: `athenaeum-librarian/<version>` — never the requesting agent's identity (that goes into the `log.md` entry instead).
+- `generated.by` follows the tool actor convention: `athenaeum-librarian/<version>` — never the requesting agent's identity. The requesting HUMAN is recorded durably in the concept itself: `generated.requested_by` (`human:<username>`, the local Athenaeum account that issued the token) + `generated.via` (`mcp_chat`) — that pair is the authoritative in-concept provenance. The `log.md` `(requested by agent:<label>)` suffix remains the audit record of the requesting INTEGRATION (the MCP token label). Neither replaces the other.
 - No `verified` key, so this concept's trust tier is **unverified**; adding `verified: { by: human:someone, at: ... }` would make it human-reviewed.
 - Links are absolute bundle-relative; the footnote label joins to `sources[].id`.
 - Unknown extra keys would be preserved byte-intact by any athenaeum edit.

@@ -18,6 +18,17 @@
           Stateless MCP HTTP (no session resumability; takes effect on restart)
         </label>
       </div>
+      <div class="form-row">
+        <label class="checkbox-row">
+          <input type="checkbox" name="computation_execution_enabled" value="1" {% if computation_execution_enabled %}checked{% endif %}>
+          Enable computation execution (takes effect immediately; default off)
+        </label>
+        <p class="muted text-sm mt-1">
+          Allows MCP clients and the librarian to execute Attested Computation
+          concepts read-only against the shared
+          <a href="/admin/connections">runtime connections</a>.
+        </p>
+      </div>
       <button type="submit" class="btn btn-primary">Save</button>
     </form>
   </div>

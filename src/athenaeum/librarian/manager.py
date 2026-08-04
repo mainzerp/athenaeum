@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from athenaeum import db
+from athenaeum.computation import ComputationRunner
 from athenaeum.embeddings import EmbeddingService, EmbedStatusRegistry
 from athenaeum.fts import FtsIndex
 from athenaeum.librarian.agent import Librarian, LibrarianConfig
@@ -65,6 +66,10 @@ class LibrarianManager:
         # (Stream C) supplies the real decryptor at integration.
         # None = value is plaintext.
         self._key_decryptor = key_decryptor
+        # One shared runner for Attested Computations (0.21.0): it owns the
+        # toggle check, connection lookup, and credential decryption, so
+        # neither the MCP layer nor the Librarian needs the decryptor.
+        self.computation_runner = ComputationRunner(self.db_path, self._key_decryptor)
         self._backend_factory = backend_factory
         self._provider_factory = provider_factory
         self._embedding_provider_factory = embedding_provider_factory
@@ -260,6 +265,7 @@ class LibrarianManager:
             embedding_service=embedding_service,
             run_gate=self.run_gate,
             reranker=reranker,
+            computation_runner=self.computation_runner,
         )
 
     def get(self, user_id: str) -> Librarian:

@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.20.0**
+Current version: **0.21.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,41 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.21.0
+
+Trust surface: deterministic curator verification (trust tiers), durable
+librarian provenance, and sandboxed Attested Computation execution behind an
+admin toggle. (Commit hashes added at release time.)
+
+- **Curator trust tiers:** after every maintain/curate run (interactive or
+  nightly scheduler), a deterministic post-step machine-confirms exactly the
+  concepts the curator repaired (`updated` writes only) by appending
+  `verified: [{by: athenaeum-curator/<version>, at}]` via the new
+  `LibraryBackend.verify_concept` — the sole writer of `verified`
+  (append-only, snapshot-covered, no `generated.at` refresh; `create_concept`
+  strips a caller-supplied `verified`). Maintain/curate responses gain a
+  `verified` receipt list and the summary a "Post-run verification" line.
+  New validator warning `verified-missing-by` (9 warning classes now).
+- **Librarian provenance:** MCP-chat `store_knowledge`/`update_knowledge`
+  writes record durable `generated.requested_by: human:<username>` +
+  `generated.via: mcp_chat` (the local account that issued the token);
+  `generated.by` stays `athenaeum-librarian/<version>`. Edits/deprecations
+  preserve the sub-keys unless a new requester is supplied; a caller-forged
+  `generated` mapping is replaced wholesale at creation. The log.md
+  `(requested by agent:<label>)` suffix remains the integration audit record.
+- **Attested Computations (v1):** `type: Attested Computation` concepts with
+  `runtime: postgres|sqlite` are executable — new external MCP tool
+  `run_computation` (7 external tools now) and a same-named internal
+  librarian-loop tool (11 internal tools; deliberately not a write action).
+  Sandbox: admin execution toggle (default off, read live per execution),
+  admin-managed shared `runtime_connections` (Fernet-encrypted write-only
+  passwords, new Admin WebUI page), single read-only `SELECT`/`WITH`
+  statement with driver-bound parameters, READ ONLY transaction / `mode=ro`
+  enforcement, statement timeout, fixed row cap (500). Receipts
+  (`columns`/`rows`/`row_count`/`truncated`/`duration_ms`/`executed_at`) are
+  returned to the caller only — never written back into frontmatter.
+  New dependency: `psycopg[binary]` 3.x (pinned 3.3.4).
 
 ### 0.20.0
 

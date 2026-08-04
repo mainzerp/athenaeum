@@ -22,7 +22,9 @@ from pathlib import Path
 from .frontmatter import write_text_atomic
 
 LOG_TITLE = "# Directory Update Log"
-KINDS = frozenset({"Initialization", "Creation", "Update", "Deprecation", "Move", "Deletion"})
+KINDS = frozenset(
+    {"Initialization", "Creation", "Update", "Deprecation", "Move", "Deletion", "Verification"}
+)
 
 _HEADING_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$", re.M)
 _HEAD_WINDOW = 4096  # the title + first heading always fit well within this

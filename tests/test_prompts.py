@@ -46,6 +46,32 @@ def test_default_prompt_pins_markdown_link_syntax():
     assert "invisible to the link graph" in DEFAULT_SYSTEM_PROMPT
 
 
+def test_default_prompt_pins_trust_vocabulary():
+    """verified is written ONLY by the automatic post-curation verification."""
+    assert "appended only by the automatic post-curation" in DEFAULT_SYSTEM_PROMPT
+    assert "athenaeum-curator/<version>" in DEFAULT_SYSTEM_PROMPT
+    assert "human:" in DEFAULT_SYSTEM_PROMPT
+
+
+def test_curator_templates_pin_automatic_verification():
+    """MAINTAIN/CURATE: repairs are machine-confirmed; never claim manual verification."""
+    from athenaeum.librarian.prompts import CURATE_TASK_TEMPLATE, MAINTAIN_TASK_TEMPLATE
+
+    for template in (MAINTAIN_TASK_TEMPLATE, CURATE_TASK_TEMPLATE):
+        assert "machine-confirmed automatically" in template
+        assert "must not write `verified` yourself" in template
+        assert "never claim manual verification" in template
+
+
+def test_default_prompt_pins_attested_computation_rule():
+    """Attested Computations: execute and answer from the receipt (F3)."""
+    assert "`type: Attested Computation`" in DEFAULT_SYSTEM_PROMPT
+    assert "`run_computation` tool is available" in DEFAULT_SYSTEM_PROMPT
+    assert "answer from the receipt" in DEFAULT_SYSTEM_PROMPT
+    assert "coverage gap" in DEFAULT_SYSTEM_PROMPT
+    assert "trust tier is unchanged by execution" in DEFAULT_SYSTEM_PROMPT
+
+
 def test_maintain_preamble_pins_markdown_link_syntax():
     status = {
         "healthy": False,

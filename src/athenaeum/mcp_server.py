@@ -1,6 +1,6 @@
 """Athenaeum MCP server (FastMCP 3.x, Streamable HTTP).
 
-Contract: plan sections 3.1 (six external tools), 3.1a (seed injection),
+Contract: plan sections 3.1 (seven external tools), 3.1a (seed injection),
 and Decision 4 (bearer-token auth seam; OAuth 2.1 + PKCE deferred).
 
 - Auth: ``Authorization: Bearer <token>`` -> SHA-256 hex lookup in
@@ -47,6 +47,7 @@ from starlette.requests import Request
 
 from athenaeum import db
 from athenaeum.activity import ActivityMiddleware, ActivityRegistry
+from athenaeum.computation import ComputationError
 from athenaeum.identity import _identity_var, get_current_identity
 from athenaeum.librarian.agent import LibrarianNoWriteError
 from athenaeum.librarian.gate import AgentRunBusyError
@@ -65,6 +66,8 @@ BASE_INSTRUCTIONS = (
     "knowledge with update_knowledge, inspect library health with "
     "library_status, drive graph repair with library_maintain, and tidy, "
     "reorganize, and consolidate the library with library_curate. "
+    "Execute attested computations with run_computation (when the admin has "
+    "enabled execution). "
     "Trust tiers (unverified / machine-confirmed / human-reviewed) and "
     "staleness flags in responses tell you how much to rely on each concept."
 )
@@ -400,6 +403,23 @@ def _validate_images(images: list[dict] | None) -> list[dict] | None:
     return validated
 
 
+def _requested_by(db_path: Path, user_id: str) -> str | None:
+    """``human:<username>`` for durable provenance; None when unresolvable.
+
+    Never raises: provenance resolution must never break a store. The identity
+    tuple stays (user_id, label) — the username is looked up here instead.
+    """
+    try:
+        with db.connect(db_path) as conn:
+            row = db.get_user_by_id(conn, user_id)
+    except Exception:
+        logger.warning("requested_by resolution failed for user %s", user_id, exc_info=True)
+        return None
+    if row is None:
+        return None
+    return f"human:{row['username']}"
+
+
 def create_mcp_server(
     manager: LibrarianManager,
     *,
@@ -409,7 +429,7 @@ def create_mcp_server(
     activity_db_path: Path | None = None,
     activity_registry: ActivityRegistry | None = None,
 ) -> FastMCP:
-    """Build the FastMCP instance: auth + seed middleware, 6 external tools.
+    """Build the FastMCP instance: auth + seed middleware, 7 external tools.
 
     When both ``activity_db_path`` and ``activity_registry`` are given, an
     ActivityMiddleware is registered after SeedMiddleware (innermost; T7) so
@@ -448,6 +468,9 @@ def create_mcp_server(
 linked into the stored concepts."""
         user_id, label = _identity()
         validated_images = _validate_images(images)
+        # Durable provenance (A1: sync sqlite lookup off-loop): the local
+        # Athenaeum account that issued the token, recorded on every write.
+        requested_by = await asyncio.to_thread(_requested_by, manager.db_path, user_id)
         async with _agent_run(
             manager, user_id, label, "store_knowledge", for_client=True
         ) as librarian:
@@ -458,6 +481,8 @@ linked into the stored concepts."""
                 topic_hint=topic_hint,
                 images=validated_images,
                 agent_label=label,
+                requested_by=requested_by,
+                via="mcp_chat",
             )
         # The trace session closed when the with-block exited (plan step 3.1).
         await _refresh_seed(user_id, ctx)
@@ -471,10 +496,13 @@ linked into the stored concepts."""
     async def update_knowledge(instruction: str, ctx: Context = None) -> dict:
         """Change or correct existing knowledge; the librarian locates the target concepts."""
         user_id, label = _identity()
+        requested_by = await asyncio.to_thread(_requested_by, manager.db_path, user_id)
         async with _agent_run(
             manager, user_id, label, "update_knowledge", for_client=True
         ) as librarian:
-            result = await librarian.handle_update(instruction, agent_label=label)
+            result = await librarian.handle_update(
+                instruction, agent_label=label, requested_by=requested_by, via="mcp_chat"
+            )
         await _refresh_seed(user_id, ctx)
         try:
             await librarian.sync_embeddings(result.get("stored") or result.get("actions") or [])
@@ -531,6 +559,40 @@ consolidate duplicates; no-op when well-organized."""
         except Exception:
             logger.exception("embedding sync failed for user %s", user_id)
         return result
+
+    @mcp.tool(
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        }
+    )
+    async def run_computation(
+        concept_id: str, connection_id: str, parameters: dict | None = None
+    ) -> dict:
+        """Execute an Attested Computation concept's SQL (body # Computation fence)
+        against an admin-configured connection; returns the verified receipt.
+        Requires the admin execution toggle (default off). ``concept_id`` is the
+        extensionless concept id used in all responses."""
+        user_id, _ = _identity()
+        # The per-user librarian is only the library/backend handle
+        # (library_status precedent) — the LLM is NOT involved. Arguments are
+        # references only (concept id, connection id, parameters), never
+        # credentials, so the activity journal is safe.
+        librarian = await asyncio.to_thread(manager.get, user_id)
+        try:
+            return await asyncio.to_thread(
+                manager.computation_runner.run,
+                librarian.backend,
+                concept_id + ".md",
+                connection_id,
+                parameters,
+            )
+        except ComputationError as exc:
+            raise ToolError(str(exc)) from exc
+        except Exception as exc:
+            raise _unexpected_tool_error("run_computation", exc) from exc
 
     # @mcp.tool returns the original function; docstrings are the base
     # descriptions the seed middleware composes per request.

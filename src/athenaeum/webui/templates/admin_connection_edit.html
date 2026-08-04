@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Edit connection - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Edit connection</h1>
+  <p class="subtitle">{{ c["label"] }} ({{ c["runtime"] }})</p>
+</div>
+
+<div class="card">
+  <div class="card-header">Connection</div>
+  <div class="card-body">
+    <form method="post" action="/admin/connections/{{ c['id'] }}/edit" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="label">Label</label>
+        <input class="input-field" type="text" id="label" name="label" value="{{ c['label'] }}" required>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="runtime">Runtime</label>
+        <select class="input-field" id="runtime" name="runtime">
+          {% for r in runtimes %}
+          <option value="{{ r }}" {% if c["runtime"] == r %}selected{% endif %}>{{ r }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="host">Host</label>
+        <input class="input-field" type="text" id="host" name="host" value="{{ c['host'] or '' }}">
+        <p class="muted text-sm mt-1">postgres only.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="port">Port</label>
+        <input class="input-field" type="number" id="port" name="port" min="1" max="65535" value="{{ c['port'] if c['port'] is not none else '' }}">
+        <p class="muted text-sm mt-1">postgres only.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="dbname">Database / file path</label>
+        <input class="input-field" type="text" id="dbname" name="dbname" value="{{ c['dbname'] or '' }}">
+        <p class="muted text-sm mt-1">postgres: database name. sqlite: absolute file path (opened read-only).</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="username">Username</label>
+        <input class="input-field" type="text" id="username" name="username" value="{{ c['username'] or '' }}">
+        <p class="muted text-sm mt-1">postgres only. Use a read-only role: statements execute inside a READ ONLY transaction.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="password">Password</label>
+        <input class="input-field" type="password" id="password" name="password" value="" autocomplete="new-password" placeholder="{{ 'Set (leave empty to keep)' if password_set else 'Not set' }}">
+        <p class="muted text-sm mt-1">postgres only; leave empty to keep the stored password.</p>
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+      <a class="btn btn-secondary" href="/admin/connections">Cancel</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

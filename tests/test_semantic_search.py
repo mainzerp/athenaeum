@@ -127,8 +127,9 @@ async def test_search_semantic_fallback_never_dumps_library(tmp_path):
 
 def test_search_semantic_schema_advertised():
     names = [t["name"] for t in TOOL_SCHEMAS]
-    assert len(names) == 10
+    assert len(names) == 11  # 10 backend tools + run_computation (0.21.0)
     assert names.count("search_semantic") == 1
+    assert names.count("run_computation") == 1
     schema = next(t for t in TOOL_SCHEMAS if t["name"] == "search_semantic")
     assert schema["parameters"]["required"] == ["query"]
 

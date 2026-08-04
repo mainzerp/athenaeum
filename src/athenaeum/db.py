@@ -180,6 +180,27 @@ _SCHEMA: list[tuple[str, list[tuple[str, str | None, str | None]], list[str]]] =
         [],
     ),
     (
+        # Admin-managed SHARED execution connections for Attested Computations
+        # (0.21.0): deliberately NO user_id column — every user's computations
+        # may reference them. 'runtime' is 'postgres'|'sqlite' (validated in
+        # CRUD/routes, matching provider_configs style); 'dbname' carries the
+        # postgres database name or the sqlite ABSOLUTE file path.
+        "runtime_connections",
+        [
+            ("id", "id TEXT PRIMARY KEY", None),  # UUID4
+            ("label", "label TEXT NOT NULL", None),
+            ("runtime", "runtime TEXT NOT NULL", None),  # 'postgres'|'sqlite'
+            ("host", "host TEXT", None),
+            ("port", "port INTEGER", None),
+            ("dbname", "dbname TEXT", None),
+            ("username", "username TEXT", None),
+            # Fernet ciphertext, write-only, never rendered to HTML
+            ("password_enc", "password_enc TEXT", None),
+            ("created_at", "created_at TEXT NOT NULL", None),  # ISO 8601 UTC via utcnow()
+        ],
+        [],
+    ),
+    (
         "embeddings",
         [
             ("user_id", "user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE", None),
@@ -706,6 +727,79 @@ def set_default_provider_config(conn: sqlite3.Connection, user_id: str, connecti
             "UPDATE provider_configs SET is_default = 1 WHERE id = ? AND user_id = ?",
             (connection_id, user_id),
         )
+
+
+# --- runtime connections (Attested Computations, admin-managed shared) -------
+
+
+def create_runtime_connection(
+    conn: sqlite3.Connection,
+    *,
+    label: str,
+    runtime: str,
+    host: str | None = None,
+    port: int | None = None,
+    dbname: str | None = None,
+    username: str | None = None,
+    password_enc: str | None = None,
+) -> sqlite3.Row:
+    """Insert one shared execution connection (admin-managed; no user scope)."""
+    connection_id = str(uuid.uuid4())
+    with conn:
+        conn.execute(
+            "INSERT INTO runtime_connections"
+            " (id, label, runtime, host, port, dbname, username, password_enc, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (connection_id, label, runtime, host, port, dbname, username, password_enc, utcnow()),
+        )
+    return get_runtime_connection(conn, connection_id)
+
+
+def list_runtime_connections(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """List view WITHOUT password_enc (write-only; never rendered to HTML)."""
+    return conn.execute(
+        "SELECT id, label, runtime, host, port, dbname, username, created_at,"
+        " password_enc IS NOT NULL AS password_set"
+        " FROM runtime_connections ORDER BY label"
+    ).fetchall()
+
+
+def get_runtime_connection(conn: sqlite3.Connection, connection_id: str) -> sqlite3.Row | None:
+    """Full row incl. password_enc — the execution path needs the ciphertext."""
+    return conn.execute(
+        "SELECT * FROM runtime_connections WHERE id = ?", (connection_id,)
+    ).fetchone()
+
+
+def update_runtime_connection(
+    conn: sqlite3.Connection,
+    connection_id: str,
+    *,
+    label: str,
+    runtime: str,
+    host: str | None,
+    port: int | None,
+    dbname: str | None,
+    username: str | None,
+    password_enc: str | None = None,
+) -> None:
+    """Save one connection; ``password_enc=None`` keeps the stored ciphertext."""
+    with conn:
+        conn.execute(
+            "UPDATE runtime_connections SET label = ?, runtime = ?, host = ?, port = ?,"
+            " dbname = ?, username = ? WHERE id = ?",
+            (label, runtime, host, port, dbname, username, connection_id),
+        )
+        if password_enc is not None:
+            conn.execute(
+                "UPDATE runtime_connections SET password_enc = ? WHERE id = ?",
+                (password_enc, connection_id),
+            )
+
+
+def delete_runtime_connection(conn: sqlite3.Connection, connection_id: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM runtime_connections WHERE id = ?", (connection_id,))
 
 
 def update_librarian_config(

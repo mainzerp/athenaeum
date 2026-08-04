@@ -10,6 +10,7 @@ Self-contained: local fakes mirror the test_mcp_tools.py stand-ins.
 import asyncio
 import base64
 import json
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -41,7 +42,9 @@ class FakeBackend:
     def search_metadata(self, field=None, value=None) -> list[dict]:
         return []
 
-    def create_concept(self, path, frontmatter, body, *, agent_label=None) -> dict:
+    def create_concept(
+        self, path, frontmatter, body, *, agent_label=None, requested_by=None, via=None
+    ) -> dict:
         self.docs[path] = {"frontmatter": dict(frontmatter), "body": body}
         return {"id": path[: -len(".md")], "action": "created"}
 
@@ -166,6 +169,37 @@ def test_registry_add_remove_snapshot():
 
 
 # --- middleware journaling ------------------------------------------------------
+
+
+async def test_run_computation_journal_has_no_credentials(tmp_path, monkeypatch):
+    """Threat-model pin: journaled arguments are references (concept id,
+    connection id, parameters) — never the connection's stored credential."""
+    server, manager, backends, providers, registry, db_path = make_stack(tmp_path)
+    target = tmp_path / "target.db"
+    conn = sqlite3.connect(target)
+    conn.execute("CREATE TABLE items (name TEXT)")
+    conn.execute("INSERT INTO items VALUES ('a')")
+    conn.commit()
+    conn.close()
+    with db_module.connect(db_path) as conn:
+        row = db_module.create_runtime_connection(
+            conn, label="L", runtime="sqlite", dbname=str(target), password_enc="supersecret-pw"
+        )
+        db_module.set_app_setting(conn, "computation_execution_enabled", "1")
+    backends["user-a"].docs["/q.md"] = {
+        "frontmatter": {"title": "Q", "type": "Attested Computation", "runtime": "sqlite"},
+        "body": "# Computation\n\n```sql\nSELECT name FROM items\n```\n",
+    }
+    set_identity(monkeypatch, ("user-a", "agent-a"))
+    async with Client(server) as client:
+        await client.call_tool("run_computation", {"concept_id": "/q", "connection_id": row["id"]})
+    rows = journal_rows(db_path)
+    assert len(rows) == 1
+    arguments = rows[0]["arguments"]
+    assert "/q" in arguments
+    assert row["id"] in arguments
+    assert "supersecret-pw" not in arguments
+    assert rows[0]["outcome"] == "ok"
 
 
 async def test_middleware_journals_successful_call(tmp_path, monkeypatch):

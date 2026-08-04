@@ -40,6 +40,8 @@ def _hash(token: str) -> str:
 class FakeBackend:
     """In-memory LibraryBackend stand-in; seed_marker changes on writes."""
 
+    ACTOR = "athenaeum-librarian/test"
+
     def __init__(self, healthy: bool = True):
         self.docs: dict[str, dict] = {}
         self.healthy = healthy
@@ -48,6 +50,17 @@ class FakeBackend:
         # Real dir the A10 scan pass-throughs delegate to (scheduler tests
         # point it at the user's on-disk library root).
         self.scan_root = None
+
+    def _inject_generated(self, fm: dict, *, requested_by, via, preserve: bool) -> None:
+        """Mirror of LibraryBackend._inject_generated (same contract)."""
+        generated = dict(fm.get("generated") or {}) if preserve else {}
+        generated["by"] = self.ACTOR
+        generated["at"] = "2026-01-01T00:00:00+00:00"
+        if requested_by is not None:
+            generated["requested_by"] = requested_by
+        if via is not None:
+            generated["via"] = via
+        fm["generated"] = generated
 
     def organization_findings(self, *, since=None) -> dict:
         return organize_mod.organization_findings(self.scan_root, since=since)
@@ -78,17 +91,33 @@ class FakeBackend:
         self.calls.append(("search_metadata", field, value))
         return []
 
-    def create_concept(self, path, frontmatter, body, *, agent_label=None) -> dict:
-        self.calls.append(("create_concept", path, agent_label))
-        self.docs[path] = {"frontmatter": dict(frontmatter), "body": body}
+    def create_concept(
+        self, path, frontmatter, body, *, agent_label=None, requested_by=None, via=None
+    ) -> dict:
+        self.calls.append(("create_concept", path, agent_label, requested_by, via))
+        fm = dict(frontmatter)
+        fm.pop("verified", None)  # R9: born unverified, like the real backend
+        self._inject_generated(fm, requested_by=requested_by, via=via, preserve=False)
+        self.docs[path] = {"frontmatter": fm, "body": body}
         self.seed_marker += 1  # any write invalidates the seed
         return {"id": path[: -len(".md")], "action": "created"}
 
     def edit_concept(
-        self, path, *, frontmatter_patch=None, remove_keys=None, new_body=None, agent_label=None
+        self,
+        path,
+        *,
+        frontmatter_patch=None,
+        remove_keys=None,
+        new_body=None,
+        agent_label=None,
+        requested_by=None,
+        via=None,
     ) -> dict:
-        self.calls.append(("edit_concept", path, agent_label))
+        self.calls.append(("edit_concept", path, agent_label, requested_by, via))
         self.docs[path]["frontmatter"].update(frontmatter_patch or {})
+        self._inject_generated(
+            self.docs[path]["frontmatter"], requested_by=requested_by, via=via, preserve=True
+        )
         if new_body is not None:
             self.docs[path]["body"] = new_body
         self.seed_marker += 1
@@ -100,9 +129,12 @@ class FakeBackend:
         self.seed_marker += 1
         return {"id": new_path[: -len(".md")], "action": "moved", "links_rewritten": 0}
 
-    def deprecate_concept(self, path, *, agent_label=None) -> dict:
-        self.calls.append(("deprecate_concept", path, agent_label))
+    def deprecate_concept(self, path, *, agent_label=None, requested_by=None, via=None) -> dict:
+        self.calls.append(("deprecate_concept", path, agent_label, requested_by, via))
         self.docs[path]["frontmatter"]["status"] = "deprecated"
+        self._inject_generated(
+            self.docs[path]["frontmatter"], requested_by=requested_by, via=via, preserve=True
+        )
         self.seed_marker += 1
         return {"id": path[: -len(".md")], "action": "deprecated"}
 
@@ -111,6 +143,12 @@ class FakeBackend:
         del self.docs[path]
         self.seed_marker += 1
         return {"id": path[: -len(".md")], "action": "deleted", "inbound_links": []}
+
+    def verify_concept(self, path, *, by, at=None, agent_label=None) -> dict:
+        self.calls.append(("verify_concept", path, by, agent_label))
+        entries = self.docs[path]["frontmatter"].setdefault("verified", [])
+        entries.append({"by": by, "at": at or "2026-01-01T00:00:00+00:00"})
+        return {"id": path[: -len(".md")], "action": "verified"}
 
     def link_check(self, path=None) -> list[dict]:
         self.calls.append(("link_check", path))
@@ -398,6 +436,7 @@ async def test_library_maintain_noop_when_healthy(tmp_path, monkeypatch):
         "actions": [],
         "summary": "Library is healthy; no maintenance needed.",
         "healthy": True,
+        "verified": [],
     }
     assert providers["user-b"].calls == []  # no LLM call on the no-op path
 
@@ -412,6 +451,7 @@ async def test_library_curate_noop_when_well_organized(tmp_path, monkeypatch):
     assert result.data["actions"] == []
     assert result.data["summary"] == "Library is well-organized; nothing to curate."
     assert result.data["organized"] is True
+    assert result.data["verified"] == []
     assert result.data["findings"]["concepts_scanned"] == 0
     assert result.data["health_after"] == {"healthy": True, "orphans": 0}
     assert providers["user-b"].calls == []  # no LLM call on the no-op path
@@ -489,6 +529,200 @@ async def test_store_knowledge_reports_contradictions(tmp_path, monkeypatch):
     assert result.data["summary"].endswith(
         "Post-run check: 1 contradiction(s) resolved in place: /a."
     )
+
+
+# --- durable provenance (requested_by / via) -----------------------------------
+
+
+async def test_store_knowledge_writes_durable_provenance(tmp_path, monkeypatch):
+    """MCP-chat stores record generated.requested_by/via on the stored concept."""
+    server, manager, backends, providers, _ = make_stack(
+        tmp_path,
+        {
+            "user-a": [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="write_concept",
+                            arguments={
+                                "path": "/new.md",
+                                "frontmatter": {"title": "New", "type": "Note"},
+                                "body": "fresh",
+                            },
+                        )
+                    ]
+                ),
+                LLMResponse(text="stored"),
+            ]
+        },
+    )
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        await client.call_tool("store_knowledge", {"content": "new knowledge"})
+    generated = backends["user-a"].docs["/new.md"]["frontmatter"]["generated"]
+    assert generated["requested_by"] == "human:alice"  # user-a's username
+    assert generated["via"] == "mcp_chat"
+    assert generated["by"] == backends["user-a"].ACTOR
+
+
+async def test_update_knowledge_rewrites_provenance(tmp_path, monkeypatch):
+    """An update with a new requester overwrites requested_by; by stays the actor."""
+    server, manager, backends, providers, _ = make_stack(
+        tmp_path,
+        {
+            "user-a": [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="edit_concept",
+                            arguments={"path": "/a.md", "new_body": "fixed"},
+                        )
+                    ]
+                ),
+                LLMResponse(text="updated"),
+            ]
+        },
+    )
+    backends["user-a"].docs["/a.md"] = {
+        "frontmatter": {
+            "title": "A",
+            "type": "Note",
+            "generated": {
+                "by": "athenaeum-librarian/test",
+                "at": "2026-01-01T00:00:00+00:00",
+                "requested_by": "human:bob",
+                "via": "mcp_chat",
+            },
+        },
+        "body": "old",
+    }
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        await client.call_tool("update_knowledge", {"instruction": "fix a"})
+    generated = backends["user-a"].docs["/a.md"]["frontmatter"]["generated"]
+    assert generated["requested_by"] == "human:alice"  # new requester overwrites
+    assert generated["via"] == "mcp_chat"
+    assert generated["by"] == backends["user-a"].ACTOR
+
+
+async def test_curator_run_preserves_provenance(tmp_path, monkeypatch):
+    """A curator repair (no requester) never drops stored requested_by/via."""
+    server, manager, backends, providers, _ = make_stack(
+        tmp_path,
+        {
+            "user-a": [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="edit_concept",
+                            arguments={"path": "/a.md", "new_body": "fixed"},
+                        )
+                    ]
+                ),
+                LLMResponse(text="repaired"),
+            ]
+        },
+    )
+    backends["user-a"].healthy = False  # wake the maintain loop
+    backends["user-a"].docs["/a.md"] = {
+        "frontmatter": {
+            "title": "A",
+            "type": "Note",
+            "generated": {
+                "by": "athenaeum-librarian/test",
+                "at": "2026-01-01T00:00:00+00:00",
+                "requested_by": "human:alice",
+                "via": "mcp_chat",
+            },
+        },
+        "body": "old",
+    }
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        await client.call_tool("library_maintain", {})
+    generated = backends["user-a"].docs["/a.md"]["frontmatter"]["generated"]
+    assert generated["requested_by"] == "human:alice"
+    assert generated["via"] == "mcp_chat"
+
+
+# --- run_computation (Attested Computations) -------------------------------------
+
+
+def computation_doc() -> dict:
+    return {
+        "frontmatter": {
+            "title": "Q",
+            "type": "Attested Computation",
+            "runtime": "sqlite",
+            "parameters": [{"name": "target", "type": "string", "required": True}],
+        },
+        "body": "# Computation\n\n```sql\nSELECT name, n FROM items WHERE name = :target\n```\n",
+    }
+
+
+def setup_computation_db(tmp_path, *, password=None):
+    """Seed a sqlite target file + a shared admin connection; enable the toggle."""
+    import sqlite3 as sqlite3_mod
+
+    target = tmp_path / "target.db"
+    conn = sqlite3_mod.connect(target)
+    conn.execute("CREATE TABLE items (name TEXT, n INTEGER)")
+    conn.executemany("INSERT INTO items VALUES (?, ?)", [("a", 1), ("b", 2)])
+    conn.commit()
+    conn.close()
+    db_path = tmp_path / "app.db"  # make_db's location
+    with db_module.connect(db_path) as conn:
+        row = db_module.create_runtime_connection(
+            conn, label="L", runtime="sqlite", dbname=str(target), password_enc=password
+        )
+        db_module.set_app_setting(conn, "computation_execution_enabled", "1")
+        return row["id"]
+
+
+async def test_run_computation_toggle_off_refused(tmp_path, monkeypatch):
+    server, manager, backends, providers, _ = make_stack(tmp_path)
+    backends["user-a"].docs["/q.md"] = computation_doc()
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="disabled by the admin"):
+            await client.call_tool("run_computation", {"concept_id": "/q", "connection_id": "any"})
+
+
+async def test_run_computation_sqlite_receipt(tmp_path, monkeypatch):
+    server, manager, backends, providers, _ = make_stack(tmp_path)
+    backends["user-a"].docs["/q.md"] = computation_doc()
+    connection_id = setup_computation_db(tmp_path)
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "run_computation",
+            {"concept_id": "/q", "connection_id": connection_id, "parameters": {"target": "a"}},
+        )
+    receipt = result.data
+    assert receipt["runtime"] == "sqlite"
+    assert receipt["connection_id"] == connection_id
+    assert receipt["columns"] == ["name", "n"]
+    assert receipt["rows"] == [["a", 1]]
+    assert receipt["row_count"] == 1
+    assert receipt["truncated"] is False
+    assert providers["user-a"].calls == []  # no LLM involved (library_status precedent)
+
+
+async def test_run_computation_shared_across_users(tmp_path, monkeypatch):
+    """Admin-managed connections are shared: user B references the same row."""
+    server, manager, backends, providers, _ = make_stack(tmp_path)
+    backends["user-b"].docs["/q.md"] = computation_doc()
+    connection_id = setup_computation_db(tmp_path)
+    set_identity(monkeypatch, "user-b", "agent-b")
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "run_computation",
+            {"concept_id": "/q", "connection_id": connection_id, "parameters": {"target": "b"}},
+        )
+    assert result.data["rows"] == [["b", 2]]
 
 
 # --- trace sessions (step 3.1) -----------------------------------------------

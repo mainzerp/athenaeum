@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Connections - Athenaeum{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Runtime connections</h1>
+  <p class="subtitle">Shared execution connections for Attested Computations, managed by admins; usable by every user's computations.</p>
+</div>
+{% if saved %}<div class="js-flash" data-type="success" data-message="Saved." hidden></div>{% endif %}
+
+<div class="card">
+  <div class="card-header">Create connection</div>
+  <div class="card-body">
+    <form method="post" action="/admin/connections" data-loading>
+      {{ csrf_input(request) }}
+      <div class="form-row">
+        <label class="input-label" for="label">Label</label>
+        <input class="input-field" type="text" id="label" name="label" required>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="runtime">Runtime</label>
+        <select class="input-field" id="runtime" name="runtime">
+          {% for r in runtimes %}
+          <option value="{{ r }}">{{ r }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="host">Host</label>
+        <input class="input-field" type="text" id="host" name="host" value="">
+        <p class="muted text-sm mt-1">postgres only.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="port">Port</label>
+        <input class="input-field" type="number" id="port" name="port" min="1" max="65535" value="">
+        <p class="muted text-sm mt-1">postgres only.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="dbname">Database / file path</label>
+        <input class="input-field" type="text" id="dbname" name="dbname" value="">
+        <p class="muted text-sm mt-1">postgres: database name. sqlite: absolute file path (opened read-only).</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="username">Username</label>
+        <input class="input-field" type="text" id="username" name="username" value="">
+        <p class="muted text-sm mt-1">postgres only. Use a read-only role: statements execute inside a READ ONLY transaction.</p>
+      </div>
+      <div class="form-row">
+        <label class="input-label" for="password">Password</label>
+        <input class="input-field" type="password" id="password" name="password" value="" autocomplete="new-password">
+        <p class="muted text-sm mt-1">postgres only; stored encrypted, never shown again.</p>
+      </div>
+      <button type="submit" class="btn btn-primary">Create connection</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Connections</div>
+  {% if connections %}
+  <table>
+    <thead>
+      <tr><th>Label</th><th>Runtime</th><th>Target</th><th>Username</th><th>Password</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for c in connections %}
+      <tr>
+        <td>{{ c["label"] }}</td>
+        <td>{{ c["runtime"] }}</td>
+        <td>
+          {% if c["runtime"] == "postgres" %}
+          {{ c["host"] }}:{{ c["port"] }}/{{ c["dbname"] }}
+          {% else %}
+          {{ c["dbname"] }}
+          {% endif %}
+        </td>
+        <td>{{ c["username"] or "—" }}</td>
+        <td>
+          {% if c["password_set"] %}
+          <span class="badge badge-success">Set</span>
+          {% else %}
+          <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <div class="flex items-center gap-2">
+            <a class="btn btn-sm btn-secondary" href="/admin/connections/{{ c['id'] }}/edit">Edit</a>
+            <form method="post" action="/admin/connections/{{ c['id'] }}/delete" class="inline" data-confirm="Delete connection '{{ c['label'] }}'?">
+              {{ csrf_input(request) }}
+              <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+            </form>
+            <form class="inline">
+              {{ csrf_input(request) }}
+              <button type="button" class="btn btn-sm btn-secondary" data-loading
+                      hx-post="/admin/connections/{{ c['id'] }}/test" hx-target="#test-result-{{ c['id'] }}" hx-swap="innerHTML">Test</button>
+            </form>
+          </div>
+          <div id="test-result-{{ c['id'] }}" class="mt-2"></div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    <h3>No connections yet</h3>
+    <p class="muted">Create a connection above, then enable computation execution on the Server page.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

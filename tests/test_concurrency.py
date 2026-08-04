@@ -338,7 +338,7 @@ async def test_dispatch_offloads_blocking_backend_calls():
     release = threading.Event()
 
     class SlowBackend:
-        def create_concept(self, path, frontmatter, body, *, agent_label=None):
+        def create_concept(self, path, frontmatter, body, *, agent_label=None, **kwargs):
             call_threads.append(threading.get_ident())
             entered.set()
             assert release.wait(timeout=10)

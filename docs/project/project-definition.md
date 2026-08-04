@@ -13,7 +13,8 @@ Athenaeum is **multi-user**: every user gets their own library *and* their own l
 ## Core concepts
 
 - **OKF bundle per user** — one conformant OKF v0.2 bundle directory per user, stored under `data/users/<user_id>/library/`, with dot-dir side stores for shadow-copy snapshots (`.athenaeum/versions/`), query-path traces (`.traces/`), the `store_knowledge` payload archive (`.athenaeum/payloads/`, 0.20.0), and content-addressed image assets (`.athenaeum/assets/`, 0.20.0). See `reference.md` for the format and `architecture.md` for the storage model.
-- **Librarian agent** — a per-user, in-process LLM agent that is the *only writer* to the bundle. It exposes 6 intent-based MCP tools to the outside and drives a 10-tool internal view over the library backend.
+- **Librarian agent** — a per-user, in-process LLM agent that is the *only writer* to the bundle. It exposes 7 intent-based MCP tools to the outside and drives an 11-tool internal view over the library backend.
+- **Trust tiers and provenance** (0.21.0) — concepts the curator repairs are machine-confirmed automatically (`verified` by `athenaeum-curator/<version>`); MCP-chat writes carry durable `generated.requested_by: human:<username>` + `generated.via: mcp_chat` provenance; Attested Computation concepts (`postgres`/`sqlite`) are executable read-only behind an admin toggle, returning caller-only receipts.
 - **MCP server** — Streamable HTTP transport, bearer-token auth, mounted in the same process as the WebUI.
 - **WebUI** — server-rendered administration and inspection UI: librarian configuration (named provider connections with a default, per-agent connection select + model and prompt), document tree and relations graph, log viewer, MCP token management, library backup (zip export) / restore (import, replaces the current library) from the Library settings page.
 
@@ -21,7 +22,7 @@ Athenaeum is **multi-user**: every user gets their own library *and* their own l
 
 Phase 1 ships all of the following together, in a single Python process:
 
-- **MCP server** (FastMCP 3.x, Streamable HTTP) with exactly 6 external tools: `request_knowledge`, `store_knowledge`, `update_knowledge`, `library_status`, `library_maintain`, `library_curate` (0.5.0).
+- **MCP server** (FastMCP 3.x, Streamable HTTP) with exactly 7 external tools: `request_knowledge`, `store_knowledge`, `update_knowledge`, `library_status`, `library_maintain`, `library_curate` (0.5.0), `run_computation` (0.21.0).
 - **Librarian agent** — per-user, lazily created, idle-evicted; hand-rolled tool-calling loop over a pluggable `LLMProvider` (adapters: `openai`, `anthropic`, `gemini`, plus `openrouter` and `openai-compatible` which both reuse the OpenAI adapter).
 - **WebUI** (FastAPI + Jinja2 + htmx + Alpine.js + 3d-force-graph): provider-connection/agent/library config screens (named connections, one default, per-agent connection select), document tree, 3D relations universe, activity/log viewer, token management, admin user management.
 - **Configuration** — per-user provider connections and librarian config plus accounts in a single SQLite database (`data/app.db`); server settings via environment variables.
