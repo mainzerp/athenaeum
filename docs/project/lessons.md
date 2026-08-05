@@ -378,3 +378,22 @@
   Nebenbefund: Auth-Fehler kommen als HTTP 200 mit JSON-RPC-Error im
   SSE-Stream ("Invalid or revoked bearer token") — Clients, die nur
   `result` auswerten, sehen faelschlich "leere" Antworten.
+- **F23 — Suche konstant ~3,5 s durch Default-on-CPU-Rerank (2026-08-05,
+  RESOLVED in 0.23.0).** User-Report: jede Suche ~3,5 s, auch
+  aufeinanderfolgende (kein Cold-Start-Muster). Live-Messung im 2-CPU-
+  Container mit echten ONNX-Modellen: der Cross-Encoder-Rerank
+  (`Xenova/ms-marco-MiniLM-L-6-v2`) frass 3,5–5,4 s pro Suche — Kosten
+  skalieren linear mit Kandidaten × Textlaenge (10×2000 chars ≈ 4,0 s;
+  5×500 ≈ 0,3 s). Cold Start (Modelle memoized), FTS5 (~1,5 ms) und
+  Vektor-Scan (<1000 Konzepte: ms) waren unschuldig. Aufloesung (0.23.0):
+  `hybrid_rerank` Default auf OFF (DB/Agent/Backend; Bestandszeilen
+  unveraendert), Rerank-Kandidaten 30→10 + Texte auf 2000 chars gekappt,
+  In-Memory-Vektor-Cache (Scan 77 ms kalt → 0,3 ms warm), `top_k`/
+  Hydration via `asyncio.to_thread`, NumPy-Cosine mit Stdlib-Fallback,
+  per-Stage-DEBUG-Timings. Ergebnis: 0,30–0,40 s warm (rerank off).
+  Learnings: (1) der Reranker ist die einzige Suchkomponente, die
+  Dokumente komplett liest — der Librarian liest Top-Treffer ohnehin per
+  LLM, daher ist Rerank auf CPU kein sinnvoller Default; (2) Stage-Timings
+  VOR der Fix-Auswahl einbauen — die erste Fix-Runde (30→10, 2000 chars)
+  half kaum, weil der Preis pro Token das eigentliche Problem war;
+  (3) Skript fuer kuenftige Messungen: `scripts/search_perf_bench.py`.

@@ -19,10 +19,12 @@ history (revert / append-only reset), which is always state-consistent.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import posixpath
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -102,7 +104,7 @@ class LibraryBackend:
         git_auto_push: bool = False,
         embedding_service=None,
         hybrid_search: bool = True,
-        hybrid_rerank: bool = True,
+        hybrid_rerank: bool = False,
         reranker=None,
     ) -> None:
         self.root = Path(root).resolve()
@@ -219,8 +221,13 @@ class LibraryBackend:
             return await self._search_semantic_legacy(query, limit)
         try:
             leg_k = max(limit, hybrid_mod.HYBRID_RERANK_CANDIDATES)
+            t0 = time.perf_counter()
             sem = await self._embedding_service.search_ids(query, leg_k)
+            t1 = time.perf_counter()
             lex = self._embedding_service.fts_search(query, leg_k)
+            t2 = time.perf_counter()
+            logger.debug("search_semantic: semantic leg %.1f ms", (t1 - t0) * 1000)
+            logger.debug("search_semantic: fts leg %.1f ms", (t2 - t1) * 1000)
         except Exception:
             logger.warning("semantic search failed; falling back to search_metadata", exc_info=True)
             return self._metadata_fallback(query, limit)
@@ -229,20 +236,29 @@ class LibraryBackend:
         sem_keys = [f"{concept_id.lstrip('/')}.md" for concept_id, _ in sem]
         lex_keys = [path for path, _ in lex]
         fused = hybrid_mod.rrf_merge([sem_keys, lex_keys])[:leg_k]
-        candidates: list[tuple[str, float, dict]] = []  # (path, rrf score, doc)
-        for path, fused_score in fused:
-            try:
-                doc = self.read_document(path)
-            except Exception:
-                continue  # unreadable candidates are skipped, not fatal
-            candidates.append((path, fused_score, doc))
+        t0 = time.perf_counter()
+        candidates = await asyncio.to_thread(self._hydrate_candidates, fused)
+        logger.debug(
+            "search_semantic: hydration %.1f ms over %d candidates",
+            (time.perf_counter() - t0) * 1000,
+            len(candidates),
+        )
         rerank_scores = None
         if self._hybrid_rerank and self._reranker is not None and candidates:
             from athenaeum.embeddings import concept_text
 
-            texts = [concept_text(doc["frontmatter"], doc["body"]) for _, _, doc in candidates]
+            texts = [
+                concept_text(doc["frontmatter"], doc["body"])[: hybrid_mod.HYBRID_RERANK_TEXT_CHARS]
+                for _, _, doc in candidates
+            ]
             try:
+                t0 = time.perf_counter()
                 rerank_scores = await self._reranker.rerank(query, texts)
+                logger.debug(
+                    "search_semantic: rerank %.1f ms over %d texts",
+                    (time.perf_counter() - t0) * 1000,
+                    len(texts),
+                )
             except Exception:
                 logger.warning("reranker failed; keeping RRF order", exc_info=True)
                 rerank_scores = None
@@ -272,6 +288,21 @@ class LibraryBackend:
                 }
             )
         return hits
+
+    def _hydrate_candidates(self, fused: list[tuple[str, float]]) -> list[tuple[str, float, dict]]:
+        """(path, rrf score, doc) triples for the fused candidates.
+
+        Sync worker (runs via ``asyncio.to_thread``): one ``read_document``
+        per candidate; unreadable candidates are skipped, not fatal.
+        """
+        candidates: list[tuple[str, float, dict]] = []
+        for path, fused_score in fused:
+            try:
+                doc = self.read_document(path)
+            except Exception:
+                continue  # unreadable candidates are skipped, not fatal
+            candidates.append((path, fused_score, doc))
+        return candidates
 
     async def _search_semantic_legacy(self, query: str, limit: int) -> list[dict]:
         """Pre-hybrid pure-semantic path (cosine scores); the contract every

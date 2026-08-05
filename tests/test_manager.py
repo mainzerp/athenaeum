@@ -96,10 +96,10 @@ def test_semantic_threshold_loaded(tmp_path):
 def test_hybrid_toggles_loaded(tmp_path):
     db_path = make_db(tmp_path)
     manager = make_manager(db_path, tmp_path)
-    # NOT NULL DEFAULT 1: hybrid search and rerank default to on
+    # hybrid search defaults on; rerank defaults off (0.23.0, CPU cost)
     config = manager._load_config("user-1")
     assert config.hybrid_search is True
-    assert config.hybrid_rerank is True
+    assert config.hybrid_rerank is False
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "UPDATE librarian_configs SET hybrid_search = 0, hybrid_rerank = 0"

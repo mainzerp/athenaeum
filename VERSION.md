@@ -21,6 +21,23 @@ The version must stay in sync across:
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
 
+### 0.23.0 (in development)
+
+Search performance rework: `search_semantic` no longer reads the whole
+embeddings table per query (in-memory vector cache with in-place invalidation
+on upsert/delete), ranks with a NumPy-vectorized cosine (stdlib fallback),
+and offloads the vector scan and candidate hydration off the event loop;
+per-stage DEBUG timings (query embedding, vector scan, fts/semantic legs,
+hydration, rerank). The cross-encoder rerank is cheaper when enabled
+(10 candidates instead of 30, candidate texts capped at 2000 chars) and now
+**defaults to off** (`hybrid_rerank` DB/agent/backend default 0; measured:
+the rerank pass alone cost ~3.5-4 s per search on CPU while the RRF-fused
+hybrid search answers in ~0.4 s; existing per-user settings are unchanged).
+Local ONNX embedding models now live in a process-wide cache (survives the
+30-min librarian idle eviction) and are preloaded at app start by a
+background task (never blocks startup, logs loaded/failed models), so even
+the first search after a container start skips the ~1 s model load.
+
 ### 0.22.0
 
 Git Time Machine: the shadow-copy snapshot versioning is replaced by a real

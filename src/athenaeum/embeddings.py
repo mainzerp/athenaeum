@@ -19,12 +19,14 @@ mixed key shapes.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
 import os
 import socket
 import struct
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -76,7 +78,9 @@ def _unpack(blob: bytes) -> list[float]:
 
 
 def cosine(a: list[float], b: list[float]) -> float:
-    """Stdlib cosine similarity (no numpy; a few ms at <1000 concepts)."""
+    """Stdlib cosine similarity: the fallback for ``top_k`` and
+    ``library/semantic.py`` when numpy is unavailable (a few ms at <1000
+    concepts)."""
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
@@ -140,6 +144,10 @@ class EmbeddingService:
         # service drives it, it never drives back (fts.py -> embeddings.py is
         # a one-way edge).
         self.fts = fts
+        # Cache-aside mirror of the embeddings table; the service is the only
+        # writer (module docstring), so own writes invalidate/update it.
+        # Single-worker deployment.
+        self._vector_cache: dict[str, dict] | None = None
 
     # --- CRUD (sync sqlite3, short-lived connections) -------------------
 
@@ -165,6 +173,13 @@ class EmbeddingService:
                         db.utcnow(),
                     ),
                 )
+        if self._vector_cache is not None:
+            self._vector_cache[concept_path] = {
+                "model": model,
+                "dims": len(vector),
+                "vector": vector,
+                "content_hash": hash_,
+            }
 
     def delete(self, concept_path: str) -> None:
         concept_path = canonical_path(concept_path)
@@ -174,24 +189,34 @@ class EmbeddingService:
                     "DELETE FROM embeddings WHERE user_id = ? AND concept_path = ?",
                     (self.user_id, concept_path),
                 )
+        if self._vector_cache is not None:
+            self._vector_cache.pop(concept_path, None)
 
     def load(self) -> dict[str, dict]:
-        """All stored rows: concept_path -> {model, dims, vector, content_hash}."""
-        with closing(db.connect(self.db_path)) as conn:
-            rows = conn.execute(
-                "SELECT concept_path, model, dims, vector, content_hash"
-                " FROM embeddings WHERE user_id = ?",
-                (self.user_id,),
-            ).fetchall()
-        return {
-            canonical_path(row["concept_path"]): {
-                "model": row["model"],
-                "dims": row["dims"],
-                "vector": _unpack(row["vector"]),
-                "content_hash": row["content_hash"],
+        """All stored rows: concept_path -> {model, dims, vector, content_hash}.
+
+        The result is a snapshot; repeated calls are served from memory
+        (``_vector_cache``) until the next write. A shallow copy is returned
+        so callers iterating from a ``to_thread`` worker are insulated from
+        concurrent ``upsert``/``delete`` updates.
+        """
+        if self._vector_cache is None:
+            with closing(db.connect(self.db_path)) as conn:
+                rows = conn.execute(
+                    "SELECT concept_path, model, dims, vector, content_hash"
+                    " FROM embeddings WHERE user_id = ?",
+                    (self.user_id,),
+                ).fetchall()
+            self._vector_cache = {
+                canonical_path(row["concept_path"]): {
+                    "model": row["model"],
+                    "dims": row["dims"],
+                    "vector": _unpack(row["vector"]),
+                    "content_hash": row["content_hash"],
+                }
+                for row in rows
             }
-            for row in rows
-        }
+        return dict(self._vector_cache)
 
     def stats(self) -> dict:
         """Row count + stored model(s)/dims for the WebUI status card."""
@@ -219,15 +244,32 @@ class EmbeddingService:
         """(concept_path, score) pairs over stored vectors, sorted desc.
 
         Rows with mismatched dims (model transition, reconcile pending) are
-        skipped rather than crashing the whole ranking.
+        skipped rather than crashing the whole ranking. numpy-vectorized when
+        numpy is importable (same optional-import posture as
+        ``library/semantic.py``); the stdlib ``cosine`` loop runs otherwise.
         """
-        scored = [
-            (concept_path, cosine(query_vector, row["vector"]))
+        rows = [
+            (concept_path, row["vector"])
             for concept_path, row in self.load().items()
             if row["dims"] == len(query_vector)
         ]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored[:k]
+        try:
+            import numpy as np
+        except ImportError:
+            np = None
+        if np is None or not rows:
+            scored = [(path, cosine(query_vector, vector)) for path, vector in rows]
+            scored.sort(key=lambda pair: pair[1], reverse=True)
+            return scored[:k]
+        matrix = np.asarray([vector for _, vector in rows], dtype=np.float64)
+        q = np.asarray(query_vector, dtype=np.float64)
+        norms = np.sqrt((matrix * matrix).sum(axis=1))
+        q_norm = float(np.sqrt((q * q).sum()))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scores = (matrix @ q) / (norms * q_norm)
+        scores = np.nan_to_num(scores)  # zero-norm rows score 0.0, like cosine
+        order = np.argsort(-scores, kind="stable")[:k]
+        return [(rows[i][0], float(scores[i])) for i in order]
 
     # --- async high-level --------------------------------------------------
 
@@ -243,10 +285,15 @@ class EmbeddingService:
 
         Raises on any embedding-pipeline failure (callers own fallback policy).
         """
+        t0 = time.perf_counter()
         query_vector = await self.embed_query(query)
+        t1 = time.perf_counter()
+        ranked = await asyncio.to_thread(self.top_k, query_vector, limit)
+        t2 = time.perf_counter()
+        logger.debug("search_ids: query embedding %.1f ms", (t1 - t0) * 1000)
+        logger.debug("search_ids: vector scan %.1f ms", (t2 - t1) * 1000)
         return [
-            (path[: -len(".md")] if path.endswith(".md") else path, score)
-            for path, score in self.top_k(query_vector, limit)
+            (path[: -len(".md")] if path.endswith(".md") else path, score) for path, score in ranked
         ]
 
     async def related(self, text: str, k: int) -> list[tuple[str, float]]:

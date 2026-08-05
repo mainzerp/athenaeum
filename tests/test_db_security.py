@@ -456,9 +456,10 @@ def test_ensure_column_idempotent_on_preexisting_db(tmp_path):
         assert cfg["curate_schedule_enabled"] == 0
         assert cfg["curate_schedule_time"] is None
         assert cfg["semantic_threshold"] is None
-        # pre-existing rows backfill to hybrid-on (NOT NULL DEFAULT 1)
+        # pre-existing rows backfill to hybrid-on (NOT NULL DEFAULT 1);
+        # rerank backfills to off (0.23.0: DEFAULT 0 — CPU cost too high)
         assert cfg["hybrid_search"] == 1
-        assert cfg["hybrid_rerank"] == 1
+        assert cfg["hybrid_rerank"] == 0
         # pre-existing rows gain the 0.22.0 git columns via migration
         assert cfg["git_enabled"] == 1
         assert cfg["git_remote_url"] is None

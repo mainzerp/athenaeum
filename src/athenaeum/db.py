@@ -121,10 +121,13 @@ _SCHEMA: list[tuple[str, list[tuple[str, str | None, str | None]], list[str]]] =
                 "hybrid_search INTEGER NOT NULL DEFAULT 1",
                 "hybrid_search INTEGER NOT NULL DEFAULT 1",
             ),
+            # Rerank defaults OFF (0.23.0): the CPU cross-encoder pass costs
+            # seconds per search; RRF fusion alone is the default ranking.
+            # Existing rows keep their stored value.
             (
                 "hybrid_rerank",
-                "hybrid_rerank INTEGER NOT NULL DEFAULT 1",
-                "hybrid_rerank INTEGER NOT NULL DEFAULT 1",
+                "hybrid_rerank INTEGER NOT NULL DEFAULT 0",
+                "hybrid_rerank INTEGER NOT NULL DEFAULT 0",
             ),
             # Dead pre-provider-connections legacy columns: never created
             # fresh, still added to pre-existing databases.

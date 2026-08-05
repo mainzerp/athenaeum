@@ -857,9 +857,11 @@ def test_config_agents_embeddings_hybrid_toggles_roundtrip(env):
     login(client, "alice", "pw")
     model = LOCAL_MODEL_SHORTLIST[0][0]
 
-    # defaults: both toggles on, both boxes rendered checked
+    # defaults: hybrid on, rerank off (0.23.0); both boxes present
     page = client.get("/config/agents/embeddings").text
     assert 'name="hybrid_search"' in page and 'name="hybrid_rerank"' in page
+    assert re.search(r'name="hybrid_search"\s+value="1"\s+checked', page)
+    assert not re.search(r'name="hybrid_rerank"\s+value="1"\s+checked', page)
 
     # unchecked boxes submit nothing -> both off
     response = client.post(

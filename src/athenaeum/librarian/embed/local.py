@@ -44,30 +44,58 @@ def _requires_e5_prefixes(model_name: str) -> bool:
     return "e5-" in model_name.lower()
 
 
+# Process-wide model cache (0.23.0): ONNX sessions are expensive to build
+# (~1 s+ on CPU) and independent of any per-user provider/librarian
+# instance. Keyed by (model_name, cache_dir) so librarian eviction (30-min
+# idle, config saves) never unloads a model; models stay warm for the
+# process lifetime. Construction happens on worker threads; guard the memo.
+_SHARED_MODELS: dict[tuple[str, str | None], object] = {}
+_SHARED_MODELS_LOCK = threading.Lock()
+
+
+def _shared_model(model_name: str, cache_dir: Path | None):
+    key = (model_name, str(cache_dir) if cache_dir is not None else None)
+    with _SHARED_MODELS_LOCK:
+        if key not in _SHARED_MODELS:
+            try:
+                from fastembed import TextEmbedding
+            except ImportError:
+                raise EmbeddingProviderError(
+                    "local embeddings require the 'local' extra (pip install athenaeum[local])"
+                ) from None
+            kwargs = {"model_name": model_name}
+            if cache_dir is not None:
+                kwargs["cache_dir"] = str(cache_dir)
+            _SHARED_MODELS[key] = TextEmbedding(**kwargs)
+        return _SHARED_MODELS[key]
+
+
+def preload_local_models(model_names: list[str], cache_dir: Path | None) -> list[str]:
+    """Eagerly construct the given models into the process-wide cache.
+
+    Returns the names that loaded; failures are skipped (the first real
+    embed call retries and surfaces the error). Called from the startup
+    warm-up task; never raises for missing fastembed or download errors.
+    """
+    loaded = []
+    for name in dict.fromkeys(model_names):
+        try:
+            _shared_model(name, cache_dir)
+        except Exception:
+            continue
+        loaded.append(name)
+    return loaded
+
+
 class LocalFastembedProvider:
     """fastembed TextEmbedding wrapper; the model is constructed lazily and
     memoized per model name on first embed call."""
 
     def __init__(self, cache_dir: Path | None = None) -> None:
         self._cache_dir = cache_dir
-        self._models: dict[str, object] = {}
-        # Construction now happens on worker threads (A6); guard the memo.
-        self._models_lock = threading.Lock()
 
     def _model(self, model_name: str):
-        with self._models_lock:
-            if model_name not in self._models:
-                try:
-                    from fastembed import TextEmbedding
-                except ImportError:
-                    raise EmbeddingProviderError(
-                        "local embeddings require the 'local' extra (pip install athenaeum[local])"
-                    ) from None
-                kwargs = {"model_name": model_name}
-                if self._cache_dir is not None:
-                    kwargs["cache_dir"] = str(self._cache_dir)
-                self._models[model_name] = TextEmbedding(**kwargs)
-            return self._models[model_name]
+        return _shared_model(model_name, self._cache_dir)
 
     async def embed(
         self,

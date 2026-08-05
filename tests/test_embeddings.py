@@ -9,6 +9,7 @@ library roots with a deterministic fake provider.
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import math
 import sys
@@ -35,6 +36,7 @@ from athenaeum.librarian.embed import (
     EmbeddingProviderError,
     create_embedding_provider,
 )
+from athenaeum.librarian.embed import local as local_embed_mod
 from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST, LocalFastembedProvider
 from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.library.backend import LibraryBackend
@@ -225,6 +227,57 @@ def test_top_k_skips_dims_mismatch(tmp_path):
     assert service.top_k([1.0, 0.0, 0.0], 5) == []
 
 
+def test_load_cache_invalidated_on_upsert(tmp_path):
+    """A warm vector cache reflects the next upsert without a manual reload."""
+    service, _ = make_service(make_db(tmp_path))
+    service.upsert("a.md", "test-model", [1.0, 0.0], "h1")
+    assert service.top_k([1.0, 0.0], 5)[0][1] == pytest.approx(1.0)  # warms cache
+    service.upsert("a.md", "test-model", [0.0, 1.0], "h2")
+    ranked = service.top_k([1.0, 0.0], 5)
+    assert ranked[0][1] == pytest.approx(0.0)  # changed vector served
+    assert service.load()["a.md"]["content_hash"] == "h2"
+
+
+def test_load_cache_invalidated_on_delete(tmp_path):
+    service, _ = make_service(make_db(tmp_path))
+    service.upsert("a.md", "test-model", [1.0, 0.0], "h")
+    assert service.top_k([1.0, 0.0], 5)  # warms the cache
+    service.delete("a.md")
+    assert service.load() == {}
+    assert service.top_k([1.0, 0.0], 5) == []
+
+
+def test_top_k_serves_from_cache(tmp_path, monkeypatch):
+    """A warm cache answers top_k without touching the DB."""
+    service, _ = make_service(make_db(tmp_path))
+    service.upsert("a.md", "test-model", [1.0, 0.0], "h")
+    assert service.top_k([1.0, 0.0], 5)  # warms the cache
+
+    def boom(*args, **kwargs):
+        raise AssertionError("db.connect called on a cache hit")
+
+    monkeypatch.setattr(db, "connect", boom)
+    assert [path for path, _ in service.top_k([1.0, 0.0], 5)] == ["a.md"]
+
+
+def test_top_k_numpy_stdlib_parity(tmp_path, monkeypatch):
+    """The numpy and stdlib rankings agree (paths and scores)."""
+    if importlib.util.find_spec("numpy") is None:
+        pytest.skip("numpy not installed (both paths identical)")
+    service, _ = make_service(make_db(tmp_path))
+    service.upsert("a.md", "test-model", [1.0, 0.0], "h")
+    service.upsert("b.md", "test-model", [1.0, 1.0], "h")
+    service.upsert("c.md", "test-model", [0.0, 1.0], "h")
+    service.upsert("d.md", "test-model", [1.0, 0.0, 0.0], "h")  # dims mismatch: skipped
+    numpy_ranked = service.top_k([1.0, 0.0], 5)
+    monkeypatch.setitem(sys.modules, "numpy", None)  # import raises ImportError
+    stdlib_ranked = service.top_k([1.0, 0.0], 5)
+    assert [path for path, _ in stdlib_ranked] == [path for path, _ in numpy_ranked]
+    assert [score for _, score in stdlib_ranked] == pytest.approx(
+        [score for _, score in numpy_ranked]
+    )
+
+
 # --- providers: OpenAI ---------------------------------------------------------
 
 
@@ -349,6 +402,8 @@ def install_fake_fastembed(monkeypatch):
     module = types.ModuleType("fastembed")
     module.TextEmbedding = _FakeTextEmbedding
     monkeypatch.setitem(sys.modules, "fastembed", module)
+    # The process-wide model cache (0.23.0) survives across tests otherwise.
+    local_embed_mod._SHARED_MODELS.clear()
 
 
 async def test_local_provider_construction_prefixes_and_memoization(monkeypatch, tmp_path):
@@ -415,9 +470,76 @@ async def test_local_provider_runs_inference_off_loop(monkeypatch):
 
 async def test_local_provider_import_guard(monkeypatch):
     monkeypatch.setitem(sys.modules, "fastembed", None)  # import raises ImportError
+    local_embed_mod._SHARED_MODELS.clear()  # no cached model -> import attempted
     provider = LocalFastembedProvider()
     with pytest.raises(EmbeddingProviderError, match=r"athenaeum\[local\]"):
         await provider.embed(["x"], EmbeddingConfig(source="local", model="m"))
+
+
+async def test_local_provider_cache_shared_across_instances(monkeypatch, tmp_path):
+    """0.23.0: the ONNX model cache is process-wide — a second provider
+    instance (e.g. after librarian eviction) reuses the loaded model."""
+    install_fake_fastembed(monkeypatch)
+    config = EmbeddingConfig(source="local", model="m")
+    cache_dir = tmp_path / "models"
+
+    await LocalFastembedProvider(cache_dir=cache_dir).embed(["x"], config)
+    assert len(_FakeTextEmbedding.instances) == 1
+    # new provider instance, same model + cache_dir -> no reconstruction
+    await LocalFastembedProvider(cache_dir=cache_dir).embed(["y"], config)
+    assert len(_FakeTextEmbedding.instances) == 1
+    # different cache_dir -> separate cache entry
+    await LocalFastembedProvider(cache_dir=tmp_path / "other").embed(["z"], config)
+    assert len(_FakeTextEmbedding.instances) == 2
+
+
+def test_preload_local_models(monkeypatch, tmp_path):
+    """Startup warm-up: loads models into the shared cache, skips failures."""
+    install_fake_fastembed(monkeypatch)
+    cache_dir = tmp_path / "models"
+
+    loaded = local_embed_mod.preload_local_models(["m1", "m2", "m1"], cache_dir)
+    assert loaded == ["m1", "m2"]  # deduped
+    assert len(_FakeTextEmbedding.instances) == 2
+    # second preload is a no-op
+    assert local_embed_mod.preload_local_models(["m1"], cache_dir) == ["m1"]
+    assert len(_FakeTextEmbedding.instances) == 2
+
+    # missing fastembed: skipped, never raises
+    local_embed_mod._SHARED_MODELS.clear()
+    monkeypatch.setitem(sys.modules, "fastembed", None)
+    assert local_embed_mod.preload_local_models(["m1"], cache_dir) == []
+
+
+async def test_warm_local_embedding_models(monkeypatch, tmp_path):
+    """Startup warm-up scans local embedding configs and preloads each model."""
+    from athenaeum.app import _warm_local_embedding_models
+
+    db_path = make_db(tmp_path)
+    with closing(db.connect(db_path)) as conn:
+        with conn:
+            db.update_embedding_config(
+                conn, "user-1", source="local", model="m", connection_id=None
+            )
+
+    calls = []
+
+    def spy(names, cache_dir):
+        calls.append((list(names), cache_dir))
+        return list(names)
+
+    monkeypatch.setattr(local_embed_mod, "preload_local_models", spy)
+    await _warm_local_embedding_models(db_path, tmp_path)
+    assert calls == [(["m"], tmp_path / "embedding-models")]
+
+    # no local configs -> preload never called, no error; str data_root works
+    # too (settings.data_root is a plain str — container regression 0.23.0)
+    other = tmp_path / "other"
+    other.mkdir()
+    db_path2 = make_db(other)
+    calls.clear()
+    await _warm_local_embedding_models(db_path2, str(tmp_path))
+    assert calls == []
 
 
 def test_local_model_shortlist_shape():
@@ -545,7 +667,8 @@ def test_update_embedding_config_hybrid_toggles_write_and_keep(tmp_path):
     db_path = make_connections_db(tmp_path)
     with closing(db.connect(db_path)) as conn:
         row = db.get_config(conn, "user-1")
-        assert row["hybrid_search"] == 1 and row["hybrid_rerank"] == 1  # defaults
+        # defaults: hybrid on, rerank off (0.23.0)
+        assert row["hybrid_search"] == 1 and row["hybrid_rerank"] == 0
         db.update_embedding_config(
             conn,
             "user-1",

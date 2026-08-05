@@ -125,7 +125,7 @@ class LibrarianConfig:
     embedding: EmbeddingConfig | None = None  # None = embeddings unconfigured
     semantic_threshold: float | None = None  # None = per-model default
     hybrid_search: bool = True  # fuse semantic with FTS5 BM25 (RRF)
-    hybrid_rerank: bool = True  # local cross-encoder pass over fused candidates
+    hybrid_rerank: bool = False  # optional CPU-heavy cross-encoder pass (0.23.0: default off)
 
 
 @dataclass

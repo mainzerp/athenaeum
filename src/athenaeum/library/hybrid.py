@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 # TUNABLEs
 HYBRID_RRF_K = 60  # RRF damping constant (qmd/RRF convention)
-HYBRID_RERANK_CANDIDATES = 30  # fused candidates fed to the reranker
+HYBRID_RERANK_CANDIDATES = 10  # fused candidates fed to the reranker
+# Char cap ~= the model's 512-token context (~4 chars/token); keeps long
+# bodies out of the ONNX batch (the tokenizer discards the rest anyway).
+HYBRID_RERANK_TEXT_CHARS = 2000
 # fastembed 0.8.0 registry; 0.08 GB, apache-2.0.
 HYBRID_RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 HYBRID_QUERY_TOKEN_CAP = 16  # max MATCH tokens; OR-joined, so recall stays high

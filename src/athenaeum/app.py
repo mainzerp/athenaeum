@@ -20,6 +20,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -37,6 +38,36 @@ from athenaeum.webui import ROUTERS, deps
 from athenaeum.webui.routes_auth import bootstrap_admin_if_configured
 
 logger = logging.getLogger(__name__)
+
+
+async def _warm_local_embedding_models(db_path, data_root) -> None:
+    """Preload local ONNX embedding models into the process-wide cache (0.23.0).
+
+    Background task: never blocks startup (healthz answers immediately) and
+    never raises — a failed preload just means the first real embed call
+    pays the load as before.
+    """
+    try:
+        with db.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT embedding_model FROM librarian_configs"
+                " WHERE embedding_source = 'local' AND embedding_model IS NOT NULL"
+            ).fetchall()
+        names = [row["embedding_model"] for row in rows]
+        if not names:
+            return
+        from athenaeum.librarian.embed.local import preload_local_models
+
+        loaded = await asyncio.to_thread(
+            preload_local_models, names, Path(data_root) / "embedding-models"
+        )
+        if loaded:
+            logger.info("preloaded local embedding models: %s", ", ".join(loaded))
+        failed = [name for name in names if name not in loaded]
+        if failed:
+            logger.warning("local embedding model preload failed for: %s", ", ".join(failed))
+    except Exception:
+        logger.warning("local embedding model warm-up failed", exc_info=True)
 
 
 class _MCPCatchAll:
@@ -106,12 +137,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 manager, db_path, registry=activity_registry, seed_cache=seed_cache
             )
             task = asyncio.create_task(scheduler.run_forever())
+            # Preload local ONNX embedding models in the background (0.23.0):
+            # first searches stay fast instead of paying the model load.
+            warmup = asyncio.create_task(_warm_local_embedding_models(db_path, settings.data_root))
             try:
                 yield
             finally:
                 task.cancel()
+                warmup.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+                with suppress(asyncio.CancelledError):
+                    await warmup
                 # Cancel pending embed reconciles; their claim rows are
                 # released in the service's finally (A5).
                 manager.close()

@@ -21,7 +21,9 @@ from athenaeum.librarian.embed import KIND_DOCUMENT, EmbeddingConfig
 from athenaeum.library.backend import LibraryBackend
 from athenaeum.library.hybrid import (
     HYBRID_QUERY_TOKEN_CAP,
+    HYBRID_RERANK_CANDIDATES,
     HYBRID_RERANK_MODEL,
+    HYBRID_RERANK_TEXT_CHARS,
     CrossEncoderReranker,
     rrf_merge,
     sanitize_match_query,
@@ -86,10 +88,10 @@ def test_init_db_creates_concepts_fts_and_stays_idempotent(tmp_path):
         }
         assert "concepts_fts" in names
         assert "concepts_fts_data" in names  # shadow tables share app.db
-        # fresh librarian_configs rows default to hybrid-on
+        # fresh librarian_configs rows default to hybrid-on, rerank off (0.23.0)
         row = db.get_config(conn, "user-1")
         assert row["hybrid_search"] == 1
-        assert row["hybrid_rerank"] == 1
+        assert row["hybrid_rerank"] == 0
 
 
 @requires_fts5
@@ -520,8 +522,8 @@ async def test_hybrid_fusion_order_and_hit_shape(tmp_path):
 
     hits = await backend.search_semantic("lexical term", 8)
 
-    # leg_k = max(8, 30) = 30 for the semantic leg
-    assert service.calls == [("lexical term", 30)]
+    # leg_k = max(8, HYBRID_RERANK_CANDIDATES) for the semantic leg
+    assert service.calls == [("lexical term", max(8, HYBRID_RERANK_CANDIDATES))]
     # b: sem rank 2 + lex rank 1; a: sem rank 1; c: lex rank 2 -> b, a, c
     assert [hit["id"] for hit in hits] == ["/b", "/a", "/c"]
     assert hits[0]["path"] == "/b.md"
@@ -566,7 +568,7 @@ async def test_hybrid_reranker_reorders_and_scores_by_logit(tmp_path):
     fts = FtsIndex(db_path, "user-1")
     service = FakeHybridService(fts, ranked=[("/a", 0.9), ("/b", 0.8)])
     reranker = FakeReranker([0.25, 3.14159])
-    backend = make_hybrid_backend(tmp_path, service, reranker=reranker)
+    backend = make_hybrid_backend(tmp_path, service, hybrid_rerank=True, reranker=reranker)
     write_concept(backend.root, "a.md", "Alpha", "body a")
     write_concept(backend.root, "b.md", "Beta", "body b")
 
@@ -622,7 +624,7 @@ async def test_hybrid_skips_unreadable_candidates(tmp_path):
     fts = FtsIndex(db_path, "user-1")
     service = FakeHybridService(fts, ranked=[("/gone", 0.9), ("/a", 0.8)])
     reranker = FakeReranker([1.0])
-    backend = make_hybrid_backend(tmp_path, service, reranker=reranker)
+    backend = make_hybrid_backend(tmp_path, service, hybrid_rerank=True, reranker=reranker)
     write_concept(backend.root, "a.md", "Alpha", "body a")
 
     hits = await backend.search_semantic("q", 8)
@@ -630,6 +632,26 @@ async def test_hybrid_skips_unreadable_candidates(tmp_path):
     assert [hit["id"] for hit in hits] == ["/a"]
     # the unreadable candidate never reaches the reranker
     assert len(reranker.calls[0][1]) == 1
+
+
+@requires_fts5
+async def test_hybrid_rerank_truncates_long_documents(tmp_path):
+    """Rerank texts are capped at HYBRID_RERANK_TEXT_CHARS; the
+    title/description prefix survives the truncation."""
+    db_path = make_db(tmp_path)
+    fts = FtsIndex(db_path, "user-1")
+    service = FakeHybridService(fts, ranked=[("/a", 0.9)])
+    reranker = FakeReranker([1.0])
+    backend = make_hybrid_backend(tmp_path, service, hybrid_rerank=True, reranker=reranker)
+    write_concept(backend.root, "a.md", "Alpha", "body " + "x" * 5000)
+
+    hits = await backend.search_semantic("q", 8)
+
+    assert [hit["id"] for hit in hits] == ["/a"]
+    query, texts = reranker.calls[0]
+    assert len(texts) == 1
+    assert len(texts[0]) <= HYBRID_RERANK_TEXT_CHARS
+    assert texts[0].startswith("Alpha")
 
 
 @requires_fts5
