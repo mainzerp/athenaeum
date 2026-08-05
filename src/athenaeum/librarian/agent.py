@@ -1103,6 +1103,7 @@ class Librarian:
                     "health_after": {
                         "healthy": bool(status.get("healthy")),
                         "orphans": len(status["health"]["orphans"]),
+                        "broken_links": len(status["health"]["broken_links"]),
                     },
                 }
             task = build_curate_preamble(
@@ -1144,5 +1145,6 @@ class Librarian:
                 "health_after": {
                     "healthy": bool(final_status.get("healthy")),
                     "orphans": len(final_status["health"]["orphans"]),
+                    "broken_links": len(final_status["health"]["broken_links"]),
                 },
             }

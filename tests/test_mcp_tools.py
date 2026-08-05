@@ -453,7 +453,7 @@ async def test_library_curate_noop_when_well_organized(tmp_path, monkeypatch):
     assert result.data["organized"] is True
     assert result.data["verified"] == []
     assert result.data["findings"]["concepts_scanned"] == 0
-    assert result.data["health_after"] == {"healthy": True, "orphans": 0}
+    assert result.data["health_after"] == {"healthy": True, "orphans": 0, "broken_links": 0}
     assert providers["user-b"].calls == []  # no LLM call on the no-op path
     # run-end timestamp persisted: no-op runs still update the bookkeeping
     assert manager.curate_last_run_at("user-b") is not None
@@ -1098,7 +1098,7 @@ async def test_library_curate_refreshes_seed_after_mutating_run(tmp_path, monkey
         assert result.data["actions"] == [{"id": "/a", "title": "A", "action": "updated"}]
         assert result.data["summary"].startswith("curated")
         assert "Post-run check:" in result.data["summary"]
-        assert result.data["health_after"] == {"healthy": True, "orphans": 0}
+        assert result.data["health_after"] == {"healthy": True, "orphans": 0, "broken_links": 0}
 
         tools_after = {t.name: t for t in await client.list_tools()}
         assert "SEED<1>" in tools_after["store_knowledge"].description

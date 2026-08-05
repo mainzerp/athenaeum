@@ -715,6 +715,9 @@ def test_config_agents_curator_schedule_roundtrip(env):
     assert 'name="curate_schedule_enabled"' in page
     assert "checked" in page
     assert 'value="03:00"' in page
+    # schedule status line: enabled, stored UTC time, last run (never yet)
+    assert "active, daily at 03:00 UTC" in page
+    assert "last run: never" in page
 
     response = client.post(
         "/config/agents/curator/schedule",
@@ -734,6 +737,9 @@ def test_config_agents_curator_schedule_roundtrip(env):
     cfg = read_config(data_root, user["id"])
     assert cfg["curate_schedule_enabled"] == 0
     assert cfg["curate_schedule_time"] == "03:00"
+    page = client.get("/config/agents/curator").text
+    assert "inactive" in page
+    assert "last run: never" in page
 
 
 def test_config_agents_curator_schedule_invalid_time(env):

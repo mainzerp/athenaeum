@@ -38,6 +38,12 @@ Local ONNX embedding models now live in a process-wide cache (survives the
 background task (never blocks startup, logs loaded/failed models), so even
 the first search after a container start skips the ~1 s model load.
 
+Curate observability: `library_curate`'s `health_after` now reports
+`broken_links` alongside `healthy`/`orphans` (post-run scan, both the no-op
+and the LLM path), and the WebUI curator tab shows the scheduled-curation
+state (active/inactive, stored UTC time, last run timestamp) so a silent
+schedule is visible without DB or log access.
+
 ### 0.22.0
 
 Git Time Machine: the shadow-copy snapshot versioning is replaced by a real

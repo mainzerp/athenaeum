@@ -90,6 +90,15 @@
 <div class="card">
   <div class="card-header">Scheduled curation</div>
   <div class="card-body">
+    <p class="muted text-sm">
+      Status:
+      {% if cfg["curate_schedule_enabled"] %}
+        active, daily at {{ cfg["curate_schedule_time"] or "03:00" }} UTC —
+        last run: {{ cfg["curate_last_run_at"] or "never" }}
+      {% else %}
+        inactive — last run: {{ cfg["curate_last_run_at"] or "never" }}
+      {% endif %}
+    </p>
     <form method="post" action="/config/agents/curator/schedule" data-loading>
       {{ csrf_input(request) }}
       <div class="form-row">

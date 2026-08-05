@@ -1408,7 +1408,7 @@ async def test_curate_noop_when_well_organized_without_llm_call(tmp_path):
     assert result["organized"] is True
     assert result["verified"] == []
     assert result["findings"]["concepts_scanned"] == 0
-    assert result["health_after"] == {"healthy": True, "orphans": 0}
+    assert result["health_after"] == {"healthy": True, "orphans": 0, "broken_links": 0}
     assert provider.calls == []  # no LLM call on the no-op path
 
 
@@ -1446,7 +1446,7 @@ async def test_curate_runs_loop_on_findings(tmp_path):
     assert result["findings"]["thin_concepts"] == [
         {"id": "/thin", "title": "Thin", "body_chars": 4}
     ]
-    assert result["health_after"] == {"healthy": True, "orphans": 0}
+    assert result["health_after"] == {"healthy": True, "orphans": 0, "broken_links": 0}
     assert ("edit_concept", "/thin.md", "agent-c") in backend.calls
     # preamble carries the findings report + caller instructions
     task_prompt = provider.calls[0][0][1]["content"]
@@ -1799,7 +1799,7 @@ async def test_curate_against_real_backend(tmp_path):
     assert result["findings"]["thin_concepts"] == []
     # the enriched /stub has no bundle links, so the real validator reports it
     # as an orphan (validate.py) — post-curate observability via health_after
-    assert result["health_after"] == {"healthy": False, "orphans": 1}
+    assert result["health_after"] == {"healthy": False, "orphans": 1, "broken_links": 0}
     preamble = provider.calls[0][0][1]["content"]
     assert "CURATION TASK" in preamble
     assert "/stub" in preamble and "Stub" in preamble

@@ -397,3 +397,22 @@
   VOR der Fix-Auswahl einbauen — die erste Fix-Runde (30→10, 2000 chars)
   half kaum, weil der Preis pro Token das eigentliche Problem war;
   (3) Skript fuer kuenftige Messungen: `scripts/search_perf_bench.py`.
+- **F24 — "Scheduler laeuft nicht" war nicht reproduzierbar; Observability-
+  Luecke statt Defekt (2026-08-05, RESOLVED in 0.23.0).** User-Report: der
+  automatische Curator laufe nicht, keine Traces/Activity sichtbar, Schedule
+  "aktiv". Live-Test im lokalen Container (0.22.0, Schedule auf +3 min
+  gesetzt): feuerte exakt zur Minute, maintain+curate liefen, zwei
+  Activity-Zeilen mit `token_label="scheduler"`, `curate_last_run_at`
+  re-baselined. Remote (athenaeum.mzrsvr.net) laeuft ebenfalls 0.22.0 —
+  kein Versions-Bug. Die eigentliche Luecke: der Schedule-Zustand
+  (aktiv/inaktiv, letzter Lauf) war in der WebUI unsichtbar; ohne
+  DB-/Log-Zugriff ist "laeuft er?" nicht beantwortbar. Zusaetzliche
+  UX-Falle: der Curator-Tab hat zwei getrennte Forms mit eigenem
+  Save-Button — die Schedule-Checkbox ohne Klick auf den Schedule-Save
+  wird nie persistiert. Aufloesung (0.23.0): Statuszeile im Curator-Tab
+  (aktiv/inaktiv, UTC-Zeit, `curate_last_run_at`); `health_after` im
+  Curate-Result meldet jetzt auch `broken_links`. Diagnose-Tricks:
+  `/openapi.json` verraet die Version einer Instanz unauthentifiziert;
+  gleiche oeffentliche IP von Dev-Maschine und Server (NAT) tauscht
+  "lokal == remote" vor — immer anhand der Activity-DB pruefen, WELCHE
+  Instanz die eigenen MCP-Calls journaliert.
