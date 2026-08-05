@@ -3,6 +3,7 @@
 
   var ACCENT = "#f1c40f";
   var PULSE_INTERVAL_MS = 450;
+  var CORE_ID = "__core__"; // sentinel: trace hop through the sunburst center
   var RESERVED = { "index.md": true, "log.md": true };
   var WRITE_TOOLS = {
     write_concept: true,
@@ -29,13 +30,20 @@
     return !RESERVED[name];
   }
 
+  // index.md reads are not document visits — they become hops through the
+  // sunburst core (the library root index the librarian orients itself by).
+  function isIndexPath(path) {
+    return typeof path === "string" && path.slice(path.lastIndexOf("/") + 1) === "index.md";
+  }
+
   function visitEvents(trace) {
     var visits = [];
     (trace.events || []).forEach(function (event) {
       if (event.error) return;
       if (event.tool === "read_document") {
         var path = (event.args && event.args.path) || (event.result && event.result.path);
-        if (isConceptPath(path)) visits.push({ id: nodeId(path), seq: event.seq });
+        if (isIndexPath(path)) visits.push({ id: CORE_ID, seq: event.seq });
+        else if (isConceptPath(path)) visits.push({ id: nodeId(path), seq: event.seq });
       } else if (WRITE_TOOLS[event.tool]) {
         var id = event.result && event.result.id;
         if (typeof id === "string" && id) visits.push({ id: nodeId(id), seq: event.seq });
@@ -127,7 +135,7 @@
     var hops = visitedHops(trace);
     var states = {};
     overlay.visited.forEach(function (id) {
-      states[id] = "visited";
+      if (id !== CORE_ID) states[id] = "visited"; // core is no document dot
     });
     overlay.hits.forEach(function (id) {
       states[id] = "hit";
@@ -186,7 +194,8 @@
     function goTo(i) {
       if (i < 0 || i >= hops.length) return;
       idx = i;
-      ctrl.focusNode(hops[idx].id, true);
+      if (hops[idx].id === CORE_ID && ctrl.focusCore) ctrl.focusCore(true);
+      else ctrl.focusNode(hops[idx].id, true);
       highlightTimeline(hops[idx]);
       updateUi();
     }
@@ -260,9 +269,10 @@
       universeNodeIds.forEach(function (id) {
         inUniverse[id] = true;
       });
-      // Playback only steps through nodes that exist in the universe.
+      // Playback only steps through nodes that exist in the universe, plus
+      // core hops (index.md reads route through the sunburst center).
       var hops = visitedHops(trace).filter(function (h) {
-        return inUniverse[h.id];
+        return h.id === CORE_ID || inUniverse[h.id];
       });
       var els = {
         play: document.getElementById("replay-play"),
@@ -301,8 +311,10 @@
 
   var api = {
     ACCENT: ACCENT,
+    CORE_ID: CORE_ID,
     nodeId: nodeId,
     isConceptPath: isConceptPath,
+    isIndexPath: isIndexPath,
     visitedNodes: visitedNodes,
     visitedHops: visitedHops,
     searchHitNodes: searchHitNodes,

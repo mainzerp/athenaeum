@@ -46,6 +46,9 @@
  * Visited/hit dots render in the accent color (visited larger with a hop
  * badge, hits pulsing with pulsePhase), everything else fades when
  * fadeRest is set, and hopEdges draw as accent arcs over the payload edges.
+ * The sentinel id "__core__" stands for the central anchor: hopEdges with a
+ * "__core__" endpoint route through the middle, a "__core__" hopNumber
+ * badges the anchor, and focusCore(animate) flies the camera there.
  *
  * All placement is deterministic (FNV-1a hash seeds; never Math.random for
  * data dots — the starfield is hash-seeded too). The hash is a local copy of
@@ -762,15 +765,15 @@
 
       // Trace overlay hop edges: accent arcs over the payload edges, using
       // the same center-bowed quadratic math; pairs with missing endpoints
-      // (hops pointing at documents not in the universe) are skipped.
+      // (hops pointing at documents not in the universe) are skipped. The
+      // sentinel "__core__" resolves to the central anchor (scene 0,0).
       if (overlay && overlay.hopEdges) {
         var hopRgb = hexToRgb(overlay.accent || "#f1c40f");
         overlay.hopEdges.forEach(function (he) {
-          var ha = layout.idxById[he.source];
-          var hb = layout.idxById[he.target];
-          if (ha == null || hb == null) return;
-          var hp1 = layout.pos[ha];
-          var hp2 = layout.pos[hb];
+          if (he.source === he.target) return;
+          var CORE = "__core__";
+          var hp1 = he.source === CORE ? { x: 0, y: 0 } : layout.pos[layout.idxById[he.source]];
+          var hp2 = he.target === CORE ? { x: 0, y: 0 } : layout.pos[layout.idxById[he.target]];
           if (!hp1 || !hp2) return;
           ctx.strokeStyle = rgba(hopRgb, CONFIG.hopEdgeAlpha);
           ctx.lineWidth = CONFIG.hopEdgeWidthPx * px;
@@ -842,6 +845,17 @@
       ctx.beginPath();
       ctx.arc(0, 0, CONFIG.anchorRingR, 0, Math.PI * 2);
       ctx.stroke();
+
+      // Hop badge on the anchor when the trace passes through the core
+      // (overlay.hopNumbers["__core__"], screen-constant size like the
+      // dot badges).
+      if (overlay && oHops["__core__"] != null) {
+        ctx.fillStyle = rgba(oAccent || accent, 0.95);
+        ctx.font = "600 " + 11 * px + "px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(String(oHops["__core__"]), 0, -(CONFIG.anchorRingR + 0.02));
+      }
 
       // Active dot highlight: white core + cluster-colored ring.
       if (active >= 0 && layout.pos[active]) {
@@ -1095,6 +1109,16 @@
       syncTip();
     }
 
+    // Fly to the central anchor (trace replay core hops: index.md reads
+    // route through the middle). Same target as the center-ring click.
+    function focusCore(animate) {
+      select(-1);
+      hoverIdx = -1;
+      tip.style.display = "none";
+      var cr = layout.centerHitR + 0.02;
+      animateTo(fitTarget(-cr, -cr, cr, cr), animate !== false);
+    }
+
     // Trace-replay overlay channel: {accent, states, hopNumbers, hopEdges,
     // fadeRest, pulsePhase} — null clears it. Only stores + re-renders.
     function setOverlay(next) {
@@ -1144,6 +1168,7 @@
       },
       zoomToSector: zoomToSector,
       focusNode: focusNode,
+      focusCore: focusCore,
       resetView: resetView,
       setOverlay: setOverlay,
       redraw: render,
