@@ -1,12 +1,18 @@
-# Athenaeum
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="Athenaeum logo" width="180">
+</p>
 
-**Your personal knowledge base that organizes itself.**
+<h1 align="center">Athenaeum</h1>
 
-Athenaeum is a self-hosted memory for you and your AI tools. Instead of
-scattering notes across apps and chat histories, you tell Athenaeum what to
-remember — and a built-in librarian keeps everything filed, linked, and tidy.
-Your knowledge lives as plain Markdown files on your own server: readable and
-editable with any tool, forever yours.
+<p align="center"><strong>Your personal knowledge base that organizes itself.</strong></p>
+
+Athenaeum is a self-hosted knowledge memory for you and your AI tools.
+Instead of scattering notes across apps and chat histories, you tell
+Athenaeum what to remember — and a built-in librarian keeps everything filed,
+linked, and tidy, while a curator agent maintains and machine-verifies the
+library. Your knowledge lives as plain Markdown files on your own server,
+every write is a git commit, and any MCP-capable assistant can query it by
+meaning or by exact word: readable and editable with any tool, forever yours.
 
 ## How it works
 
@@ -27,9 +33,11 @@ editable with any tool, forever yours.
    on request, or automatically every night. You never organize anything by
    hand.
 
-5. **Find by meaning.** Optional semantic search finds notes by what they
-   *mean*, not just by the words they contain. It can run entirely on your
-   own hardware, so nothing leaves the host.
+5. **Find by meaning — or by word.** Hybrid search fuses semantic embeddings
+   with a lexical full-text index, so notes surface by what they *mean* and
+   by the exact words they contain. An optional local reranker sharpens the
+   results; everything can run entirely on your own hardware, so nothing
+   leaves the host.
 
 Everything your agents do is visible: the web interface lets you browse
 your library as an interactive graph, read every document, and review a full
@@ -47,6 +55,16 @@ push/pull (remote auth uses the git client's own credentials).
 One Athenaeum server serves your whole household or team: every user gets
 their own private library and their own librarian, with their own AI provider
 keys and access tokens. Admins manage users in the web interface.
+
+## Trust and provenance
+
+- Every document records who requested it and which agent version wrote it.
+- After each maintenance run, a deterministic post-step machine-verifies
+  exactly the documents the curator repaired — shown as a trust marker in
+  the web interface.
+- Attested Computations: admins can allow agents to run read-only SQL
+  statements against configured databases. Every execution returns a verified
+  receipt, and the feature is off by default.
 
 ## Your data stays yours
 
@@ -77,7 +95,7 @@ To skip the local build and use the prebuilt image from GHCR instead
 
 ```bash
 docker compose -f docker-compose.prebuilt.yml up -d
-# pin a release: ATHENAEUM_IMAGE_TAG=0.20.0 docker compose -f docker-compose.prebuilt.yml up -d
+# pin a release: ATHENAEUM_IMAGE_TAG=0.22.0 docker compose -f docker-compose.prebuilt.yml up -d
 ```
 
 Then:

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Athenaeum logo — owl of Athena over an open book">
+  <!-- Owl of Athena -->
+  <g>
+    <!-- ear tufts -->
+    <polygon points="90,58 104,30 114,62" fill="#C08F1F"/>
+    <polygon points="166,58 152,30 142,62" fill="#C08F1F"/>
+    <!-- body -->
+    <ellipse cx="128" cy="158" rx="42" ry="44" fill="#C08F1F"/>
+    <!-- head -->
+    <circle cx="128" cy="94" r="50" fill="#D9A62E"/>
+    <!-- wings -->
+    <path d="M88 150 Q80 178 100 196 Q90 170 98 148 Z" fill="#A67C1A"/>
+    <path d="M168 150 Q176 178 156 196 Q166 170 158 148 Z" fill="#A67C1A"/>
+    <!-- belly -->
+    <ellipse cx="128" cy="168" rx="24" ry="26" fill="#E7BC55"/>
+    <!-- eyes -->
+    <circle cx="110" cy="90" r="17" fill="#FBF6E9"/>
+    <circle cx="146" cy="90" r="17" fill="#FBF6E9"/>
+    <circle cx="110" cy="90" r="7.5" fill="#2B2B2B"/>
+    <circle cx="146" cy="90" r="7.5" fill="#2B2B2B"/>
+    <circle cx="112.5" cy="87.5" r="2.4" fill="#FBF6E9"/>
+    <circle cx="148.5" cy="87.5" r="2.4" fill="#FBF6E9"/>
+    <!-- beak -->
+    <polygon points="128,104 120,114 136,114" fill="#8A6A14"/>
+  </g>
+  <!-- Open book -->
+  <g>
+    <path d="M36 208 Q82 188 126 206 L126 236 Q82 218 36 238 Z" fill="#546A7B"/>
+    <path d="M220 208 Q174 188 130 206 L130 236 Q174 218 220 238 Z" fill="#546A7B"/>
+    <path d="M44 210 Q84 194 122 208 L122 228 Q84 214 44 230 Z" fill="#7D93A5"/>
+    <path d="M212 210 Q172 194 134 208 L134 228 Q172 214 212 230 Z" fill="#7D93A5"/>
+    <rect x="124" y="204" width="8" height="32" rx="2" fill="#3E5060"/>
+  </g>
+</svg>
