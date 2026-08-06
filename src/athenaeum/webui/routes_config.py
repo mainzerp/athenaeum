@@ -25,6 +25,7 @@ from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST
 from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.librarian.prompts import build_system_prompt, render_curate_prompt_display
 from athenaeum.library import semantic as semantic_mod
+from athenaeum.scheduler import CurateScheduler
 from athenaeum.webui import deps
 
 router = APIRouter(prefix="/config", dependencies=[Depends(deps.csrf_protect)])
@@ -390,6 +391,8 @@ def curator_form(
     request: Request,
     conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
     saved: bool = False,
+    msg: str | None = None,
+    error: str | None = None,
 ):
     user = deps.current_user(request, conn)
     if user is None:
@@ -407,6 +410,8 @@ def curator_form(
             "curator_prompt": render_curate_prompt_display(addendum),
             "addendum_set": bool(addendum),
             "saved": saved,
+            "msg": msg,
+            "error": error,
         },
     )
 
@@ -455,6 +460,26 @@ def curator_schedule_save(
     )
     _evict(manager, user["id"])
     return deps.redirect("/config/agents/curator?saved=1")
+
+
+@router.post("/agents/curator/run")
+async def curator_run_now(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    scheduler: Annotated[CurateScheduler | None, Depends(deps.scheduler_dep)],
+):
+    """Manual 'Run now': background library_curate via the scheduler's wiring."""
+    user = deps.current_user(request, conn)
+    if user is None:
+        return deps.login_redirect(conn)
+    base = "/config/agents/curator?"
+    if scheduler is None:
+        return deps.redirect(base + urlencode({"error": "Manual runs are unavailable."}))
+    if scheduler.curator_busy(user["id"]):
+        return deps.redirect(base + urlencode({"error": "A curator run is already in progress."}))
+    scheduler.start_run_now(user["id"])
+    msg = "Curation run started; progress and result appear on the Activity page."
+    return deps.redirect(base + urlencode({"msg": msg}))
 
 
 # --- Agents (embeddings tab) ---------------------------------------------------

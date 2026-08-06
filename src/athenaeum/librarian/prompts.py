@@ -9,6 +9,7 @@ are contractual (semantics fixed, wording may be refined):
 - INDEX AND LOG MAINTENANCE IS AUTOMATIC
 - NO EMPTY SECTIONS
 - A STORE ENDS IN WRITES
+- UNICODE ESCAPES IN CODE
 - ANSWER HYGIENE
 - RETRIEVAL: one search_semantic per distinct information need
 - PLACEMENT: NAME THE SUBJECT FIRST before extending or minting a topic area
@@ -122,6 +123,11 @@ known — or is omitted.
 least one write call (create, edit, move, deprecate). Never answer such a \
 task with text alone — if the knowledge is already covered, enrich the \
 covering concept with the new detail instead of replying empty.
+7. UNICODE ESCAPES IN CODE. Never emit literal `\\uXXXX` escape sequences — \
+write the real Unicode characters directly. When a write result warns about \
+escapes inside code spans/fenced blocks, either rewrite with the real \
+characters or, if the literals are intentional documentation, resubmit the \
+same write with `allow_literal_escapes: true`.
 
 ## Answering
 
@@ -229,6 +235,13 @@ post-run health check and the next maintenance pass are the safety net.
 partial state since the previous curate run. Re-store the archived content \
 per your write discipline (search first, enrich in place, back-link); skip \
 content the library already covers.
+- Code-span escape candidates: literal `\\uXXXX` sequences inside code \
+spans/fenced blocks. For each file: read_document, judge every listed \
+occurrence — an artifact is repaired via edit_concept with the real \
+characters in place of the escapes; intentional documentation (e.g. text \
+explaining the escape format itself) is left unchanged. When a repair edit \
+keeps OTHER intentional literals inside code spans, pass \
+`allow_literal_escapes: true` on that edit.
 
 Convergence rules: respect the existing topic structure; never move \
 well-placed concepts; do not touch concepts that appear in no finding; \
@@ -253,6 +266,8 @@ Current organization report:
 {deprecated_cleanup}
 - store payloads pending review (failed or partial since the previous run):
 {store_payload_reviews}
+- code-span escape candidates (literal escapes inside code spans/fences):
+{code_span_escapes}
 - scope: findings cover the whole library on every run; an unaddressed \
 finding is re-reported until it is actually fixed. Store payload reviews \
 are the exception: each is reported once, after the run that recorded it, \
@@ -329,6 +344,18 @@ def build_curate_preamble(
         )
         or "  - none"
     )
+    escapes = findings.get("code_span_escape_candidates") or []
+    escape_lines = (
+        "\n".join(
+            f"  - {c.get('path')} ({c.get('title', '')}): "
+            + "; ".join(
+                f"line {o.get('line')}: {o.get('snippet', '')}"
+                for o in (c.get("occurrences") or [])
+            )
+            for c in escapes
+        )
+        or "  - none"
+    )
     extra = ""
     if instructions:
         extra = f"\nAdditional instructions from the caller:\n{instructions}\n"
@@ -342,6 +369,7 @@ def build_curate_preamble(
         semantic_duplicates=semantic_lines,
         deprecated_cleanup=cleanup_lines,
         store_payload_reviews=review_lines,
+        code_span_escapes=escape_lines,
         instructions=extra,
         addendum=_curate_addendum_section(addendum),
     )

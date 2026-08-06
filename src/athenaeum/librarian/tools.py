@@ -30,6 +30,7 @@ class Backend(Protocol):
         agent_label: str | None = None,
         requested_by: str | None = None,
         via: str | None = None,
+        allow_literal_escapes: bool = False,
     ) -> dict: ...
     def edit_concept(
         self,
@@ -41,6 +42,7 @@ class Backend(Protocol):
         agent_label: str | None = None,
         requested_by: str | None = None,
         via: str | None = None,
+        allow_literal_escapes: bool = False,
     ) -> dict: ...
     def move_concept(
         self, old_path: str, new_path: str, *, agent_label: str | None = None
@@ -167,6 +169,14 @@ TOOL_SCHEMAS: list[dict] = [
                     "type": "string",
                     "description": "Markdown body with absolute bundle-relative links.",
                 },
+                "allow_literal_escapes": {
+                    "type": "boolean",
+                    "description": (
+                        "Confirm intentional literal \\uXXXX escapes inside code "
+                        "spans/fenced blocks; suppresses the code-span escape "
+                        "warning. Never set it to keep artifact escapes."
+                    ),
+                },
             },
             ["path", "frontmatter", "body"],
         ),
@@ -193,6 +203,14 @@ TOOL_SCHEMAS: list[dict] = [
                 "new_body": {
                     "type": "string",
                     "description": "Replacement markdown body (replaces, not appends)",
+                },
+                "allow_literal_escapes": {
+                    "type": "boolean",
+                    "description": (
+                        "Confirm intentional literal \\uXXXX escapes inside code "
+                        "spans/fenced blocks; suppresses the code-span escape "
+                        "warning. Never set it to keep artifact escapes."
+                    ),
                 },
             },
             ["path"],
@@ -327,6 +345,8 @@ async def dispatch(
             agent_label=agent_label,
             requested_by=requested_by,
             via=via,
+            # L6 convention: absent or explicit null coerces to False.
+            allow_literal_escapes=bool(args.get("allow_literal_escapes")),
         )
     if name == "edit_concept":
         return await asyncio.to_thread(
@@ -338,6 +358,7 @@ async def dispatch(
             agent_label=agent_label,
             requested_by=requested_by,
             via=via,
+            allow_literal_escapes=bool(args.get("allow_literal_escapes")),
         )
     if name == "move_concept":
         return await asyncio.to_thread(

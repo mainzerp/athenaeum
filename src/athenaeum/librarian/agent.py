@@ -174,6 +174,16 @@ def _verification_note(verified: list[dict]) -> str:
     return f"\n\nPost-run verification: machine-confirmed {len(verified)} repaired concept(s)."
 
 
+def _hygiene_note(actions: list[dict]) -> str:
+    """Deterministic content-hygiene line; "" when nothing was repaired."""
+    if not actions:
+        return ""
+    return (
+        f"\n\nContent hygiene: decoded literal unicode escape artifacts in "
+        f"{len(actions)} existing concept(s) (F25 stock repair)."
+    )
+
+
 def _parse_follow_ups(text: str) -> list[str]:
     """Extract bullets under a '## Follow-ups' heading, if the model emitted one."""
     follow_ups: list[str] = []
@@ -1038,6 +1048,48 @@ class Librarian:
             logger.warning("semantic duplicate pass failed; continuing without it", exc_info=True)
             return []
 
+    def _content_hygiene_sweep(self, agent_label: str | None) -> list[dict]:
+        """Deterministic F25 stock repair of literal \\uXXXX body artifacts; never raises.
+
+        Scans the whole library via the backend (A10) for bodies where the
+        escape guard's decode would change content, then repairs each through
+        ``edit_concept`` with the RAW body — the guard inside ``edit_concept``
+        performs the decode (single source of truth). The sweep passes
+        ``allow_literal_escapes=True``: it never touches code-span content,
+        so the code-span warning would be pure per-run log noise (code-span
+        candidates surface via the findings scan in the same run). Bypasses
+        the tracker deliberately: there are no LLM writes to track, and the
+        sweep's repairs must not feed ``_verify_repairs``. A per-file failure
+        is logged and skipped, keeping partial progress (_verify_repairs
+        precedent). N dirty files = N commits (accepted; no batching API
+        exists, matching all bulk LLM repairs).
+        """
+        try:
+            entries = self.backend.escape_artifact_scan()
+        except Exception:
+            logger.warning("content hygiene scan failed; continuing without it", exc_info=True)
+            return []
+        actions: list[dict] = []
+        for entry in entries:
+            try:
+                result = self.backend.edit_concept(
+                    entry["path"],
+                    new_body=entry["body"],
+                    agent_label=agent_label,
+                    allow_literal_escapes=True,
+                )
+            except Exception:
+                logger.warning(
+                    "content hygiene repair failed for %s; skipping",
+                    entry["path"],
+                    exc_info=True,
+                )
+                continue
+            actions.append(
+                {"id": result["id"], "title": entry["title"] or result["id"], "action": "updated"}
+            )
+        return actions
+
     def _store_payload_reviews(self) -> list[dict]:
         """Failed/partial store payloads since the last curate run; never raises.
 
@@ -1073,6 +1125,19 @@ class Librarian:
                 break
         return reviews
 
+    def _code_span_escape_candidates(self) -> list[dict]:
+        """Concept files with literal \\uXXXX inside code spans/fences; never raises.
+
+        Structural state (not one-shot events): reported pre-run and
+        re-reported post-run until actually fixed (L14), unlike
+        ``_store_payload_reviews``.
+        """
+        try:
+            return self.backend.code_span_escape_candidates()
+        except Exception:
+            logger.warning("code-span escape scan failed; continuing without it", exc_info=True)
+            return []
+
     async def handle_curate(
         self,
         instructions: str | None = None,
@@ -1081,6 +1146,9 @@ class Librarian:
     ) -> dict:
         async with self._run_gate.acquire(self.config.user_id, KIND_CURATOR, wait=False):
             self._maybe_embed_reconcile()
+            # F25 stock repair: deterministic content-hygiene sweep BEFORE the findings
+            # scan, so the report (and the D6 no-op gate) see the post-repair state.
+            hygiene_actions = await asyncio.to_thread(self._content_hygiene_sweep, agent_label)
             # L14: findings are recomputed over the whole library every run —
             # an unaddressed finding is re-reported until it is actually fixed
             # (no changed-set amnesia from the curate_last_run_at baseline).
@@ -1091,12 +1159,16 @@ class Librarian:
                 self._semantic_duplicates, None
             )
             report["store_payload_reviews"] = await asyncio.to_thread(self._store_payload_reviews)
+            report["code_span_escape_candidates"] = await asyncio.to_thread(
+                self._code_span_escape_candidates
+            )
             if self.backend.findings_empty(report):
                 # No-op without an LLM call (maintain precedent, D6).
                 status = await asyncio.to_thread(self.backend.status)
                 return {
-                    "actions": [],
-                    "summary": "Library is well-organized; nothing to curate.",
+                    "actions": hygiene_actions,
+                    "summary": "Library is well-organized; nothing to curate."
+                    + _hygiene_note(hygiene_actions),
                     "organized": True,
                     "verified": [],
                     "findings": report,
@@ -1127,10 +1199,15 @@ class Librarian:
             # consumed by the run that reported them and never re-reported
             # (keeps the post-run 'organized' verdict exact).
             final["store_payload_reviews"] = []
+            # Structural state: code-span escape candidates MUST be
+            # re-reported post-run (L14), unlike payload reviews.
+            final["code_span_escape_candidates"] = await asyncio.to_thread(
+                self._code_span_escape_candidates
+            )
             final_status = await asyncio.to_thread(self.backend.status)
             organized = self.backend.findings_empty(final)
             return {
-                "actions": self._stored_entries(result.tracker),
+                "actions": hygiene_actions + self._stored_entries(result.tracker),
                 "summary": result.text
                 + _post_run_note(
                     organized,
@@ -1138,7 +1215,8 @@ class Librarian:
                     "open findings remain (see 'findings'); unaddressed findings are "
                     "re-reported on the next run until fixed.",
                 )
-                + _verification_note(verified),
+                + _verification_note(verified)
+                + _hygiene_note(hygiene_actions),
                 "organized": organized,
                 "verified": verified,
                 "findings": final,

@@ -669,8 +669,8 @@ def test_config_agents_curator_roundtrip(env):
     page = client.get("/config/agents/curator").text
     assert 'id="connection_id"' in page
     assert '<option value="" selected>Default</option>' in page
-    # connection options show the provider name
-    assert "anthropic</option>" in page
+    # connection options show the connection label
+    assert "Main</option>" in page
 
     response = client.post(
         "/config/agents/curator",
@@ -753,6 +753,72 @@ def test_config_agents_curator_schedule_invalid_time(env):
     assert response.status_code == 400
 
 
+# --- agents: curator "Run now" ---------------------------------------------------
+
+
+class FakeScheduler:
+    """Stand-in for CurateScheduler: records start_run_now calls."""
+
+    def __init__(self, *, busy=False):
+        self._busy = busy
+        self.started: list[str] = []
+
+    def curator_busy(self, user_id: str) -> bool:
+        return self._busy
+
+    def start_run_now(self, user_id: str, *, token_label: str = "webui") -> None:
+        self.started.append(user_id)
+
+
+def test_curator_run_now_requires_login(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    response = client.post("/config/agents/curator/run")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_curator_run_now_csrf_rejected(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    response = client.post("/config/agents/curator/run", csrf=False)
+    assert response.status_code == 403
+
+
+def test_curator_run_now_starts_background_run(env):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    fake = FakeScheduler()
+    client.app.state.curate_scheduler = fake
+    response = client.post("/config/agents/curator/run")
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/config/agents/curator?msg=")
+    assert fake.started == [user["id"]]
+
+
+def test_curator_run_now_busy_guard(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    fake = FakeScheduler(busy=True)
+    client.app.state.curate_scheduler = fake
+    response = client.post("/config/agents/curator/run")
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
+    assert fake.started == []
+
+
+def test_curator_run_now_button_present(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    page = client.get("/config/agents/curator").text
+    assert 'action="/config/agents/curator/run"' in page
+    assert "Run now" in page
+
+
 # --- agents: embeddings tab ----------------------------------------------------
 
 
@@ -768,9 +834,9 @@ def test_config_agents_embeddings_tab_renders(env):
     # shortlist options render with dims in the labels
     for name, dims in LOCAL_MODEL_SHORTLIST:
         assert f"{name} ({dims} dims)" in page
-    # anthropic connections are never offered for embeddings
-    assert "anthropic</option>" not in page
-    assert "openai</option>" in page
+    # anthropic connections are never offered for embeddings (options show labels)
+    assert "Claude</option>" not in page
+    assert "GPT</option>" in page
     # index status card renders with zero stored vectors
     assert "Stored vectors: 0" in page
 
@@ -1372,10 +1438,14 @@ def test_document_page_history_card(env):
     assert response.status_code == 200
     assert 'id="history-slider"' in response.text
     assert 'max="2"' in response.text  # 3 file commits -> slider 0..2
-    assert "See [Beta](/concepts/beta.md)." in response.text  # live body
-    # live view: no banner, no restore form
+    # one visible snap-point dot per timeline stop; the live stop is active
+    assert response.text.count('data-index="') == 3
+    assert 'class="history-tick active" data-index="2"' in response.text
+    assert '<a href="/concepts/beta.md">Beta</a>' in response.text  # live body, server-rendered
+    # live view: no banner; the restore form renders but stays hidden for JS
     assert "not the current version" not in response.text
-    assert "Restore this version" not in response.text
+    assert 'id="restore-form"' in response.text
+    assert "data-loading hidden>" in response.text
 
 
 def test_document_page_historical_view(env):
@@ -1387,14 +1457,18 @@ def test_document_page_historical_view(env):
     sha = HISTORY_COMMITS[1]["sha"]  # an older commit, not HEAD
     response = client.get("/library/document", params={"path": "/concepts/alpha.md", "sha": sha})
     assert response.status_code == 200
-    assert "historical body at bbbbbbb" in response.text
     # banner with the viewed commit
     assert "not the current version" in response.text
     assert "2026-08-02 10:00 UTC" in response.text
     assert "Back to current" in response.text
-    # per-file diff card
-    assert "Changes in" in response.text
+    # the viewed stop's snap point is highlighted
+    assert 'class="history-tick active" data-index="1"' in response.text
+    # the diff replaces the document body in place — no separate diff card,
+    # and the historical body itself is not rendered
+    assert "Changes in" not in response.text
+    assert "historical body at bbbbbbb" not in response.text
     assert "diff for /concepts/alpha.md at bbbbbbb" in response.text
+    assert response.text.index("diff-view") > response.text.index('id="md-rendered"')
     # the restore form posts path + sha to the restore route
     assert "/library/document/restore" in response.text
     assert "Restore this version" in response.text
@@ -1412,9 +1486,9 @@ def test_document_page_sha_equal_head_is_live(env):
         params={"path": "/concepts/alpha.md", "sha": HISTORY_COMMITS[0]["sha"]},
     )
     assert response.status_code == 200
-    assert "See [Beta](/concepts/beta.md)." in response.text  # live body
+    assert '<a href="/concepts/beta.md">Beta</a>' in response.text  # live body, server-rendered
     assert "not the current version" not in response.text
-    assert "Restore this version" not in response.text
+    assert "data-loading hidden>" in response.text  # restore form hidden in live view
 
 
 def test_document_page_unknown_sha_404(env):
@@ -1902,6 +1976,8 @@ def test_activity_page_and_rows(env):
     assert "/library/traces/t-noop" not in response.text
     assert "/library/traces/t-status" not in response.text
     assert "boom" in response.text
+    # timestamps carry the raw UTC value for the client-side local-time render
+    assert 'data-utc="' in response.text
     # registry absent on the test app: empty in-flight section, no crash
     assert "No calls in flight." in response.text
 

@@ -22,6 +22,8 @@ def test_default_prompt_has_write_discipline_markers():
     assert "INDEX AND LOG MAINTENANCE IS AUTOMATIC" in DEFAULT_SYSTEM_PROMPT
     assert "NO EMPTY SECTIONS" in DEFAULT_SYSTEM_PROMPT
     assert "A STORE ENDS IN WRITES" in DEFAULT_SYSTEM_PROMPT
+    assert "UNICODE ESCAPES IN CODE" in DEFAULT_SYSTEM_PROMPT
+    assert "allow_literal_escapes" in DEFAULT_SYSTEM_PROMPT
     assert "NEVER RE-READ" in DEFAULT_SYSTEM_PROMPT
     assert "ANSWER HYGIENE" in DEFAULT_SYSTEM_PROMPT
 
@@ -135,7 +137,7 @@ def test_curate_preamble_renders_findings():
         },
         instructions="be careful",
     )
-    assert empty.count("- none") == 7
+    assert empty.count("- none") == 8
     assert "be careful" in empty
 
 
@@ -177,6 +179,57 @@ def test_curate_preamble_renders_store_payload_reviews():
     assert "never re-reported" in preamble
 
 
+def test_curate_preamble_renders_code_span_escapes():
+    """The 8th finding key: literal escapes inside code spans, LLM-judged."""
+    findings = {
+        "type_named_folders": [],
+        "oversized_folders": [],
+        "thin_concepts": [],
+        "near_duplicate_candidates": [],
+        "code_span_escape_candidates": [
+            {
+                "path": "/a.md",
+                "title": "Title A",
+                "occurrences": [
+                    {"line": 3, "snippet": "DP\\u20111"},
+                    {"line": 5, "snippet": "and `\\u2014` again"},
+                ],
+            },
+            {
+                "path": "/b.md",
+                "title": "Title B",
+                "occurrences": [{"line": 1, "snippet": "use `\\u2011` span"}],
+            },
+        ],
+        "concepts_scanned": 0,
+        "since": None,
+    }
+    preamble = build_curate_preamble(findings)
+    assert "Code-span escape candidates" in preamble  # instruction bullet
+    assert "code-span escape candidates" in preamble  # report line
+    assert "  - /a.md (Title A): line 3: DP\\u20111; line 5: and `\\u2014` again" in preamble
+    assert "  - /b.md (Title B): line 1: use `\\u2011` span" in preamble
+    # the L14 re-report rule covers this key: no one-shot carve-out
+    assert "re-reported until it is actually fixed" in preamble
+
+    empty = build_curate_preamble(
+        {
+            "type_named_folders": [],
+            "oversized_folders": [],
+            "thin_concepts": [],
+            "near_duplicate_candidates": [],
+            "code_span_escape_candidates": [],
+            "concepts_scanned": 0,
+            "since": None,
+        }
+    )
+    report_line = next(
+        line for line in empty.splitlines() if line.startswith("- code-span escape candidates")
+    )
+    occurrences_line = empty.splitlines()[empty.splitlines().index(report_line) + 1]
+    assert occurrences_line == "  - none"
+
+
 def test_curate_preamble_pins_series_rule():
     findings = {
         "type_named_folders": [],
@@ -216,6 +269,7 @@ def test_render_curate_prompt_display():
     assert "CURATION TASK" in plain
     assert "{instructions}" in plain  # placeholders stay visible
     assert "{semantic_duplicates}" in plain
+    assert "{code_span_escapes}" in plain
     assert "{addendum}" not in plain
     assert "Standing curation rules from the library owner:" not in plain
 

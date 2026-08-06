@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 import pytest
 
 from athenaeum import db as db_module
-from athenaeum.librarian.agent import CURATOR_VERIFIER
+from athenaeum.librarian.agent import CURATOR_VERIFIER, KIND_CURATOR
 from athenaeum.librarian.gate import AgentRunBusyError
 from athenaeum.librarian.llm import LLMResponse, ToolCall
 from athenaeum.librarian.manager import LibrarianManager
@@ -305,6 +305,60 @@ async def test_noop_run_journals_two_rows_without_traces(tmp_path):
     assert trace_files(manager) == []  # no-op runs write no trace file
 
 
+async def test_nightly_hygiene_repair_without_llm(tmp_path):
+    """F25 stock repair on the scheduler path: the curate step's deterministic
+    hygiene sweep repairs a dirty on-disk concept via edit_concept (no LLM),
+    and the action surfaces as a mutation -> seed invalidation."""
+    seed_cache = RecordingSeedCache()
+    scheduler, manager, backend, providers, db_path = make_stack(tmp_path, seed_cache=seed_cache)
+    root = manager.library_root("user-a")
+    root.mkdir(parents=True, exist_ok=True)
+    dirty_body = "prose with escape \\u2011 here. " * 10 + "\n"  # >200 chars: no thin finding
+    (root / "a.md").write_text(
+        "---\ntype: Note\ntitle: Alpha\n---\n" + dirty_body,
+        encoding="utf-8",
+    )
+    # the fake's edit_concept targets the in-memory docs (it does not decode)
+    backend.docs["/a.md"] = {
+        "frontmatter": {"type": "Note", "title": "Alpha"},
+        "body": dirty_body,
+    }
+
+    await scheduler.tick(at(DAY1, "02:59"))
+    await scheduler.tick(at(DAY1, "03:00"))
+
+    assert ("edit_concept", "/a.md", SCHEDULER_LABEL, None, None) in backend.calls
+    assert seed_cache.invalidated == ["user-a"]
+    assert all(provider.calls == [] for provider in providers)  # no LLM calls
+    rows = activity_rows(db_path)
+    assert len(rows) == 2
+    assert all(row["outcome"] == "ok" for row in rows)
+
+
+async def test_nightly_code_span_candidate_wakes_curator(tmp_path):
+    """A fence-only escape file is not a sweep repair but a code-span escape
+    candidate: the nightly curate wakes the curator LLM (scripted
+    keep-literal response), the run completes, and both activity rows are ok."""
+    scripts = [LLMResponse(text="Intentional documentation; left unchanged.")]
+    scheduler, manager, backend, providers, db_path = make_stack(tmp_path, provider_scripts=scripts)
+    root = manager.library_root("user-a")
+    root.mkdir(parents=True, exist_ok=True)
+    body = "```text\n" + "DP\\u20111 " * 30 + "\n```\n"  # >200 chars: no thin finding
+    (root / "a.md").write_text(
+        "---\ntype: Note\ntitle: Alpha\n---\n" + body,
+        encoding="utf-8",
+    )
+
+    await scheduler.tick(at(DAY1, "02:59"))
+    await scheduler.tick(at(DAY1, "03:00"))
+
+    assert providers[0].calls, "a code-span candidate must wake the curator LLM"
+    assert (root / "a.md").read_text(encoding="utf-8").endswith(body)  # untouched
+    rows = activity_rows(db_path)
+    assert len(rows) == 2
+    assert all(row["outcome"] == "ok" for row in rows)
+
+
 async def test_noop_curate_rebaselines_last_run(tmp_path):
     scheduler, manager, _, _, db_path = make_stack(tmp_path)
     await scheduler.tick(at(DAY1, "02:59"))
@@ -472,3 +526,46 @@ async def test_hung_run_times_out_and_next_user_proceeds(tmp_path, caplog):
     rows_b = activity_rows(str(db_path), "user-b")
     assert {row["tool"] for row in rows_b} == {"library_maintain", "library_curate"}
     assert all(row["outcome"] == "ok" for row in rows_b)
+
+
+# --- manual "Run now" (WebUI trigger) --------------------------------------------
+
+
+async def test_run_now_journals_webui_row_and_rebaselines(tmp_path):
+    scheduler, manager, _, _, db_path = make_stack(tmp_path)
+    assert manager.curate_last_run_at("user-a") is None
+    await scheduler.run_now("user-a")
+    rows = activity_rows(db_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["tool"] == "library_curate"
+    assert row["token_label"] == "webui"
+    assert row["outcome"] == "ok"
+    last_run = manager.curate_last_run_at("user-a")
+    assert last_run is not None
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.get_config(conn, "user-a")["curate_last_run_at"] == last_run
+    finally:
+        conn.close()
+
+
+async def test_run_now_skips_unconfigured_user(tmp_path):
+    scheduler, _, _, providers, db_path = make_stack(tmp_path, configured=False)
+    await scheduler.run_now("user-a")
+    assert activity_rows(db_path) == []
+    assert providers == []  # no LLM provider was ever built
+
+
+async def test_run_now_gate_contention_journals_error_row(tmp_path):
+    """A curator gate held by another entry point: the manual run is rejected
+    by the gate inside the handler and journaled as an error row (A8)."""
+    scheduler, manager, _, _, db_path = make_stack(tmp_path)
+    async with manager.run_gate.acquire("user-a", KIND_CURATOR, wait=False):
+        await scheduler.run_now("user-a")
+    rows = activity_rows(db_path)
+    assert len(rows) == 1
+    assert rows[0]["tool"] == "library_curate"
+    assert rows[0]["outcome"] == "error"
+    assert "in progress" in rows[0]["error"]
+    assert manager.curate_last_run_at("user-a") is None  # no re-baseline on failure

@@ -24,6 +24,7 @@ from athenaeum.librarian.llm import LLMResponse, ToolCall
 from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.librarian.tools import dispatch
 from athenaeum.librarian.tracing import current_trace
+from athenaeum.library import escape_guard as escape_guard_mod
 from athenaeum.library import organize as organize_mod
 from athenaeum.mcp_server import (
     BearerAuthMiddleware,
@@ -65,6 +66,12 @@ class FakeBackend:
     def organization_findings(self, *, since=None) -> dict:
         return organize_mod.organization_findings(self.scan_root, since=since)
 
+    def escape_artifact_scan(self):
+        return escape_guard_mod.scan_escape_artifacts(self.scan_root)
+
+    def code_span_escape_candidates(self):
+        return escape_guard_mod.scan_code_span_escape_candidates(self.scan_root)
+
     def findings_empty(self, report: dict) -> bool:
         return organize_mod.findings_empty(report)
 
@@ -92,7 +99,15 @@ class FakeBackend:
         return []
 
     def create_concept(
-        self, path, frontmatter, body, *, agent_label=None, requested_by=None, via=None
+        self,
+        path,
+        frontmatter,
+        body,
+        *,
+        agent_label=None,
+        requested_by=None,
+        via=None,
+        allow_literal_escapes=False,
     ) -> dict:
         self.calls.append(("create_concept", path, agent_label, requested_by, via))
         fm = dict(frontmatter)
@@ -112,6 +127,7 @@ class FakeBackend:
         agent_label=None,
         requested_by=None,
         via=None,
+        allow_literal_escapes=False,
     ) -> dict:
         self.calls.append(("edit_concept", path, agent_label, requested_by, via))
         self.docs[path]["frontmatter"].update(frontmatter_patch or {})

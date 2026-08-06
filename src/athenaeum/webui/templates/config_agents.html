@@ -6,6 +6,8 @@
   <p class="subtitle">Model and prompt per agent.</p>
 </div>
 {% if saved %}<div class="js-flash" data-type="success" data-message="Saved." hidden></div>{% endif %}
+{% if msg %}<div class="js-flash" data-type="success" data-message="{{ msg }}" hidden></div>{% endif %}
+{% if error %}<div class="js-flash" data-type="danger" data-message="{{ error }}" hidden></div>{% endif %}
 
 <div class="tab-nav">
   <a class="tab-btn {% if tab == 'librarian' %}tab-btn-active{% endif %}" href="/config/agents/librarian">Librarian</a>
@@ -116,6 +118,19 @@
           never caught up. Every run is journaled on the Activity page.</p>
       </div>
       <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">Manual curation</div>
+  <div class="card-body">
+    <form method="post" action="/config/agents/curator/run" data-loading>
+      {{ csrf_input(request) }}
+      <p class="muted text-sm">Runs the deterministic content-hygiene sweep and a full
+        curation pass now, in the background. Progress and the result appear on the
+        Activity page; the schedule is unaffected.</p>
+      <button type="submit" class="btn btn-primary">Run now</button>
     </form>
   </div>
 </div>

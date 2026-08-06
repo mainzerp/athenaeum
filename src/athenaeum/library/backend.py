@@ -32,6 +32,7 @@ from pathlib import Path
 from athenaeum import __version__
 
 from ..isolation import resolve_under
+from . import escape_guard as escape_guard_mod
 from . import frontmatter as fm_mod
 from . import gittool as gittool_mod
 from . import hybrid as hybrid_mod
@@ -430,6 +431,14 @@ class LibraryBackend:
         """Structural organization findings over this bundle."""
         return organize_mod.organization_findings(self.root, since=since)
 
+    def escape_artifact_scan(self) -> list[dict]:
+        """Concept files with repairable literal \\uXXXX body artifacts (F25 stock scan)."""
+        return escape_guard_mod.scan_escape_artifacts(self.root)
+
+    def code_span_escape_candidates(self) -> list[dict]:
+        """Concept files with literal \\uXXXX inside code spans/fences (LLM-judged)."""
+        return escape_guard_mod.scan_code_span_escape_candidates(self.root)
+
     @staticmethod
     def findings_empty(report: dict) -> bool:
         return organize_mod.findings_empty(report)
@@ -464,6 +473,7 @@ class LibraryBackend:
         agent_label: str | None = None,
         requested_by: str | None = None,
         via: str | None = None,
+        allow_literal_escapes: bool = False,
     ) -> dict:
         with self._write_lock():
             abs_path = self._guard_concept_path(path)
@@ -474,6 +484,20 @@ class LibraryBackend:
             # writer of 'verified', so a caller-supplied key is silently dropped.
             fm.pop("verified", None)
             self._require_type(fm)
+            # F25: decode literal \uXXXX artifacts outside code spans/fences
+            # before they hit disk; clean bodies pass through byte-identical.
+            body, escape_warning = escape_guard_mod.decode_unicode_escapes(body)
+            if escape_warning:
+                logger.warning("create_concept %s: %s", path, escape_warning)
+            # Warn-always on literal escapes inside code spans/fences (left
+            # untouched): the scan runs on the post-decode body (code-span
+            # content is decode-invariant) and is skipped entirely when the
+            # caller confirmed intentional literals.
+            code_span_warning = None
+            if not allow_literal_escapes:
+                code_span_warning = escape_guard_mod.code_span_escape_warning(body)
+                if code_span_warning:
+                    logger.warning("create_concept %s: %s", path, code_span_warning)
             # Caller-supplied 'generated' (incl. forged sub-keys) is replaced
             # wholesale; only the trusted parameters add provenance sub-keys.
             self._inject_generated(fm, requested_by=requested_by, via=via, preserve=False)
@@ -484,7 +508,11 @@ class LibraryBackend:
             log_mod.append_entry(self.root, "Creation", text, agent_label=agent_label)
             self._git_commit("Creation", text, agent_label)
             self.seed_cache = None
-            return {"id": bundle[:-3], "action": "created"}
+            result = {"id": bundle[:-3], "action": "created"}
+            warnings = [w for w in (escape_warning, code_span_warning) if w]
+            if warnings:
+                result["warnings"] = warnings
+            return result
 
     def edit_concept(
         self,
@@ -496,6 +524,7 @@ class LibraryBackend:
         agent_label: str | None = None,
         requested_by: str | None = None,
         via: str | None = None,
+        allow_literal_escapes: bool = False,
     ) -> dict:
         with self._write_lock():
             abs_path = self._guard_concept_path(path)
@@ -506,6 +535,18 @@ class LibraryBackend:
             if remove_keys and "verified" in remove_keys:
                 raise ValueError("'verified' is never modified by edits")
             fm, body = fm_mod.split_document(abs_path.read_text(encoding="utf-8"))
+            escape_warning = None
+            code_span_warning = None
+            if new_body is not None:
+                # F25: decode literal \uXXXX artifacts in the NEW body only;
+                # a body-less edit never rescans the existing on-disk body.
+                new_body, escape_warning = escape_guard_mod.decode_unicode_escapes(new_body)
+                if escape_warning:
+                    logger.warning("edit_concept %s: %s", path, escape_warning)
+                if not allow_literal_escapes:
+                    code_span_warning = escape_guard_mod.code_span_escape_warning(new_body)
+                    if code_span_warning:
+                        logger.warning("edit_concept %s: %s", path, code_span_warning)
             for key, value in (frontmatter_patch or {}).items():
                 fm[key] = value
             for key in remove_keys or []:
@@ -523,7 +564,11 @@ class LibraryBackend:
             log_mod.append_entry(self.root, "Update", text, agent_label=agent_label)
             self._git_commit("Update", text, agent_label)
             self.seed_cache = None
-            return {"id": bundle[:-3], "action": "updated"}
+            result = {"id": bundle[:-3], "action": "updated"}
+            warnings = [w for w in (escape_warning, code_span_warning) if w]
+            if warnings:
+                result["warnings"] = warnings
+            return result
 
     def verify_concept(
         self, path: str, *, by: str, at: str | None = None, agent_label: str | None = None
@@ -732,6 +777,16 @@ class LibraryBackend:
         git = self._require_git()
         rel = self._bundle_path(path).lstrip("/")
         return git.file_diff(sha, self._path_at_commit(git, sha, rel))
+
+    def file_diff_to_head(self, sha: str, path: str) -> str:
+        """Unified patch of one concept path between ``sha`` and current HEAD
+        (rename-aware: covers the path valid at ``sha`` and the current path)."""
+        self._guard_concept_path(path)
+        git = self._require_git()
+        rel = self._bundle_path(path).lstrip("/")
+        old = self._path_at_commit(git, sha, rel)
+        paths = (rel,) if old == rel else (rel, old)
+        return git.diff_to_head(sha, *paths)
 
     def restore_file_from_commit(self, path: str, sha: str) -> None:
         """Restore ONE document to its state at ``sha`` as one new commit.

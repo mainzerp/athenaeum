@@ -39,7 +39,7 @@ from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.librarian.tracing import RequestTelemetry, mint_request_id
 from athenaeum.library import transfer
 from athenaeum.library.gittool import GitError
-from athenaeum.webui import deps
+from athenaeum.webui import deps, markdown_render
 
 router = APIRouter(dependencies=[Depends(deps.csrf_protect)])
 
@@ -159,7 +159,7 @@ def document_page(
         return deps.login_redirect(conn)
     user, backend = ctx
     history_available = backend.history_available
-    file_commits, viewed, diff, viewed_index = [], None, None, 0
+    file_commits, viewed, diff_html = [], None, None
     head = None
     if history_available:
         try:
@@ -169,6 +169,10 @@ def document_page(
             # raise contract of file_history makes this cheap insurance.
             file_commits = []
         head = backend.git_head()
+    # Slider model: oldest-LEFT / newest-RIGHT; the rightmost stop doubles
+    # as the live view (the newest file commit IS the live content).
+    timeline = file_commits[::-1]
+    viewed_index = len(timeline) - 1
     if sha and history_available:
         if head and (head == sha or head.startswith(sha)):
             # The viewed commit IS the live state: plain live view, no banner.
@@ -182,13 +186,14 @@ def document_page(
                 raise HTTPException(status_code=404, detail="Commit not found") from exc
             for index, entry in enumerate(file_commits):
                 if entry["sha"] == sha or entry["sha"].startswith(sha):
-                    viewed, viewed_index = entry, index
+                    viewed = entry
+                    viewed_index = len(file_commits) - 1 - index
                     break
             if viewed is None:
                 # Commit outside the file's own log (hand-crafted URL); the
                 # template guards the empty timestamp.
                 viewed = {"sha": sha, "short": sha[:7], "timestamp": "", "subject": ""}
-            diff = backend.file_diff_at(sha, path)
+            diff_html = markdown_render.render_diff_html(backend.file_diff_at(sha, path))
     else:
         doc = _read_document(backend, path)
     fm = doc.get("frontmatter") or {}
@@ -202,16 +207,44 @@ def document_page(
             "tags": fm.get("tags") or [],
             "trust": deps.trust_tier(fm),
             "stale": deps.is_stale(fm),
-            "file_commits": file_commits,
+            "body_html": markdown_render.render_markdown(doc["body"]),
+            "timeline": timeline,
             "viewed": viewed,
             "viewed_index": viewed_index,
-            "diff": diff,
+            "diff_html": diff_html,
             "history_configured": backend.history_configured,
             "history_available": history_available,
             "msg": msg,
             "error": error,
         },
     )
+
+
+@router.get("/library/document/diff")
+def document_diff(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    settings: Annotated[Settings, Depends(deps.settings_dep)],
+    path: str,
+    sha: str,
+):
+    """JSON preview diff of one document: ``sha`` vs current HEAD (slider)."""
+    ctx = _backend(request, conn, settings)
+    if ctx is None:
+        return deps.login_redirect(conn)
+    user, backend = ctx
+    if not backend.history_available:
+        raise HTTPException(status_code=404, detail="History unavailable")
+    head = backend.git_head()
+    if head and (head == sha or head.startswith(sha)):
+        return {"diff_html": ""}
+    try:
+        patch = backend.file_diff_to_head(sha, path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Document not found") from exc
+    except GitError as exc:
+        raise HTTPException(status_code=404, detail="Commit not found") from exc
+    return {"diff_html": markdown_render.render_diff_html(patch)}
 
 
 @router.get("/library/log")

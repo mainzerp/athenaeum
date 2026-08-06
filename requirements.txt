@@ -51,6 +51,7 @@ keyring==25.7.0
 loguru==0.7.3
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
+mdit-py-plugins==0.6.1
 mcp==1.28.1
 mdurl==0.1.2
 mmh3==5.2.1

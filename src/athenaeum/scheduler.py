@@ -20,6 +20,8 @@ Design notes (SCHEDULED_CURATION plan D5-D12, D16, D19):
   the curate run.
 - When either tool reported actions, the user's cached seed is invalidated so
   the next tools/list response carries a fresh seed.
+- Manual WebUI "Run now" triggers reuse the same ``_run_tool`` wiring with a
+  caller-supplied label ("webui") instead of "scheduler".
 
 Limitation (A20): due users run sequentially inside the tick (single-worker
 model), so one slow user delays the rest of the tick. Each user's run is
@@ -94,6 +96,9 @@ class CurateScheduler:
         # (manager.run_gate).
         self._last_abs_minute: int | None = None  # None until the first tick
         self._last_fired_day: dict[str, int] = {}  # user_id -> toordinal()
+        # Strong refs for fire-and-forget "Run now" tasks (an unreferenced
+        # task could be garbage-collected mid-run).
+        self._background: set[asyncio.Task] = set()
 
     async def run_forever(self) -> None:
         """Tick every ``interval`` seconds; a failed tick never kills the loop."""
@@ -185,8 +190,57 @@ class CurateScheduler:
         if mutated and self._seed_cache is not None:
             self._seed_cache.invalidate(user_id)
 
+    def curator_busy(self, user_id: str) -> bool:
+        """True while a curator run (any entry point) holds this user's gate."""
+        return self._manager.run_gate.locked(user_id, KIND_CURATOR)
+
+    def start_run_now(self, user_id: str, *, token_label: str = "webui") -> None:
+        """Spawn a manual curate run as a background task (WebUI 'Run now')."""
+        task = asyncio.create_task(self.run_now(user_id, token_label=token_label))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def run_now(self, user_id: str, *, token_label: str = "webui") -> None:
+        """Manual curate run: same gate/telemetry/trace/journal wiring as a scheduled
+        run, library_curate only (the F25 content-hygiene sweep runs at the top of
+        handle_curate). Completed runs re-baseline curate_last_run_at."""
+        librarian = await asyncio.to_thread(self._manager.get, user_id)
+        if not librarian.configured:
+            logger.info("run_now: skipping unconfigured user %s", user_id)
+            return
+        try:
+            result = await asyncio.wait_for(
+                self._run_tool(
+                    user_id, librarian, "library_curate", librarian.handle_curate, label=token_label
+                ),
+                timeout=self._run_timeout,
+            )
+        except TimeoutError:
+            logger.warning("run_now: curate run timed out for user %s", user_id)
+            return
+        except Exception:
+            logger.exception("run_now: curate run failed for user %s", user_id)
+            return
+        if result is None:
+            return  # failure already journaled by _run_tool
+        dirty = result.get("actions") or []
+        await asyncio.to_thread(self._manager.set_curate_last_run, user_id, db.utcnow())
+        try:
+            # A failed embedding run must never fail the curate run (maintain precedent).
+            await librarian.sync_embeddings(dirty)
+        except Exception:
+            logger.exception("run_now: embedding sync failed for user %s", user_id)
+        if dirty and self._seed_cache is not None:
+            self._seed_cache.invalidate(user_id)
+
     async def _run_tool(
-        self, user_id: str, librarian: Librarian, tool: str, handler
+        self,
+        user_id: str,
+        librarian: Librarian,
+        tool: str,
+        handler,
+        *,
+        label: str = SCHEDULER_LABEL,
     ) -> dict | None:
         """Run one tool with MCP-equivalent telemetry/trace/journal wiring.
 
@@ -201,7 +255,7 @@ class CurateScheduler:
                 {
                     "trace_id": telemetry.trace_id,
                     "user_id": user_id,
-                    "token_label": SCHEDULER_LABEL,
+                    "token_label": label,
                     "tool": tool,
                     "arguments": "{}",
                     "started_at": started_at,
@@ -211,8 +265,8 @@ class CurateScheduler:
         outcome, error_text, result = "ok", None, None
         journal = True
         try:
-            async with _agent_run(self._manager, user_id, SCHEDULER_LABEL, tool, for_client=False):
-                result = await handler(None, agent_label=SCHEDULER_LABEL)
+            async with _agent_run(self._manager, user_id, label, tool, for_client=False):
+                result = await handler(None, agent_label=label)
         except AgentRunBusyError as exc:
             # Gate contention after the pre-check: journaled as an error row,
             # matching the MCP wiring (A8).
@@ -232,7 +286,7 @@ class CurateScheduler:
                     self._db_path,
                     trace_id=telemetry.trace_id,
                     user_id=user_id,
-                    token_label=SCHEDULER_LABEL,
+                    token_label=label,
                     tool=tool,
                     arguments="{}",
                     started_at=started_at,

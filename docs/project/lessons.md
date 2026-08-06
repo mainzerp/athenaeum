@@ -397,6 +397,31 @@
   VOR der Fix-Auswahl einbauen — die erste Fix-Runde (30→10, 2000 chars)
   half kaum, weil der Preis pro Token das eigentliche Problem war;
   (3) Skript fuer kuenftige Messungen: `scripts/search_perf_bench.py`.
+- **F25 — Librarian schreibt literale `\uXXXX`-Escape-Sequenzen in Konzeptdateien
+  (2026-08-06, Beobachtung, lokale Dev-Library, RESOLVED (2026-08-06,
+  Write-Path-Guard: Auto-Decode in create_concept/edit_concept
+  + Curator-Hygiene-Sweep repariert Bestand deterministisch (handle_curate))).** User-Report
+  "komische Zeichen" in der neuen serverseitigen Markdown-Ansicht:
+  `ha-agenthub-architecture-lessons.md` zeigte `DP\u20111` statt `DP‑1`.
+  Byte-Check: die `.md`-Dateien enthalten die Escape-Sequenzen **literal als
+  ASCII-Text** (Rendering war korrekt, Daten sind dirty). Betroffen: 4
+  Dateien, ~120 Vorkommen (`\u2011` 84x, `\u2014` 28x, `\u202f` 18x, `\u2013`
+  1x) — ausschliesslich Lessons-/Versions-Dokumente, also
+  Librarian-Schreibartefakte (Modell emittierte `\\u2011` im Tool-Call-JSON
+  statt des echten Zeichens). War nie aufgefallen, weil die alte Client-seitige
+  Ansicht denselben Literaltext zeigte — kein Rendering-Regression. Entscheidung:
+  Auto-Decode-Guard im Write-Path (`library/escape_guard.py`, aufgerufen in
+  `create_concept`/`edit_concept`) — literale `\uXXXX` ausserhalb von
+  Code-Spans/Fences werden deterministisch dekodiert und als `warnings`-Eintrag
+  im Tool-Result gemeldet; ein Edit ohne `new_body` rescannt den Bestand nicht.
+  Einmal-Reparatur der 4 dirty Dateien vom User abgelehnt.
+  Nachschau (2026-08-06): die Code-Span-Semantik ist von stiller Ausnahme zu
+  LLM-Judgment geworden — Escapes in Code-Spans/Fences bleiben byte-identisch,
+  erzeugen aber warn-always einen `warnings`-Eintrag mit Zeile/Snippet
+  (unterdrueckbar per `allow_literal_escapes: true` auf write_concept/
+  edit_concept), und der Bestand wird ueber den neuen Curate-Finding-Key
+  `code_span_escape_candidates` dem Curator-LLM zur Beurteilung gemeldet
+  (struktureller Zustand, re-report bis gefixt, L14).
 - **F24 — "Scheduler laeuft nicht" war nicht reproduzierbar; Observability-
   Luecke statt Defekt (2026-08-05, RESOLVED in 0.23.0).** User-Report: der
   automatische Curator laufe nicht, keine Traces/Activity sichtbar, Schedule

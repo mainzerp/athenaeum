@@ -28,7 +28,10 @@ inbound links from non-deprecated concepts are pending deletion. The
 seventh, ``store_payload_reviews``, is another caller-filled placeholder:
 ``handle_curate`` fills it from the payload archive (failed/partial store
 requests since the previous curate run — one-shot events, not structural
-state).
+state). The eighth, ``code_span_escape_candidates``, is caller-filled too:
+``handle_curate`` fills it from the escape-guard code-span scan (literal
+``\\uXXXX`` inside code spans/fences) — structural state, re-reported until
+fixed (unlike the one-shot ``store_payload_reviews``).
 """
 
 from __future__ import annotations
@@ -77,6 +80,7 @@ FINDING_KEYS = (
     "semantic_duplicate_candidates",
     "deprecated_cleanup",
     "store_payload_reviews",
+    "code_span_escape_candidates",
 )
 
 
@@ -262,6 +266,9 @@ def organization_findings(root: str | Path, *, since: str | None = None) -> dict
         # Populated by the caller (handle_curate) from the payload archive;
         # always empty here.
         "store_payload_reviews": [],
+        # Populated by the caller (handle_curate) from the escape-guard
+        # code-span scan; always empty here.
+        "code_span_escape_candidates": [],
         "concepts_scanned": len(concepts),
         "since": since,
     }

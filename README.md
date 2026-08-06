@@ -6,6 +6,8 @@
 
 <p align="center"><strong>Your personal knowledge base that organizes itself.</strong></p>
 
+> **Note:** This project is "vibe coded" — the code was written iteratively with AI assistance.
+
 Athenaeum is a self-hosted knowledge memory for you and your AI tools.
 Instead of scattering notes across apps and chat histories, you tell
 Athenaeum what to remember — and a built-in librarian keeps everything filed,
@@ -44,8 +46,11 @@ your library as an interactive graph, read every document, and review a full
 activity log of each change and why it happened.
 
 Every library write is also a git commit. Every document page carries a
-History card: a slider over that file's commits, a read-only historical view
-with its diff, and "Restore this version" for that one file. The Library
+History card: a slider over that file's commits (oldest on the left, the
+live version on the right) with a live red/green preview diff of the
+selected commit against the current version, and "Restore this version"
+for that one file. Documents render as full GFM — tables, task lists, and
+syntax-highlighted code — rendered on the server with no CDN. The Library
 page carries the full history — per-commit diffs, revert for any commit, and
 an undoable reset slider; an optional remote in Library settings adds
 push/pull (remote auth uses the git client's own credentials).

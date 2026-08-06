@@ -14,7 +14,7 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -28,6 +28,9 @@ from athenaeum.librarian.manager import LibrarianManager
 # Re-exports (single source of truth is athenaeum.okf, CS-7); kept importable
 # here because the WebUI routes and graph module reference them as deps.*.
 from athenaeum.okf import TRUST_HUMAN, TRUST_MACHINE, TRUST_UNVERIFIED, is_stale, trust_tier
+
+if TYPE_CHECKING:
+    from athenaeum.scheduler import CurateScheduler
 
 __all__ = [
     "TRUST_HUMAN",
@@ -107,6 +110,15 @@ def manager_dep(request: Request) -> LibrarianManager | None:
     self-contained WebUI test app), which has no manager on app.state.
     """
     return getattr(request.app.state, "librarian_manager", None)
+
+
+def scheduler_dep(request: Request) -> CurateScheduler | None:
+    """FastAPI dependency: the app-level CurateScheduler, or None.
+
+    None when the app was assembled without create_app() (the self-contained
+    WebUI test app has no scheduler on app.state).
+    """
+    return getattr(request.app.state, "curate_scheduler", None)
 
 
 def db_path_for(settings: Settings) -> Path:

@@ -23,6 +23,15 @@ The version must stay in sync across:
 
 ### 0.23.0 (in development)
 
+Document Time Machine rework: the per-document slider is reversed to
+oldest-left/newest-right (rightmost stop = live view) and moving it shows a
+reload-free red/green preview diff of the selected commit vs HEAD
+(rename-aware `git diff <sha> HEAD`, served by the new read-only JSON
+endpoint `GET /library/document/diff`); restore stays the explicit
+append-only per-file restore. Document bodies now render server-side
+(markdown-it-py + mdit-py-plugins tasklists + Pygments; raw HTML escaped),
+replacing the marked/DOMPurify CDN pipeline.
+
 Search performance rework: `search_semantic` no longer reads the whole
 embeddings table per query (in-memory vector cache with in-place invalidation
 on upsert/delete), ranks with a NumPy-vectorized cosine (stdlib fallback),
@@ -42,7 +51,27 @@ Curate observability: `library_curate`'s `health_after` now reports
 `broken_links` alongside `healthy`/`orphans` (post-run scan, both the no-op
 and the LLM path), and the WebUI curator tab shows the scheduled-curation
 state (active/inactive, stored UTC time, last run timestamp) so a silent
-schedule is visible without DB or log access.
+schedule is visible without DB or log access. The curator tab also gains a
+manual "Run now" button that starts a background curate run (incl. the F25
+hygiene sweep), journaled on the Activity page as `webui`.
+
+Write-path escape guard: `create_concept`/`edit_concept` auto-decode literal
+`\uXXXX` escape artifacts in concept bodies outside code spans/fenced blocks
+at write time (F25); the decode is reported as a `warnings` entry in the
+write tool result, and a body-less edit never rescans the existing body.
+Escapes inside code spans/fenced blocks stay byte-untouched but are no
+longer silently exempt: the write result warns with the exact line/snippet
+locations, and the new optional `allow_literal_escapes: true` argument on
+`write_concept`/`edit_concept` is the stateless resubmit confirmation that
+suppresses the warning (prose escapes keep decoding regardless). The
+curator repairs the dirty stock deterministically: `library_curate` runs
+a content-hygiene sweep before its findings scan that decodes leftover
+literal escapes in existing bodies via `edit_concept` (surfaced as `updated`
+actions entries; never triggers the LLM by itself). Existing literals inside
+code spans/fences surface as the new `code_span_escape_candidates` curate
+finding — the curator LLM judges each listed occurrence (artifact → repair
+with real characters; intentional documentation → leave unchanged) and
+confirmed-intentional literals are re-reported on later runs until fixed.
 
 ### 0.22.0
 

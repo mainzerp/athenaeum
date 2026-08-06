@@ -21,6 +21,9 @@ dependencies = [
     "psycopg[binary]>=3.2,<4",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    "markdown-it-py>=4.2",
+    "mdit-py-plugins>=0.6",
+    "Pygments>=2.20",
 ]
 
 [project.optional-dependencies]

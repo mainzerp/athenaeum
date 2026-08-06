@@ -1,10 +1,14 @@
 """Tests for athenaeum.library.backend.LibraryBackend compound writes."""
 
+import json
 import shutil
 import subprocess
 
 import pytest
 
+from athenaeum.librarian.tools import dispatch
+from athenaeum.library import escape_guard as escape_guard_mod
+from athenaeum.library import frontmatter as fm_mod
 from athenaeum.library.backend import LibraryBackend, provision_library
 from athenaeum.library.frontmatter import split_document
 from athenaeum.library.gittool import GitError
@@ -690,3 +694,340 @@ def test_git_pull_wires_origin_configured_after_last_write(tmp_path):
 
     assert _git(lib, "remote", "get-url", "origin").strip() == str(bare)
     assert (lib / "pulled.md").read_text(encoding="utf-8") == "from remote\n"
+
+
+# --- literal unicode escape guard (F25) ---
+
+
+def test_create_decodes_escapes_in_prose(tmp_path):
+    """Literal \\uXXXX artifacts in prose are decoded and reported."""
+    backend = make_backend(tmp_path)
+    result = backend.create_concept("/a.md", {"type": "Concept"}, "DP\\u20111 and \\u2014 done\n")
+    doc = backend.read_document("/a.md")
+    assert doc["body"] == "DP\u20111 and \u2014 done\n"
+    assert "\\u" not in doc["body"]
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "2 literal unicode escape sequence(s)" in warnings[0]
+    assert "\\u2011" in warnings[0]
+    assert "\\u2014" in warnings[0]
+
+
+def test_clean_body_omits_warnings_key(tmp_path):
+    """A clean body yields the exact legacy result dict (no warnings key)."""
+    backend = make_backend(tmp_path)
+    result = backend.create_concept("/a.md", {"type": "Concept"}, "plain ASCII body\n")
+    assert result == {"id": "/a", "action": "created"}
+
+
+def test_escapes_inside_fenced_code_untouched(tmp_path):
+    """Fenced code blocks are an escape hatch; prose escapes still decode.
+
+    Warn-always: the fenced content stays byte-identical but earns a
+    code-span warning naming the exact line/snippet and the
+    allow_literal_escapes hint; a mixed body carries BOTH warnings.
+    """
+    backend = make_backend(tmp_path)
+    only_fence = "```text\nDP\\u20111\n```\n"
+    result = backend.create_concept("/a.md", {"type": "Concept"}, only_fence)
+    assert backend.read_document("/a.md")["body"] == only_fence
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "inside code spans/fenced blocks" in warnings[0]
+    assert "line 2: DP\\u20111" in warnings[0]
+    assert "allow_literal_escapes" in warnings[0]
+
+    mixed = "```text\nDP\\u20111\n```\nprose \\u2014 here\n"
+    result = backend.create_concept("/b.md", {"type": "Concept"}, mixed)
+    body = backend.read_document("/b.md")["body"]
+    assert "DP\\u20111" in body  # fenced content untouched
+    assert "prose \u2014 here" in body  # prose decoded
+    warnings = result["warnings"]
+    assert len(warnings) == 2
+    assert "Auto-decoded 1 literal unicode escape sequence(s)" in warnings[0]
+    assert "inside code spans/fenced blocks" in warnings[1]
+    assert "line 2: DP\\u20111" in warnings[1]
+
+
+def test_escapes_inside_tilde_fence_untouched(tmp_path):
+    """Tilde fences are treated like backtick fences (scan included)."""
+    backend = make_backend(tmp_path)
+    body = "~~~\nDP\\u20111\n~~~\n"
+    result = backend.create_concept("/a.md", {"type": "Concept"}, body)
+    assert backend.read_document("/a.md")["body"] == body
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "inside code spans/fenced blocks" in warnings[0]
+    assert "line 2: DP\\u20111" in warnings[0]
+
+
+def test_escapes_inside_inline_code_untouched(tmp_path):
+    """Inline code spans (single- and multi-backtick) pass through literal."""
+    backend = make_backend(tmp_path)
+    only_spans = "use `\\u2011` and `` `\\u2014` `` here\n"
+    result = backend.create_concept("/a.md", {"type": "Concept"}, only_spans)
+    assert backend.read_document("/a.md")["body"] == only_spans
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "2 literal unicode escape(s) inside code spans/fenced blocks" in warnings[0]
+    assert "line 1: use `\\u2011` and `` `\\u2014` `` here" in warnings[0]
+
+    mixed = "prose \\u2013 then `\\u2011` span\n"
+    result = backend.create_concept("/b.md", {"type": "Concept"}, mixed)
+    body = backend.read_document("/b.md")["body"]
+    assert body == "prose \u2013 then `\\u2011` span\n"
+    warnings = result["warnings"]
+    assert len(warnings) == 2
+    assert "Auto-decoded 1 literal unicode escape sequence(s)" in warnings[0]
+    assert "inside code spans/fenced blocks" in warnings[1]
+
+
+def test_ascii_target_escape_decoded(tmp_path):
+    """ALL \\uXXXX escapes decode, even ones targeting ASCII characters."""
+    backend = make_backend(tmp_path)
+    result = backend.create_concept("/a.md", {"type": "Concept"}, "\\u0041BC\n")
+    assert backend.read_document("/a.md")["body"] == "ABC\n"
+    assert "warnings" in result
+
+
+def test_surrogate_escape_left_literal(tmp_path):
+    """Surrogate-range escapes (U+D800-DFFF) stay literal and are reported."""
+    backend = make_backend(tmp_path)
+    result = backend.create_concept("/a.md", {"type": "Concept"}, "x \\ud800 y\n")
+    assert backend.read_document("/a.md")["body"] == "x \\ud800 y\n"
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "Skipped 1 escape(s)" in warnings[0]
+    assert "\\ud800" in warnings[0]
+
+
+def test_edit_decodes_new_body(tmp_path):
+    """edit_concept decodes escapes in a supplied new_body."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept"}, "clean\n")
+    result = backend.edit_concept("/a.md", new_body="x \\u2013 y\n")
+    assert backend.read_document("/a.md")["body"] == "x \u2013 y\n"
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "1 literal unicode escape sequence(s)" in warnings[0]
+
+
+def test_edit_without_body_leaves_existing_body_untouched(tmp_path):
+    """A body-less edit never rescans the existing on-disk body."""
+    backend = make_backend(tmp_path)
+    (tmp_path / "lib" / "a.md").write_text(
+        fm_mod.dump_document({"type": "Concept"}, "dirty \\u2011 body\n"),
+        encoding="utf-8",
+    )
+    result = backend.edit_concept("/a.md", frontmatter_patch={"title": "T"})
+    assert backend.read_document("/a.md")["body"] == "dirty \\u2011 body\n"
+    assert result == {"id": "/a", "action": "updated"}
+
+
+async def test_dispatch_result_carries_warning(tmp_path):
+    """The model-facing dispatch result carries the decode warning."""
+    result = await dispatch(
+        "write_concept",
+        {"path": "/b.md", "frontmatter": {"type": "Concept"}, "body": "a \\u2011 b\n"},
+        make_backend(tmp_path),
+    )
+    assert "warnings" in result
+    assert "Auto-decoded 1 literal unicode escape sequence(s)" in json.dumps(result)
+
+
+def test_allow_literal_escapes_suppresses_code_span_warning(tmp_path):
+    """allow_literal_escapes=True skips the code-span scan entirely on create
+    and edit; prose escapes in a mixed body still decode + warn (the flag
+    covers only code spans/fences)."""
+    backend = make_backend(tmp_path)
+    only_fence = "```text\nDP\\u20111\n```\n"
+    result = backend.create_concept(
+        "/a.md", {"type": "Concept"}, only_fence, allow_literal_escapes=True
+    )
+    assert backend.read_document("/a.md")["body"] == only_fence
+    assert result == {"id": "/a", "action": "created"}
+
+    backend.create_concept("/b.md", {"type": "Concept"}, "clean\n")
+    result = backend.edit_concept("/b.md", new_body=only_fence, allow_literal_escapes=True)
+    assert backend.read_document("/b.md")["body"] == only_fence
+    assert result == {"id": "/b", "action": "updated"}
+
+    mixed = "```text\nDP\\u20111\n```\nprose \\u2014 here\n"
+    result = backend.create_concept("/c.md", {"type": "Concept"}, mixed, allow_literal_escapes=True)
+    body = backend.read_document("/c.md")["body"]
+    assert "DP\\u20111" in body  # fenced content untouched
+    assert "prose \u2014 here" in body  # prose decoded
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "Auto-decoded 1 literal unicode escape sequence(s)" in warnings[0]
+
+
+async def test_dispatch_allow_literal_escapes_suppresses_warning(tmp_path):
+    """allow_literal_escapes passes schema/dispatch and suppresses the
+    code-span warning (pins the tools.py threading)."""
+    backend = make_backend(tmp_path)
+    only_fence = "```text\nDP\\u20111\n```\n"
+    result = await dispatch(
+        "write_concept",
+        {
+            "path": "/b.md",
+            "frontmatter": {"type": "Concept"},
+            "body": only_fence,
+            "allow_literal_escapes": True,
+        },
+        backend,
+    )
+    assert result == {"id": "/b", "action": "created"}
+    assert backend.read_document("/b.md")["body"] == only_fence
+
+
+# --- escape artifact stock scan (F25 curator hygiene sweep) ---
+
+
+def test_escape_artifact_scan_finds_dirty_body(tmp_path):
+    """A concept file with a literal escape in prose is reported, RAW body."""
+    backend = make_backend(tmp_path)
+    dirty = "dirty \\u2011 body\n"
+    (tmp_path / "lib" / "a.md").write_text(
+        fm_mod.dump_document({"type": "Concept", "title": "A"}, dirty),
+        encoding="utf-8",
+    )
+    entries = backend.escape_artifact_scan()
+    assert entries == [{"path": "/a.md", "title": "A", "body": dirty}]
+    # the scan is read-only: the on-disk body is still escaped
+    assert backend.read_document("/a.md")["body"] == dirty
+
+
+def test_escape_artifact_scan_skips_fence_and_span_only(tmp_path):
+    """Escapes confined to fences/inline code spans are exempt (pre-filter pin:
+    decode-compare, not a bare regex)."""
+    backend = make_backend(tmp_path)
+    (tmp_path / "lib" / "a.md").write_text(
+        fm_mod.dump_document({"type": "Concept"}, "```text\nDP\\u20111\n```\n"),
+        encoding="utf-8",
+    )
+    (tmp_path / "lib" / "b.md").write_text(
+        fm_mod.dump_document({"type": "Concept"}, "use `\\u2011` span\n"),
+        encoding="utf-8",
+    )
+    assert backend.escape_artifact_scan() == []
+
+
+def test_escape_artifact_scan_skips_surrogate_only(tmp_path):
+    """Surrogate-only escapes stay literal: decoding changes nothing, so the
+    file is never reported (prevents repair-noop loops)."""
+    backend = make_backend(tmp_path)
+    (tmp_path / "lib" / "a.md").write_text(
+        fm_mod.dump_document({"type": "Concept"}, "x \\ud800 y\n"),
+        encoding="utf-8",
+    )
+    assert backend.escape_artifact_scan() == []
+
+
+def test_escape_artifact_scan_clean_library(tmp_path):
+    """Clean concepts are never reported."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept"}, "plain ASCII body\n")
+    backend.create_concept("/b.md", {"type": "Concept"}, "unicode \u2011 direct\n")
+    assert backend.escape_artifact_scan() == []
+
+
+# --- code-span escape candidates scan (LLM-judged curator finding) ---
+
+
+def test_code_span_candidates_scan_finds_fence_and_span(tmp_path):
+    """Fence + inline-span occurrences are reported with correct 1-based
+    lines and stripped snippets; the scan is read-only."""
+    backend = make_backend(tmp_path)
+    (tmp_path / "lib" / "a.md").write_text(
+        fm_mod.dump_document(
+            {"type": "Concept", "title": "A"},
+            "intro prose\n```text\nDP\\u20111\n```\nuse `\\u2014` span\n",
+        ),
+        encoding="utf-8",
+    )
+    entries = backend.code_span_escape_candidates()
+    assert entries == [
+        {
+            "path": "/a.md",
+            "title": "A",
+            "occurrences": [
+                {"line": 3, "snippet": "DP\\u20111"},
+                {"line": 5, "snippet": "use `\\u2014` span"},
+            ],
+        }
+    ]
+    # read-only: the on-disk body still holds the literals
+    assert "\\u2011" in backend.read_document("/a.md")["body"]
+
+
+def test_code_span_candidates_scan_clean_and_prose_only(tmp_path):
+    """Clean files and prose-only escapes yield no candidates (prose belongs
+    to the deterministic decode path)."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept"}, "plain ASCII body\n")
+    (tmp_path / "lib" / "b.md").write_text(
+        fm_mod.dump_document({"type": "Concept"}, "dirty \\u2011 prose\n"),
+        encoding="utf-8",
+    )
+    assert backend.code_span_escape_candidates() == []
+
+
+def test_code_span_candidates_scan_skips_unreadable_file(tmp_path):
+    """An unparseable concept file is skipped, never fatal."""
+    backend = make_backend(tmp_path)
+    (tmp_path / "lib" / "a.md").write_text(
+        fm_mod.dump_document({"type": "Concept"}, "x `\\u2011` y\n"),
+        encoding="utf-8",
+    )
+    (tmp_path / "lib" / "broken.md").write_bytes(b"\xff\xfe invalid utf-8")
+    entries = backend.code_span_escape_candidates()
+    assert [e["path"] for e in entries] == ["/a.md"]
+
+
+def test_code_span_candidates_scan_reports_surrogate_in_span(tmp_path):
+    """Surrogate-range escapes inside code spans ARE reported (the LLM
+    judges; the scanner does not special-case them)."""
+    backend = make_backend(tmp_path)
+    (tmp_path / "lib" / "a.md").write_text(
+        fm_mod.dump_document({"type": "Concept"}, "x `\\ud800` y\n"),
+        encoding="utf-8",
+    )
+    entries = backend.code_span_escape_candidates()
+    assert entries == [
+        {
+            "path": "/a.md",
+            "title": "",
+            "occurrences": [{"line": 1, "snippet": "x `\\ud800` y"}],
+        }
+    ]
+
+
+def test_scan_code_span_escapes_bounds_occurrences():
+    """Occurrences per body are capped at MAX_CODE_SPAN_OCCURRENCES_PER_FILE
+    (first-N wins)."""
+    body = "\n".join(f"`\\u20{i:02x}`" for i in range(15)) + "\n"
+    occurrences = escape_guard_mod.scan_code_span_escapes(body)
+    assert len(occurrences) == escape_guard_mod.MAX_CODE_SPAN_OCCURRENCES_PER_FILE
+    assert [o["line"] for o in occurrences] == list(range(1, 11))
+
+
+def test_scan_code_span_escapes_truncates_snippet():
+    """Snippets are capped at MAX_CODE_SPAN_SNIPPET chars."""
+    body = "`" + "x" * 200 + "\\u2011`\n"
+    occurrences = escape_guard_mod.scan_code_span_escapes(body)
+    assert len(occurrences) == 1
+    assert len(occurrences[0]["snippet"]) == escape_guard_mod.MAX_CODE_SPAN_SNIPPET
+
+
+def test_code_span_candidates_scan_bounds_files(tmp_path):
+    """Candidate files are capped at MAX_CODE_SPAN_CANDIDATE_FILES."""
+    backend = make_backend(tmp_path)
+    lib = tmp_path / "lib"
+    for i in range(25):
+        (lib / f"f{i:02d}.md").write_text(
+            fm_mod.dump_document({"type": "Concept"}, "x `\\u2011` y\n"),
+            encoding="utf-8",
+        )
+    entries = backend.code_span_escape_candidates()
+    assert len(entries) == escape_guard_mod.MAX_CODE_SPAN_CANDIDATE_FILES

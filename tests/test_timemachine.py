@@ -139,6 +139,7 @@ def test_history_routes_require_login(env):
     for url in (
         "/library/tree",
         "/library/document?path=/concepts/alpha.md",
+        "/library/document/diff?path=/concepts/alpha.md&sha=abcd1234",
         "/library/diff?commit=abc123",
     ):
         response = client.get(url)
@@ -444,3 +445,100 @@ def test_restore_route_with_real_backend(env, monkeypatch, tmp_path):
         conn.close()
     outcomes = sorted(r["outcome"] for r in rows if r["tool"] == "document_restore")
     assert outcomes == ["error", "error", "ok"]
+
+
+# --- document slider order + preview diff endpoint (0.23.0 rework) ---------------
+
+
+@skipif_no_git
+def test_document_slider_order_and_diff_endpoint(env, monkeypatch, tmp_path):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    lib = tmp_path / "library"
+    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
+    backend.init_bundle()
+    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "v1\n")
+    create_sha = backend.git_head()
+    backend.edit_concept("/concepts/alpha.md", new_body="v2\n")
+    v2_sha = backend.git_head()
+    backend.edit_concept("/concepts/alpha.md", new_body="v3\n")
+    head_sha = backend.git_head()
+    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
+
+    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    text = response.text
+    # embedded commits JSON is OLDEST-first (creation < v2 < v3)
+    json_text = text[text.index("var commits = ") :]
+    assert json_text.index(create_sha) < json_text.index(v2_sha) < json_text.index(head_sha)
+    # slider sits on the rightmost (live) stop: value == max == len-1
+    assert 'max="2"' in text
+    assert 'value="2"' in text
+    # one visible snap-point dot per timeline stop, oldest-first, live active
+    assert text.count('data-index="') == 3
+    assert 'class="history-tick active" data-index="2"' in text
+    tick_text = text[text.index('id="history-ticks"') :]
+    assert (
+        tick_text.index(create_sha[:7])
+        < tick_text.index(v2_sha[:7])
+        < tick_text.index(head_sha[:7])
+    )
+    # the body is server-rendered; the marked/DOMPurify CDN pipeline is gone
+    assert "<p>v3</p>" in text
+    assert "marked" not in text
+    assert "dompurify" not in text.lower()
+    assert "cdn.jsdelivr" not in text
+
+    # the preview diff is selected-commit vs HEAD, not the commit's own change
+    response = client.get(
+        "/library/document/diff", params={"path": "/concepts/alpha.md", "sha": create_sha}
+    )
+    assert response.status_code == 200
+    diff_html = response.json()["diff_html"]
+    assert '<span class="diff-del">-v1</span>' in diff_html
+    assert '<span class="diff-add">+v3</span>' in diff_html
+
+    # HEAD itself diffs to nothing
+    response = client.get(
+        "/library/document/diff", params={"path": "/concepts/alpha.md", "sha": head_sha}
+    )
+    assert response.status_code == 200
+    assert response.json()["diff_html"] == ""
+
+    # unknown commit and reserved path both 404
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/alpha.md", "sha": "b" * 40},
+    )
+    assert response.status_code == 404
+    response = client.get("/library/document/diff", params={"path": "/index.md", "sha": create_sha})
+    assert response.status_code == 404
+
+
+@skipif_no_git
+def test_document_diff_endpoint_rename_aware(env, monkeypatch, tmp_path):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    lib = tmp_path / "library"
+    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
+    backend.init_bundle()
+    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "v1\n")
+    create_sha = backend.git_head()
+    backend.move_concept("/concepts/alpha.md", "/concepts/beta.md")
+    backend.edit_concept("/concepts/beta.md", new_body="v2\n")
+    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
+
+    response = client.get(
+        "/library/document/diff", params={"path": "/concepts/beta.md", "sha": create_sha}
+    )
+    assert response.status_code == 200
+    diff_html = response.json()["diff_html"]
+    # the vs-HEAD patch covers both the old and the current path (rename)
+    assert "concepts/alpha.md" in diff_html
+    assert "concepts/beta.md" in diff_html
+    assert "diff-del" in diff_html
+    assert "diff-add" in diff_html

@@ -136,6 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             scheduler = CurateScheduler(
                 manager, db_path, registry=activity_registry, seed_cache=seed_cache
             )
+            app.state.curate_scheduler = scheduler
             task = asyncio.create_task(scheduler.run_forever())
             # Preload local ONNX embedding models in the background (0.23.0):
             # first searches stay fast instead of paying the model load.

@@ -39,6 +39,7 @@ from athenaeum.librarian.tracing import (
     _telemetry_var,
     _trace_var,
 )
+from athenaeum.library import escape_guard as escape_guard_mod
 from athenaeum.library import organize as organize_mod
 from athenaeum.library.backend import LibraryBackend
 from athenaeum.library.payloads import PayloadStore
@@ -58,6 +59,12 @@ class FakeBackend:
 
     def organization_findings(self, *, since=None) -> dict:
         return organize_mod.organization_findings(self.scan_root, since=since)
+
+    def escape_artifact_scan(self):
+        return escape_guard_mod.scan_escape_artifacts(self.scan_root)
+
+    def code_span_escape_candidates(self):
+        return escape_guard_mod.scan_code_span_escape_candidates(self.scan_root)
 
     def findings_empty(self, report: dict) -> bool:
         return organize_mod.findings_empty(report)
@@ -85,7 +92,15 @@ class FakeBackend:
         ]
 
     def create_concept(
-        self, path, frontmatter, body, *, agent_label=None, requested_by=None, via=None
+        self,
+        path,
+        frontmatter,
+        body,
+        *,
+        agent_label=None,
+        requested_by=None,
+        via=None,
+        allow_literal_escapes=False,
     ) -> dict:
         self.calls.append(("create_concept", path, agent_label))
         self.docs[path] = {"frontmatter": dict(frontmatter), "body": body}
@@ -101,6 +116,7 @@ class FakeBackend:
         agent_label=None,
         requested_by=None,
         via=None,
+        allow_literal_escapes=False,
     ) -> dict:
         self.calls.append(("edit_concept", path, agent_label))
         doc = self.docs[path]
@@ -1803,6 +1819,125 @@ async def test_curate_against_real_backend(tmp_path):
     preamble = provider.calls[0][0][1]["content"]
     assert "CURATION TASK" in preamble
     assert "/stub" in preamble and "Stub" in preamble
+
+
+# --- curate content-hygiene sweep (F25 stock repair) ---------------------------
+
+
+async def test_curate_hygiene_repairs_dirty_concept_without_llm(tmp_path):
+    """The deterministic sweep repairs a dirty on-disk body before the
+    findings scan: no LLM call, one 'updated' action, no verify receipts."""
+    backend = make_real_backend(tmp_path)
+    dirty_body = "prose with escape \\u2011 here. " * 10 + "\n"
+    (tmp_path / "lib" / "a.md").write_text(
+        "---\ntype: Note\ntitle: Alpha\n---\n" + dirty_body,
+        encoding="utf-8",
+    )
+    provider = ScriptedProvider([LLMResponse(text="should not be used")])
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_curate()
+
+    body = backend.read_document("/a.md")["body"]
+    assert "\\u" not in body
+    assert "‑" in body
+    assert result["actions"] == [{"id": "/a", "title": "Alpha", "action": "updated"}]
+    assert provider.calls == []  # D6: hygiene repair alone never wakes the LLM
+    assert result["verified"] == []  # no receipts for deterministic repairs
+    assert result["summary"] == (
+        "Library is well-organized; nothing to curate."
+        "\n\nContent hygiene: decoded literal unicode escape artifacts in "
+        "1 existing concept(s) (F25 stock repair)."
+    )
+    assert "hygiene_repairs" not in result  # repairs merge into 'actions'
+    assert result["organized"] is True
+
+
+async def test_curate_hygiene_prefilter_leaves_fence_only_file_untouched(tmp_path):
+    """Escapes confined to a fenced block skip the deterministic sweep but
+    become code-span escape candidates: the D6 gate opens and the curator LLM
+    IS called. A curator judging "intentional" (text-only response, no tool
+    calls) leaves the file byte-identical; the structural finding is
+    re-reported post-run (L14)."""
+    backend = make_real_backend(tmp_path)
+    body = "```text\n" + "DP\\u20111 " * 30 + "\n```\n"
+    target = tmp_path / "lib" / "a.md"
+    target.write_text("---\ntype: Note\ntitle: Alpha\n---\n" + body, encoding="utf-8")
+    before = target.read_bytes()
+    provider = ScriptedProvider(
+        [LLMResponse(text="Intentional documentation of the escape format; left unchanged.")]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_curate()
+
+    assert provider.calls  # a code-span candidate wakes the curator (D6 gate)
+    preamble = provider.calls[0][0][1]["content"]
+    assert "code-span escape candidates" in preamble
+    assert "/a.md" in preamble
+    assert result["actions"] == []  # no sweep repair, no LLM write
+    assert target.read_bytes() == before  # no rewrite, no commit
+    # L14 re-report: the confirmed-intentional literals stay on the findings
+    candidates = result["findings"]["code_span_escape_candidates"]
+    assert [c["path"] for c in candidates] == ["/a.md"]
+    assert result["organized"] is False
+
+
+async def test_curate_repairs_code_span_escape_candidate(tmp_path):
+    """A curator judging "artifact" repairs the candidate via edit_concept
+    with the real characters: the post-run rescan (L15) finds nothing left
+    and the repair is machine-confirmed."""
+    backend = make_real_backend(tmp_path)
+    body = "```text\n" + "DP\\u20111 " * 30 + "\n```\n"
+    (tmp_path / "lib" / "a.md").write_text(
+        "---\ntype: Note\ntitle: Alpha\n---\n" + body, encoding="utf-8"
+    )
+    fixed_body = "```text\n" + "DP\u20111 " * 60 + "\n```\n"  # decoded, stays >200 chars
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[tc("c1", "edit_concept", {"path": "/a.md", "new_body": fixed_body})]
+            ),
+            LLMResponse(text="Replaced the escape artifacts with real characters."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_curate()
+
+    assert provider.calls
+    assert backend.read_document("/a.md")["body"] == fixed_body
+    assert result["findings"]["code_span_escape_candidates"] == []
+    assert result["organized"] is True
+    assert {"id": "/a", "by": CURATOR_VERIFIER} in result["verified"]
+
+
+async def test_curate_hygiene_multiple_dirty_files(tmp_path):
+    """Every dirty concept is repaired in one run (N files = N commits)."""
+    backend = make_real_backend(tmp_path)
+    dirty_body = "prose with escape \\u2011 here. " * 10 + "\n"
+    (tmp_path / "lib" / "a.md").write_text(
+        "---\ntype: Note\ntitle: Alpha\n---\n" + dirty_body,
+        encoding="utf-8",
+    )
+    (tmp_path / "lib" / "b.md").write_text(
+        "---\ntype: Note\ntitle: Beta\n---\n" + dirty_body,
+        encoding="utf-8",
+    )
+    provider = ScriptedProvider([LLMResponse(text="should not be used")])
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_curate()
+
+    for path in ("/a.md", "/b.md"):
+        body = backend.read_document(path)["body"]
+        assert "\\u" not in body
+        assert "‑" in body
+    assert result["actions"] == [
+        {"id": "/a", "title": "Alpha", "action": "updated"},
+        {"id": "/b", "title": "Beta", "action": "updated"},
+    ]
+    assert provider.calls == []
 
 
 async def test_curate_deprecated_cleanup_finding_reaches_curator(tmp_path):

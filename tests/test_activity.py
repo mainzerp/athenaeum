@@ -43,7 +43,15 @@ class FakeBackend:
         return []
 
     def create_concept(
-        self, path, frontmatter, body, *, agent_label=None, requested_by=None, via=None
+        self,
+        path,
+        frontmatter,
+        body,
+        *,
+        agent_label=None,
+        requested_by=None,
+        via=None,
+        allow_literal_escapes=False,
     ) -> dict:
         self.docs[path] = {"frontmatter": dict(frontmatter), "body": body}
         return {"id": path[: -len(".md")], "action": "created"}
