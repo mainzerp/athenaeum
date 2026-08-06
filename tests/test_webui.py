@@ -39,6 +39,8 @@ class FakeBackend:
         self.history_configured = configured
         self.history_available = available
         self.restored: list[tuple[str, str]] = []
+        self.edited: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
 
     def list_dir(self, path: str = "/") -> list[dict]:
         prefix = "/" if path == "/" else path.rstrip("/") + "/"
@@ -99,6 +101,28 @@ class FakeBackend:
 
     def restore_file_from_commit(self, path: str, sha: str) -> None:
         self.restored.append((path, sha))
+
+    def file_diff_to_head(self, sha: str, path: str, context: int | None = None) -> str:
+        if not any(c["sha"] == sha or c["sha"].startswith(sha) for c in self._commits):
+            raise GitError(f"unknown commit: {sha}")
+        if path not in self.docs:
+            raise FileNotFoundError(path)
+        self.diff_context = context
+        return self._diff
+
+    def edit_concept(self, path: str, *, new_body=None, agent_label=None, **kwargs) -> dict:
+        if path not in self.docs:
+            raise FileNotFoundError(path)
+        self.docs[path]["body"] = new_body
+        self.edited.append((path, new_body))
+        return {"id": path, "action": "updated"}
+
+    def delete_concept(self, path: str, *, agent_label=None) -> dict:
+        if path not in self.docs:
+            raise FileNotFoundError(path)
+        del self.docs[path]
+        self.deleted.append(path)
+        return {"id": path, "action": "deleted", "inbound_links": []}
 
     def revert_commit(self, sha: str) -> None:
         return None
@@ -1284,15 +1308,16 @@ def test_tree_document_log_pages(env):
     assert response.status_code == 200
     assert "concepts/" in response.text
     assert "/library/graph?folder=" in response.text  # tree -> graph jump (0.10.2)
-    # history empty state (the fake backend has no commits)
-    assert "No history yet — the first library write creates the first commit." in response.text
-
+    # nothing selected: the center pane shows the empty state
+    assert "Choose a note from the tree." in response.text
+    # tree file links target the document view and carry the JS selection hook
     response = client.get("/library/tree/children", params={"path": "/concepts"})
     assert response.status_code == 200
     assert "alpha.md" in response.text
+    assert 'data-doc-path="/concepts/alpha.md"' in response.text
     assert "/library/graph?focus=" in response.text
 
-    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
     assert response.status_code == 200
     assert "Alpha" in response.text
     assert "Concept" in response.text
@@ -1300,8 +1325,13 @@ def test_tree_document_log_pages(env):
     # per-document history empty state (the fake backend has no commits)
     assert "No history yet — the first write touching this document" in response.text
 
-    response = client.get("/library/document", params={"path": "/concepts/beta.md"})
+    response = client.get("/library/tree", params={"path": "/concepts/beta.md"})
     assert "stale" in response.text
+
+    # the legacy document URL 301s into the new view
+    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 301
+    assert response.headers["location"] == "/library/tree?path=%2Fconcepts%2Falpha.md"
 
     assert client.get("/library/log").status_code == 200
     response = client.get("/library/log/content")
@@ -1309,7 +1339,7 @@ def test_tree_document_log_pages(env):
     assert "Initialization" in response.text
 
 
-# --- git history: tree-page section, diff page, document timeline --------------
+# --- document view: per-document timeline, inline diff, restore -----------------
 
 HISTORY_COMMITS = [
     {
@@ -1339,102 +1369,13 @@ HISTORY_COMMITS = [
 ]
 
 
-def set_remote_url(data_root, user_id, remote_url):
-    conn = db_module.connect(Path(data_root) / "app.db")
-    try:
-        db_module.update_library_settings(
-            conn,
-            user_id,
-            name=None,
-            description=None,
-            git_enabled=True,
-            git_remote_url=remote_url,
-            git_auto_push=False,
-            trace_keep=0,
-            activity_keep=0,
-        )
-    finally:
-        conn.close()
-
-
-def test_tree_page_lists_commits(env):
-    client, backends, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
-
-    response = client.get("/library/tree")
-    assert response.status_code == 200
-    assert HISTORY_COMMITS[0]["subject"] in response.text
-    assert "2026-08-03 10:00 UTC" in response.text
-    assert f"/library/diff?commit={HISTORY_COMMITS[0]['sha']}" in response.text
-    assert f"/library/history/{HISTORY_COMMITS[0]['sha']}/revert" in response.text
-    # the root row's Revert button is disabled with the hint
-    assert "The initial commit cannot be reverted." in response.text
-    # reset slider covers every commit except HEAD (2 resettable points)
-    assert 'max="1"' in response.text
-    # flashes render from the query string
-    response = client.get("/library/tree", params={"msg": "Pulled."})
-    assert 'data-message="Pulled."' in response.text
-
-
-def test_tree_page_history_unavailable_states(env):
-    client, backends, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-
-    backends[user["id"]] = FakeBackend(make_docs("alice"), configured=False, available=False)
-    response = client.get("/library/tree")
-    assert response.status_code == 200
-    assert "Git history is unavailable." in response.text
-    assert "Library settings" in response.text
-
-    backends[user["id"]] = FakeBackend(make_docs("alice"), configured=True, available=False)
-    response = client.get("/library/tree")
-    assert response.status_code == 200
-    assert "Git history is unavailable." in response.text
-    assert "git binary not found on this server." in response.text
-
-
-def test_tree_page_pull_card_requires_remote(env):
-    client, backends, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
-
-    response = client.get("/library/tree")
-    assert "/library/history/pull" not in response.text
-
-    set_remote_url(data_root, user["id"], "https://example.invalid/lib.git")
-    response = client.get("/library/tree")
-    assert "/library/history/pull" in response.text
-
-
-def test_diff_page(env):
-    client, backends, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-    backends[user["id"]] = FakeBackend(
-        make_docs("alice"), commits=HISTORY_COMMITS, diff="diff --git a/x.md b/x.md\n+hello\n"
-    )
-
-    response = client.get("/library/diff", params={"commit": HISTORY_COMMITS[0]["sha"]})
-    assert response.status_code == 200
-    assert "+hello" in response.text
-    assert "Commit ccccccc" in response.text
-    assert HISTORY_COMMITS[0]["subject"] in response.text
-
-    response = client.get("/library/diff", params={"commit": "d" * 40})
-    assert response.status_code == 404
-
-
 def test_document_page_history_card(env):
     client, backends, data_root = env
     user = make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
     backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
 
-    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
     assert response.status_code == 200
     assert 'id="history-slider"' in response.text
     assert 'max="2"' in response.text  # 3 file commits -> slider 0..2
@@ -1452,10 +1393,12 @@ def test_document_page_historical_view(env):
     client, backends, data_root = env
     user = make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
-    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    backends[user["id"]] = FakeBackend(
+        make_docs("alice"), commits=HISTORY_COMMITS, diff=INLINE_DIFF_PATCH
+    )
 
     sha = HISTORY_COMMITS[1]["sha"]  # an older commit, not HEAD
-    response = client.get("/library/document", params={"path": "/concepts/alpha.md", "sha": sha})
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md", "sha": sha})
     assert response.status_code == 200
     # banner with the viewed commit
     assert "not the current version" in response.text
@@ -1463,12 +1406,13 @@ def test_document_page_historical_view(env):
     assert "Back to current" in response.text
     # the viewed stop's snap point is highlighted
     assert 'class="history-tick active" data-index="1"' in response.text
-    # the diff replaces the document body in place — no separate diff card,
-    # and the historical body itself is not rendered
-    assert "Changes in" not in response.text
+    # the inline vs-HEAD diff replaces the document body in place — no patch
+    # transcript, and the historical body itself is not rendered
     assert "historical body at bbbbbbb" not in response.text
-    assert "diff for /concepts/alpha.md at bbbbbbb" in response.text
-    assert response.text.index("diff-view") > response.text.index('id="md-rendered"')
+    assert '<div class="diff-del-block"><p>old body</p>\n</div>' in response.text
+    assert '<div class="diff-add-block"><p>new body</p>\n</div>' in response.text
+    assert "diff-view" not in response.text
+    assert response.text.index("diff-inline") > response.text.index('id="md-rendered"')
     # the restore form posts path + sha to the restore route
     assert "/library/document/restore" in response.text
     assert "Restore this version" in response.text
@@ -1482,7 +1426,7 @@ def test_document_page_sha_equal_head_is_live(env):
     backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
 
     response = client.get(
-        "/library/document",
+        "/library/tree",
         params={"path": "/concepts/alpha.md", "sha": HISTORY_COMMITS[0]["sha"]},
     )
     assert response.status_code == 200
@@ -1497,9 +1441,7 @@ def test_document_page_unknown_sha_404(env):
     login(client, "alice", "pw")
     backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
 
-    response = client.get(
-        "/library/document", params={"path": "/concepts/alpha.md", "sha": "f" * 40}
-    )
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md", "sha": "f" * 40})
     assert response.status_code == 404
 
 
@@ -1509,13 +1451,13 @@ def test_document_page_history_unavailable_hint(env):
     login(client, "alice", "pw")
 
     backends[user["id"]] = FakeBackend(make_docs("alice"), configured=False, available=False)
-    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
     assert response.status_code == 200
     assert "Git history is unavailable." in response.text
     assert "Library settings" in response.text
 
     backends[user["id"]] = FakeBackend(make_docs("alice"), configured=True, available=False)
-    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
     assert response.status_code == 200
     assert "git binary not found on this server." in response.text
 
@@ -1534,7 +1476,7 @@ def test_document_restore_route(env):
     )
     assert response.status_code == 303
     assert response.headers["location"] == (
-        "/library/document?path=%2Fconcepts%2Falpha.md&msg=Restored+to+commit+bbbbbbb."
+        "/library/tree?path=%2Fconcepts%2Falpha.md&msg=Restored+to+commit+bbbbbbb."
     )
     assert backend.restored == [("/concepts/alpha.md", sha)]
     # the cached librarian is evicted so embeddings/FTS reconcile on next use
@@ -1559,6 +1501,167 @@ def test_document_restore_route_csrf_and_login(env):
     )
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
+
+
+INLINE_DIFF_PATCH = (
+    "diff --git a/concepts/alpha.md b/concepts/alpha.md\n"
+    "index 111..222 333\n"
+    "--- a/concepts/alpha.md\n"
+    "+++ b/concepts/alpha.md\n"
+    "@@ -1,1 +1,1 @@\n"
+    "-old body\n"
+    "+new body\n"
+)
+
+
+def test_document_diff_endpoint_inline_mode(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    fake = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS, diff=INLINE_DIFF_PATCH)
+    backends[user["id"]] = fake
+    sha = HISTORY_COMMITS[1]["sha"]
+
+    # inline mode: in-flow document diff, no hunk chrome; requested with a
+    # whole-file context window so the accumulated vs-HEAD diff is complete
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/alpha.md", "sha": sha, "mode": "inline"},
+    )
+    assert response.status_code == 200
+    assert fake.diff_context is not None and fake.diff_context >= 1_000_000
+    diff_html = response.json()["diff_html"]
+    assert '<div class="diff-del-block"><p>old body</p>\n</div>' in diff_html
+    assert '<div class="diff-add-block"><p>new body</p>\n</div>' in diff_html
+    assert "@@" not in diff_html
+    assert "diff --git" not in diff_html
+    assert "diff-view" not in diff_html
+
+    # default mode keeps the per-line patch transcript unchanged (default
+    # 3-line hunk context, no whole-file expansion)
+    response = client.get(
+        "/library/document/diff", params={"path": "/concepts/alpha.md", "sha": sha}
+    )
+    assert response.status_code == 200
+    assert fake.diff_context is None
+    diff_html = response.json()["diff_html"]
+    assert '<span class="diff-del">-old body</span>' in diff_html
+    assert '<span class="diff-add">+new body</span>' in diff_html
+
+    # HEAD diffs to nothing in inline mode too
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/alpha.md", "sha": HISTORY_COMMITS[0]["sha"], "mode": "inline"},
+    )
+    assert response.status_code == 200
+    assert response.json()["diff_html"] == ""
+
+    # unknown mode is rejected
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/alpha.md", "sha": sha, "mode": "bogus"},
+    )
+    assert response.status_code == 400
+
+
+def test_document_edit_route(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backend = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    backends[user["id"]] = backend
+    manager = client.app.state.librarian_manager
+
+    response = client.post(
+        "/library/document/edit",
+        data={"path": "/concepts/alpha.md", "body": "Rewritten body.\n"},
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == ("/library/tree?path=%2Fconcepts%2Falpha.md&msg=Saved.")
+    assert backend.edited == [("/concepts/alpha.md", "Rewritten body.\n")]
+    assert backend.docs["/concepts/alpha.md"]["body"] == "Rewritten body.\n"
+    assert manager.evicted == [user["id"]]
+
+
+def test_document_edit_route_csrf_and_login(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    response = client.post(
+        "/library/document/edit",
+        data={"path": "/concepts/alpha.md", "body": "x\n"},
+        csrf=False,
+    )
+    assert response.status_code == 403
+
+    client.post("/logout")
+    response = client.post(
+        "/library/document/edit", data={"path": "/concepts/alpha.md", "body": "x\n"}
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_document_edit_route_unknown_document_flashes_error(env):
+    # cross-user analog: a path outside the user's own bundle surfaces as a
+    # backend FileNotFoundError and must not succeed
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backend = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    backends[user["id"]] = backend
+
+    response = client.post("/library/document/edit", data={"path": "/user-bob.md", "body": "x\n"})
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        "/library/tree?path=%2Fuser-bob.md&error=%2Fuser-bob.md"
+    )
+    assert backend.edited == []
+
+
+def test_document_delete_route(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backend = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    backends[user["id"]] = backend
+    manager = client.app.state.librarian_manager
+
+    response = client.post("/library/document/delete", data={"path": "/concepts/beta.md"})
+    assert response.status_code == 303
+    # no path on the redirect: the document is gone
+    assert response.headers["location"] == "/library/tree?msg=Deleted+beta.md."
+    assert backend.deleted == ["/concepts/beta.md"]
+    assert "/concepts/beta.md" not in backend.docs
+    assert manager.evicted == [user["id"]]
+
+
+def test_document_delete_route_csrf_and_login(env):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    response = client.post(
+        "/library/document/delete", data={"path": "/concepts/beta.md"}, csrf=False
+    )
+    assert response.status_code == 403
+
+    client.post("/logout")
+    response = client.post("/library/document/delete", data={"path": "/concepts/beta.md"})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_document_delete_route_unknown_document_flashes_error(env):
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backend = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    backends[user["id"]] = backend
+
+    response = client.post("/library/document/delete", data={"path": "/user-bob.md"})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/library/tree?error=%2Fuser-bob.md"
+    assert backend.deleted == []
 
 
 def test_graph_pages_script_stack(env):
@@ -1601,6 +1704,14 @@ def test_graph_pages_script_stack(env):
     assert "/static/vendor/graph3d-vendor.min.js" not in trace_page.text
     assert "/static/graph3d.js" not in trace_page.text
     assert "vis-network" not in trace_page.text
+
+    # the document view mounts a second sunburst as its minimap (no
+    # minimap.js — that satellite stays on the graph page)
+    doc_view = client.get("/library/tree")
+    assert doc_view.status_code == 200
+    assert "/static/graph_sunburst.js" in doc_view.text
+    assert "/static/document_view.js" in doc_view.text
+    assert "/static/minimap.js" not in doc_view.text
 
 
 def test_graph_universe_deep_hierarchy(env):
@@ -2029,12 +2140,12 @@ def test_cross_user_document_access_404(env):
     login(client, "bob", "pw")
 
     # bob's own library works
-    response = client.get("/library/document", params={"path": "/user-bob.md"})
+    response = client.get("/library/tree", params={"path": "/user-bob.md"})
     assert response.status_code == 200
     assert "Private to bob" in response.text
 
     # alice's document path does not exist in bob's bundle
-    response = client.get("/library/document", params={"path": "/user-alice.md"})
+    response = client.get("/library/tree", params={"path": "/user-alice.md"})
     assert response.status_code == 404
 
     # ...and never appears in bob's tree

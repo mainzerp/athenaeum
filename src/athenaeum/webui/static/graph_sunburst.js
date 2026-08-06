@@ -490,8 +490,9 @@
       if (typeof opts.onViewChange === "function") opts.onViewChange();
     }
 
-    // Cancelable ease-in-out tween of the view transform.
-    function animateTo(target, animate) {
+    // Cancelable ease-in-out tween of the view transform; the optional
+    // onDone fires only when the tween runs to completion (a cancel skips it).
+    function animateTo(target, animate, onDone) {
       if (tween) {
         global.cancelAnimationFrame(tween.raf);
         tween = null;
@@ -501,6 +502,7 @@
         render();
         syncTip();
         notifyView();
+        if (onDone) onDone();
         return;
       }
       var from = { k: view.k, tx: view.tx, ty: view.ty };
@@ -516,7 +518,10 @@
         syncTip();
         notifyView();
         if (t < 1) tw.raf = global.requestAnimationFrame(step);
-        else tween = null;
+        else {
+          tween = null;
+          if (onDone) onDone();
+        }
       }
       tween = tw;
       tw.raf = global.requestAnimationFrame(step);
@@ -1109,6 +1114,46 @@
       syncTip();
     }
 
+    // Sequenced zoom-out → zoom-in flight (document view navigation): the
+    // camera pulls straight back OUT OF the current dot (the zoom-out stays
+    // centered on it) before diving into the target dot, so the move reads
+    // as "out of the old document, into the new one" instead of a detour via
+    // the graph center. The old dot stays SELECTED during the pull-back; the
+    // selection flips to the new dot only at the apex of the flight (fully
+    // zoomed out), right before the dive-in. Cancellation-safe: any new
+    // animateTo/flightTo cancels the in-flight leg, and a cancelled first leg
+    // never starts the second (its onDone only fires on completion), so the
+    // selection never flips for an aborted flight. Silent no-op on unknown
+    // ids (same posture as focusNode).
+    function flightTo(id, animate) {
+      var ni = layout.idxById[id];
+      if (ni == null || !layout.pos[ni]) return;
+      hoverIdx = -1;
+      var fromIdx = selectedIdx;
+      var target = dotTarget(ni);
+      if (
+        animate === false ||
+        view.k <= 1.02 ||
+        fromIdx == null ||
+        fromIdx < 0 ||
+        fromIdx === ni ||
+        !layout.pos[fromIdx]
+      ) {
+        // No animation requested, already at the overview, or no distinct
+        // previous dot to pull out of: select and fly direct.
+        select(ni);
+        animateTo(target, animate !== false);
+        syncTip();
+        return;
+      }
+      var p = layout.pos[fromIdx];
+      animateTo({ k: 1, tx: -p.x, ty: -p.y }, true, function () {
+        select(ni);
+        animateTo(target, true);
+        syncTip();
+      });
+    }
+
     // Fly to the central anchor (trace replay core hops: index.md reads
     // route through the middle). Same target as the center-ring click.
     function focusCore(animate) {
@@ -1168,6 +1213,7 @@
       },
       zoomToSector: zoomToSector,
       focusNode: focusNode,
+      flightTo: flightTo,
       focusCore: focusCore,
       resetView: resetView,
       setOverlay: setOverlay,

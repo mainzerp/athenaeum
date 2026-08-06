@@ -69,3 +69,54 @@ def test_render_diff_html_escapes_html():
 
 def test_render_diff_html_empty():
     assert markdown_render.render_diff_html("") == ""
+
+
+def test_render_inline_diff_html_empty():
+    assert markdown_render.render_inline_diff_html("") == ""
+
+
+def test_render_inline_diff_html_line_classification():
+    patch = (
+        "diff --git a/x.md b/x.md\n"
+        "index 111..222 333\n"
+        "--- a/x.md\n"
+        "+++ b/x.md\n"
+        "@@ -1,2 +1,2 @@\n"
+        " intro **text**\n"
+        "-old line\n"
+        "+new line\n"
+        "\\ No newline at end of file\n"
+    )
+    html = markdown_render.render_inline_diff_html(patch)
+    assert '<div class="diff-inline">' in html
+    assert "<p>intro <strong>text</strong></p>" in html
+    assert '<div class="diff-del-block"><p>old line</p>\n</div>' in html
+    assert '<div class="diff-add-block"><p>new line</p>\n</div>' in html
+
+
+def test_render_inline_diff_html_drops_hunk_and_meta_lines():
+    patch = (
+        "diff --git a/x.md b/y.md\n"
+        "similarity index 90%\n"
+        "rename from a/x.md\n"
+        "rename to b/y.md\n"
+        "index 111..222 333\n"
+        "--- a/x.md\n"
+        "+++ b/y.md\n"
+        "@@ -1 +1 @@\n"
+        "+content\n"
+    )
+    html = markdown_render.render_inline_diff_html(patch)
+    assert "@@" not in html
+    assert "diff --git" not in html
+    assert "index" not in html
+    assert "rename" not in html
+    assert "a/x.md" not in html
+    assert "b/y.md" not in html
+    assert '<div class="diff-add-block"><p>content</p>\n</div>' in html
+
+
+def test_render_inline_diff_html_escapes_html():
+    html = markdown_render.render_inline_diff_html("+<script>alert(1)</script>\n")
+    assert "&lt;script&gt;" in html
+    assert "<script>" not in html

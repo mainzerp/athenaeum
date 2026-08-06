@@ -50,10 +50,10 @@ History card: a slider over that file's commits (oldest on the left, the
 live version on the right) with a live red/green preview diff of the
 selected commit against the current version, and "Restore this version"
 for that one file. Documents render as full GFM — tables, task lists, and
-syntax-highlighted code — rendered on the server with no CDN. The Library
-page carries the full history — per-commit diffs, revert for any commit, and
-an undoable reset slider; an optional remote in Library settings adds
-push/pull (remote auth uses the git client's own credentials).
+syntax-highlighted code — rendered on the server with no CDN, and can be
+edited or deleted right from the document view. An optional remote in
+Library settings adds automatic push after each commit (remote auth uses
+the git client's own credentials).
 
 ## Multi-user
 

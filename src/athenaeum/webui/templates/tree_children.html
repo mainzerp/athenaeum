@@ -20,7 +20,7 @@
     </a>
     <ul></ul>
     {% else %}
-    <a href="/library/document?path={{ e['path'] | urlencode }}">{{ e["name"] }}</a>
+    <a href="/library/tree?path={{ e['path'] | urlencode }}" data-doc-path="{{ e['path'] }}">{{ e["name"] }}</a>
     <a class="graph-jump" href="/library/graph?focus={{ e['path'][:-3] | urlencode }}" title="Show in graph" aria-label="Show in graph">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/>

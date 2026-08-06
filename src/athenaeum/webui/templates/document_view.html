@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}{% if doc %}{{ fm.get("title") or doc["path"] }} - Athenaeum{% else %}Library - Athenaeum{% endif %}{% endblock %}
+{% block content %}
+{% if msg %}<div class="js-flash" data-type="success" data-message="{{ msg }}" hidden></div>{% endif %}
+{% if error %}<div class="js-flash" data-type="danger" data-message="{{ error }}" hidden></div>{% endif %}
+{# Two-row grid: row 1 = header/history | minimap, row 2 = document | tree —
+   the library tree top-aligns with the markdown area. #}
+<div class="docview-grid">
+  <div class="docview-top" id="docview-top">
+    <div class="card" id="docview-empty"{% if doc %} hidden{% endif %}>
+      <div class="card-body">
+        <p class="muted">Choose a note from the tree.</p>
+      </div>
+    </div>
+    {% if doc %}
+    <div class="page-header page-header-sticky" id="docview-header">
+      <h1 id="docview-title">{{ fm.get("title") or doc["path"] }}</h1>
+      <div class="badges mt-2" id="docview-badges">
+        <span class="badge badge-info">{{ fm.get("type") or "unknown" }}</span>
+        {% for tag in tags %}<span class="badge badge-neutral">{{ tag }}</span>{% endfor %}
+        <span class="badge badge-success">{{ fm.get("status") or "stable" }}</span>
+        <span class="badge badge-trust badge-{{ trust }}">{{ trust }}</span>
+        {% if stale %}<span class="badge badge-warning">stale</span>{% endif %}
+      </div>
+      {% if fm.get("description") %}<p class="subtitle mt-2" id="docview-description">{{ fm["description"] }}</p>{% endif %}
+      {% if not viewed %}
+      <div class="mt-2" id="docview-actions">
+        <button type="button" class="btn btn-secondary btn-sm" id="docview-edit-toggle">Edit</button>
+        <form method="post" action="/library/document/delete" class="inline" id="delete-form"
+              data-confirm="Delete this note? The deletion is recorded as a new commit."
+              data-loading>
+          {{ csrf_input(request) }}
+          <input type="hidden" name="path" value="{{ doc['path'] }}">
+          <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+    {% if not history_available %}
+    <div class="card" id="docview-history">
+      <div class="card-body">
+        <p class="muted">Git history is unavailable.</p>
+        <p class="muted">
+          {% if not history_configured %}
+          Enable it in <a class="text-accent" href="/config/library">Library settings</a>.
+          {% else %}
+          git binary not found on this server.
+          {% endif %}
+        </p>
+      </div>
+    </div>
+    {% elif not timeline %}
+    <div class="card" id="docview-history">
+      <div class="card-body">
+        <p class="muted">No history yet — the first write touching this document creates its first commit.</p>
+      </div>
+    </div>
+    {% else %}
+    <div class="card" id="docview-history">
+      <div class="card-header">History</div>
+      <div class="card-body">
+        <input type="range" id="history-slider" min="0" max="{{ timeline|length - 1 }}" value="{{ viewed_index }}" step="1">
+        <div class="history-ticks" id="history-ticks">
+          {% for c in timeline %}
+          <button type="button" class="history-tick{% if loop.index0 == viewed_index %} active{% endif %}" data-index="{{ loop.index0 }}" title="{{ c['short'] }} · {{ c['timestamp'][:10] }}"></button>
+          {% endfor %}
+        </div>
+        <p class="range-label" id="history-label"></p>
+        <p class="muted" id="preview-note" hidden></p>
+        <form method="post" action="/library/document/restore" id="restore-form"
+              data-confirm="Restore this document to the selected commit? The restore is recorded as a new commit."
+              data-loading{% if not viewed %} hidden{% endif %}>
+          {{ csrf_input(request) }}
+          <input type="hidden" name="path" value="{{ doc['path'] }}">
+          <input type="hidden" name="sha" id="restore-sha" value="{{ viewed['sha'] if viewed else '' }}">
+          <button type="submit" class="btn btn-primary">Restore this version</button>
+        </form>
+      </div>
+    </div>
+    {% endif %}
+    <div class="card" id="docview-banner"{% if not viewed %} hidden{% endif %}>
+      <div class="card-body">
+        {% if viewed %}
+        <p class="muted">Viewing <code>{{ viewed["short"] }}</code>{% if viewed["timestamp"] %} from {{ viewed["timestamp"] | dt }}{% endif %} — not the current version.
+        <a class="text-accent" href="/library/tree?path={{ doc["path"] | urlencode }}">Back to current</a></p>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="card docview-minimap-card">
+    <div class="card-header">Minimap</div>
+    <div id="docview-minimap" class="graph-canvas sunburst-inert docview-minimap"></div>
+  </div>
+  <div id="docview-doc"{% if not doc %} hidden{% endif %}>
+    {% if doc %}
+    <div class="card">
+      <div class="card-body">
+        {% if viewed %}
+        {# Historical stop: the vs-current inline diff replaces the body in place. #}
+        <div id="md-rendered" class="doc-body">
+          {% if diff_html %}{{ diff_html | safe }}{% else %}<p class="muted">No changes recorded for this commit.</p>{% endif %}
+        </div>
+        {% else %}
+        <div id="md-rendered" class="doc-body">{{ body_html | safe }}</div>
+        {% endif %}
+        {% if not viewed %}
+        <form method="post" action="/library/document/edit" id="edit-form" data-loading hidden>
+          {{ csrf_input(request) }}
+          <input type="hidden" name="path" value="{{ doc['path'] }}">
+          <div class="form-row">
+            <textarea name="body" id="edit-body" rows="16">{{ doc["body"] }}</textarea>
+          </div>
+          <button type="submit" class="btn btn-primary">Save</button>
+          <button type="button" class="btn btn-secondary" id="edit-cancel">Cancel</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="card docview-tree-card">
+    <div class="card-header">Library tree</div>
+    <div class="card-body" id="docview-tree-pane">
+      {% include "tree_children.html" %}
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/graph_sunburst.js"></script>
+<script src="/static/document_view.js"></script>
+<script>DocumentView.boot({{ bootstrap | tojson }});</script>
+{% endblock %}

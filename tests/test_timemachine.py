@@ -1,17 +1,16 @@
-"""History-route WebUI tests (0.22.0, DOC_TIMELINE rework).
+"""History-route WebUI tests (0.22.0 DOC_TIMELINE rework; document-view takeover).
 
-The standalone Time-Machine page is gone: the library-wide history section
-lives on the tree page, the per-document timeline on the document page (the
-page-state coverage moved to test_webui.py). This file keeps the real-backend
-mutation tests (revert/reset/pull/restore through the routes, skip-guarded on
-a real git binary), the legacy ``/library/time-machine`` 301 redirects, and
-the CSRF / login gating of the moved routes.
+The standalone Time-Machine page and the library-wide history section are
+gone: the document view lives at ``/library/tree`` with the per-document
+timeline (the page-state coverage is in test_webui.py). This file keeps the
+real-backend restore-mutation test (skip-guarded on a real git binary), the
+legacy ``/library/time-machine`` 301 redirects, and the CSRF / login gating
+of the surviving routes.
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 from urllib.parse import unquote_plus
 
@@ -22,7 +21,6 @@ from starlette.middleware.sessions import SessionMiddleware
 from athenaeum import db as db_module
 from athenaeum import security
 from athenaeum.library.backend import LibraryBackend, provision_library
-from athenaeum.library.gittool import GitError
 from athenaeum.webui import ROUTERS, deps
 from conftest import CsrfTestClient
 
@@ -30,15 +28,12 @@ SECRET = "test-secret-key"
 
 skipif_no_git = pytest.mark.skipif(shutil.which("git") is None, reason="git binary required")
 
-_real_get_library_backend = deps.get_library_backend
-
 
 class FakeBackend:
     """Stand-in for the backend history surface (default factory backend)."""
 
-    def __init__(self, commits=(), *, diff="", configured=True, available=True):
+    def __init__(self, commits=(), *, configured=True, available=True):
         self._commits = list(commits)
-        self._diff = diff
         self.history_configured = configured
         self.history_available = available
 
@@ -47,20 +42,6 @@ class FakeBackend:
 
     def git_head(self) -> str | None:
         return self._commits[0]["sha"] if self._commits else None
-
-    def commit_diff(self, sha: str) -> str:
-        if not any(c["sha"] == sha for c in self._commits):
-            raise GitError(f"unknown commit: {sha}")
-        return self._diff
-
-    def revert_commit(self, sha: str) -> None:
-        return None
-
-    def reset_to_commit(self, sha: str) -> None:
-        return None
-
-    def git_pull(self) -> None:
-        return None
 
 
 @pytest.fixture
@@ -105,30 +86,6 @@ def login(client, username, password):
     return response
 
 
-def set_remote_url(data_root, user_id, remote_url):
-    conn = db_module.connect(Path(data_root) / "app.db")
-    try:
-        db_module.update_library_settings(
-            conn,
-            user_id,
-            name=None,
-            description=None,
-            git_enabled=True,
-            git_remote_url=remote_url,
-            git_auto_push=False,
-            trace_keep=0,
-            activity_keep=0,
-        )
-    finally:
-        conn.close()
-
-
-def _git(cwd, *args):
-    return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
-    ).stdout
-
-
 # --- gating ---------------------------------------------------------------------
 
 
@@ -138,20 +95,19 @@ def test_history_routes_require_login(env):
     sha = "b" * 40
     for url in (
         "/library/tree",
-        "/library/document?path=/concepts/alpha.md",
+        "/library/tree?path=/concepts/alpha.md",
+        "/library/document/data?path=/concepts/alpha.md",
         "/library/document/diff?path=/concepts/alpha.md&sha=abcd1234",
-        "/library/diff?commit=abc123",
     ):
         response = client.get(url)
         assert response.status_code == 303
         assert response.headers["location"] == "/login"
     for url in (
-        f"/library/history/{sha}/revert",
-        "/library/history/reset",
-        "/library/history/pull",
         "/library/document/restore",
+        "/library/document/edit",
+        "/library/document/delete",
     ):
-        response = client.post(url, data={"sha": sha, "path": "/a.md"})
+        response = client.post(url, data={"sha": sha, "path": "/a.md", "body": "x\n"})
         assert response.status_code == 303
         assert response.headers["location"] == "/login"
 
@@ -161,15 +117,24 @@ def test_post_routes_require_csrf(env):
     make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
     sha = "b" * 40
-    assert client.post(f"/library/history/{sha}/revert", csrf=False).status_code == 403
-    assert client.post("/library/history/reset", data={"sha": sha}, csrf=False).status_code == 403
-    assert client.post("/library/history/pull", csrf=False).status_code == 403
     assert (
         client.post(
             "/library/document/restore",
             data={"path": "/a.md", "sha": sha},
             csrf=False,
         ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/library/document/edit",
+            data={"path": "/a.md", "body": "x\n"},
+            csrf=False,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post("/library/document/delete", data={"path": "/a.md"}, csrf=False).status_code
         == 403
     )
 
@@ -188,7 +153,8 @@ def test_legacy_time_machine_urls_redirect(env):
 
     response = client.get("/library/time-machine/diff", params={"commit": "abc1234"})
     assert response.status_code == 301
-    assert response.headers["location"] == "/library/diff?commit=abc1234"
+    # the per-commit diff page is gone with the library-wide history section
+    assert response.headers["location"] == "/library/tree"
 
     # a 301 on a POST is re-issued as GET by browsers (stale pre-upgrade pages)
     sha = "b" * 40
@@ -202,199 +168,7 @@ def test_legacy_time_machine_urls_redirect(env):
         assert response.headers["location"] == "/library/tree"
 
 
-# --- mutations through the real backend ----------------------------------------
-
-
-@skipif_no_git
-def test_revert_route_with_real_backend(env, monkeypatch, tmp_path):
-    client, _, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-
-    lib = tmp_path / "library"
-    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
-    backend.init_bundle()
-    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "v1\n")
-    backend.edit_concept("/concepts/alpha.md", new_body="v2\n")
-    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
-
-    commits = backend.list_commits()
-    assert len(commits) == 3
-    edit, _, init = commits  # newest first
-
-    response = client.get("/library/tree")
-    assert response.status_code == 200
-    assert edit["subject"] in response.text
-
-    # reverting the edit restores the previous body
-    response = client.post(f"/library/history/{edit['sha']}/revert")
-    assert response.status_code == 303
-    assert response.headers["location"] == "/library/tree?msg=Commit+reverted."
-    assert backend.read_document("/concepts/alpha.md")["body"] == "v1\n"
-
-    # the root commit cannot be reverted (would break the bundle)
-    response = client.post(f"/library/history/{init['sha']}/revert")
-    assert response.status_code == 303
-    location = unquote_plus(response.headers["location"])
-    assert location.startswith("/library/tree?")
-    assert "error=" in location
-    assert "cannot revert the initial commit" in location
-    assert backend.read_document("/concepts/alpha.md")["body"] == "v1\n"
-
-    # both attempts journaled
-    conn = db_module.connect(Path(data_root) / "app.db")
-    try:
-        rows = db_module.list_activity(conn, user["id"], limit=50)
-    finally:
-        conn.close()
-    outcomes = sorted(r["outcome"] for r in rows if r["tool"] == "time_machine_revert")
-    assert outcomes == ["error", "ok"]
-
-
-@skipif_no_git
-def test_reset_route_with_real_backend(env, monkeypatch, tmp_path):
-    client, _, data_root = env
-    make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-
-    lib = tmp_path / "library"
-    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
-    backend.init_bundle()
-    backend.create_concept("/concepts/alpha.md", {"title": "Alpha", "type": "Note"}, "v1\n")
-    backend.edit_concept("/concepts/alpha.md", new_body="v2\n")
-    backend.edit_concept("/concepts/alpha.md", new_body="v3\n")
-    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
-
-    target = backend.list_commits()[2]  # the creation commit (v1 state)
-
-    # resetting to HEAD is refused
-    head = backend.list_commits()[0]
-    response = client.post("/library/history/reset", data={"sha": head["sha"]})
-    assert response.status_code == 303
-    assert "already at this commit" in unquote_plus(response.headers["location"])
-
-    response = client.post("/library/history/reset", data={"sha": target["sha"]})
-    assert response.status_code == 303
-    assert (
-        response.headers["location"]
-        == "/library/tree?msg=Library+reset.+Use+the+slider+again+to+undo."
-    )
-    assert backend.read_document("/concepts/alpha.md")["body"] == "v1\n"
-
-    # undo through the same UI: the pre-reset HEAD is the reset commit's parent
-    after = backend.list_commits()
-    assert after[0]["subject"].startswith("Update: Reset library to ")
-    response = client.post("/library/history/reset", data={"sha": after[1]["sha"]})
-    assert response.status_code == 303
-    assert backend.read_document("/concepts/alpha.md")["body"] == "v3\n"
-
-
-@skipif_no_git
-def test_pull_route_requires_remote(env):
-    client, _, data_root = env
-    make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-    response = client.post("/library/history/pull")
-    assert response.status_code == 303
-    assert "No+remote+configured." in response.headers["location"]
-
-
-@skipif_no_git
-def test_pull_route_unreachable_remote_flashes_error(env, monkeypatch, tmp_path):
-    client, _, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-    set_remote_url(data_root, user["id"], str(tmp_path / "missing.git"))
-    monkeypatch.setattr(deps, "get_library_backend", _real_get_library_backend)
-
-    response = client.post("/library/history/pull")
-    assert response.status_code == 303
-    assert "error=" in response.headers["location"]
-
-    conn = db_module.connect(Path(data_root) / "app.db")
-    try:
-        rows = db_module.list_activity(conn, user["id"], limit=50)
-    finally:
-        conn.close()
-    pull_rows = [r for r in rows if r["tool"] == "time_machine_pull"]
-    assert [r["outcome"] for r in pull_rows] == ["error"]
-
-
-@skipif_no_git
-def test_pull_route_with_real_remote(env, monkeypatch, tmp_path):
-    """Full wiring: real backend on the provisioned library, local bare remote."""
-    client, _, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-
-    bare = tmp_path / "remote.git"
-    _git(tmp_path, "init", "--bare", "-b", "main", str(bare))
-    set_remote_url(data_root, user["id"], str(bare))
-    monkeypatch.setattr(deps, "get_library_backend", _real_get_library_backend)
-
-    lib = Path(data_root) / "users" / user["id"] / "library"
-    # the first page load constructs the backend; origin is wired explicitly
-    # here (the app wires it lazily via ensure() on the next write)
-    assert client.get("/library/tree").status_code == 200
-    _git(lib, "remote", "add", "origin", str(bare))
-    _git(lib, "push", "-u", "origin", "main")
-
-    other = tmp_path / "other"
-    _git(tmp_path, "clone", str(bare), str(other))
-    _git(other, "config", "user.name", "Test")
-    _git(other, "config", "user.email", "test@localhost")
-    (other / "pulled.md").write_text("from remote\n", encoding="utf-8")
-    _git(other, "add", "-A")
-    _git(other, "commit", "-m", "remote commit")
-    _git(other, "push")
-
-    response = client.post("/library/history/pull")
-    assert response.status_code == 303
-    assert response.headers["location"] == "/library/tree?msg=Pulled."
-    assert (lib / "pulled.md").read_text(encoding="utf-8") == "from remote\n"
-
-
-@skipif_no_git
-def test_pull_route_evicts_manager(env, monkeypatch, tmp_path):
-    """A successful pull evicts the cached librarian (0.22.0 sync fix):
-    embedding/FTS reconciliation runs on the next agent entry."""
-    client, _, data_root = env
-    user = make_user(data_root, "alice", "pw")
-    login(client, "alice", "pw")
-
-    bare = tmp_path / "remote.git"
-    _git(tmp_path, "init", "--bare", "-b", "main", str(bare))
-    set_remote_url(data_root, user["id"], str(bare))
-    monkeypatch.setattr(deps, "get_library_backend", _real_get_library_backend)
-
-    class FakeManager:
-        def __init__(self):
-            self.evicted: list[str] = []
-
-        def evict(self, user_id: str) -> None:
-            self.evicted.append(user_id)
-
-    manager = FakeManager()
-    client.app.state.librarian_manager = manager
-
-    lib = Path(data_root) / "users" / user["id"] / "library"
-    assert client.get("/library/tree").status_code == 200
-    _git(lib, "remote", "add", "origin", str(bare))
-    _git(lib, "push", "-u", "origin", "main")
-
-    other = tmp_path / "other"
-    _git(tmp_path, "clone", str(bare), str(other))
-    _git(other, "config", "user.name", "Test")
-    _git(other, "config", "user.email", "test@localhost")
-    (other / "pulled.md").write_text("from remote\n", encoding="utf-8")
-    _git(other, "add", "-A")
-    _git(other, "commit", "-m", "remote commit")
-    _git(other, "push")
-
-    response = client.post("/library/history/pull")
-    assert response.status_code == 303
-    assert response.headers["location"] == "/library/tree?msg=Pulled."
-    assert manager.evicted == [user["id"]]
+# --- restore through the real backend --------------------------------------------
 
 
 @skipif_no_git
@@ -417,7 +191,7 @@ def test_restore_route_with_real_backend(env, monkeypatch, tmp_path):
     )
     assert response.status_code == 303
     location = unquote_plus(response.headers["location"])
-    assert location.startswith("/library/document?")
+    assert location.startswith("/library/tree?")
     assert f"msg=Restored to commit {create_sha[:7]}." in location
     assert backend.read_document("/concepts/alpha.md")["body"] == "v1\n"
 
@@ -467,11 +241,12 @@ def test_document_slider_order_and_diff_endpoint(env, monkeypatch, tmp_path):
     head_sha = backend.git_head()
     monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
 
-    response = client.get("/library/document", params={"path": "/concepts/alpha.md"})
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
     assert response.status_code == 200
     text = response.text
-    # embedded commits JSON is OLDEST-first (creation < v2 < v3)
-    json_text = text[text.index("var commits = ") :]
+    # embedded bootstrap timeline JSON is OLDEST-first (creation < v2 < v3);
+    # tojson sorts the bootstrap keys, so slice from the timeline array on
+    json_text = text[text.index('"timeline":') :]
     assert json_text.index(create_sha) < json_text.index(v2_sha) < json_text.index(head_sha)
     # slider sits on the rightmost (live) stop: value == max == len-1
     assert 'max="2"' in text
@@ -515,6 +290,62 @@ def test_document_slider_order_and_diff_endpoint(env, monkeypatch, tmp_path):
     assert response.status_code == 404
     response = client.get("/library/document/diff", params={"path": "/index.md", "sha": create_sha})
     assert response.status_code == 404
+
+    # inline mode (slider preview): in-flow vs-HEAD diff, no hunk chrome
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/alpha.md", "sha": create_sha, "mode": "inline"},
+    )
+    assert response.status_code == 200
+    diff_html = response.json()["diff_html"]
+    assert '<div class="diff-del-block"><p>v1</p>\n</div>' in diff_html
+    assert '<div class="diff-add-block"><p>v3</p>\n</div>' in diff_html
+    assert "@@" not in diff_html
+
+    # HEAD diffs to nothing in inline mode too; the 404s carry over
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/alpha.md", "sha": head_sha, "mode": "inline"},
+    )
+    assert response.status_code == 200
+    assert response.json()["diff_html"] == ""
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/alpha.md", "sha": "b" * 40, "mode": "inline"},
+    )
+    assert response.status_code == 404
+
+
+@skipif_no_git
+def test_document_diff_inline_full_context(env, monkeypatch, tmp_path):
+    """Inline mode renders the WHOLE document with the accumulated changes vs
+    HEAD marked in-flow: unchanged lines far beyond the default 3-line hunk
+    window must appear as context, not be cut away."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    lib = tmp_path / "library"
+    backend = LibraryBackend(lib, actor="athenaeum-test/0.0.0")
+    backend.init_bundle()
+    old_body = "".join(f"line {i}\n" for i in range(1, 21))
+    backend.create_concept("/concepts/big.md", {"title": "Big", "type": "Note"}, old_body)
+    create_sha = backend.git_head()
+    new_body = old_body.replace("line 10\n", "line 10 changed\n")
+    backend.edit_concept("/concepts/big.md", new_body=new_body)
+    monkeypatch.setattr(deps, "get_library_backend", lambda settings, user, conn: backend)
+
+    response = client.get(
+        "/library/document/diff",
+        params={"path": "/concepts/big.md", "sha": create_sha, "mode": "inline"},
+    )
+    assert response.status_code == 200
+    diff_html = response.json()["diff_html"]
+    assert '<div class="diff-del-block"><p>line 10</p>\n</div>' in diff_html
+    assert '<div class="diff-add-block"><p>line 10 changed</p>\n</div>' in diff_html
+    # unchanged lines far from the edit survive as in-flow context
+    assert "line 1" in diff_html
+    assert "line 20" in diff_html
 
 
 @skipif_no_git

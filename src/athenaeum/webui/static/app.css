@@ -1291,3 +1291,84 @@ pre.diff, pre.log {
 }
 .graph-jump:hover { opacity: 1; color: var(--clr-accent); }
 .graph-jump svg { width: 13px; height: 13px; }
+
+/* ===== 9. Document view (tree page takeover) =====
+   Two-row grid: row 1 = header/history (center) | minimap (right),
+   row 2 = markdown area (center) | library tree (right) — the tree
+   TOP-aligns with the markdown area. */
+.docview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 8px 16px; /* row gap: minimap <-> tree; column gap: center <-> side */
+  align-items: start;
+}
+.docview-grid > * { min-width: 0; }
+.docview-grid .card { margin-bottom: 0; } /* spacing via grid gap only */
+.docview-top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Pull the side column (minimap + tree) closer to the right viewport edge
+   than the default 24px page padding. */
+.page:has(.docview-grid) { padding-right: 8px; }
+/* The minimap card stretches across grid row 1: its bottom edge ends with
+   the header/history cell. The canvas fills the remaining card height
+   (it self-sizes to its container; trace-page precedent
+   .graph-canvas.trace-graph). */
+.docview-minimap-card {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+.docview-minimap {
+  flex: 1;
+  min-height: 200px;
+}
+.docview-minimap .muted { padding: 12px 16px; }
+/* Display-only sunburst: no click/hover interaction. */
+.sunburst-inert { pointer-events: none; }
+
+/* Tree pane selection highlights (applied by document_view.js). */
+.tree a.tree-current {
+  color: var(--clr-accent);
+  font-weight: 600;
+}
+.tree a.tree-linked { color: var(--clr-accent); }
+
+/* Inline in-flow diff vs HEAD (markdown_render.render_inline_diff_html):
+   block-group rendering — added/removed markdown blocks keep their
+   structure and are tinted/struck as a whole. */
+.diff-inline .diff-del-block,
+.diff-inline .diff-add-block {
+  margin: 2px 0;
+  padding: 0 8px;
+  border-left: 3px solid transparent;
+}
+.diff-inline .diff-del-block {
+  background: var(--clr-danger-bg);
+  border-left-color: var(--clr-danger);
+}
+.diff-inline .diff-del-block > * { text-decoration: line-through; }
+.diff-inline .diff-add-block {
+  background: var(--clr-success-bg);
+  border-left-color: var(--clr-success);
+}
+
+/* Inline edit form: body textarea spans the card. */
+#edit-body {
+  width: 100%;
+  font-family: ui-monospace, "JetBrains Mono", "Courier New", monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+
+/* Mobile: single column, document -> tree -> minimap. */
+@media (max-width: 1023px) {
+  .docview-grid { grid-template-columns: 1fr; }
+  .docview-top { order: 0; }
+  #docview-doc { order: 1; }
+  .docview-tree-card { order: 2; }
+  .docview-minimap-card { order: 3; }
+  .docview-minimap { flex: none; height: 220px; }
+}

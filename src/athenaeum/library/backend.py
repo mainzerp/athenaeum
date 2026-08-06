@@ -778,15 +778,17 @@ class LibraryBackend:
         rel = self._bundle_path(path).lstrip("/")
         return git.file_diff(sha, self._path_at_commit(git, sha, rel))
 
-    def file_diff_to_head(self, sha: str, path: str) -> str:
+    def file_diff_to_head(self, sha: str, path: str, context: int | None = None) -> str:
         """Unified patch of one concept path between ``sha`` and current HEAD
-        (rename-aware: covers the path valid at ``sha`` and the current path)."""
+        (rename-aware: covers the path valid at ``sha`` and the current path).
+        ``context`` overrides the unified-context line count (whole-file diff
+        for inline rendering)."""
         self._guard_concept_path(path)
         git = self._require_git()
         rel = self._bundle_path(path).lstrip("/")
         old = self._path_at_commit(git, sha, rel)
         paths = (rel,) if old == rel else (rel, old)
-        return git.diff_to_head(sha, *paths)
+        return git.diff_to_head(sha, *paths, context=context)
 
     def restore_file_from_commit(self, path: str, sha: str) -> None:
         """Restore ONE document to its state at ``sha`` as one new commit.

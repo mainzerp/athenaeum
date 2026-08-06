@@ -71,3 +71,45 @@ def render_diff_html(patch: str) -> str:
             cls = "diff-ctx"
         lines.append(f'<span class="{cls}">{escaped}</span>')
     return '<div class="diff-view">' + "\n".join(lines) + "</div>"
+
+
+def render_inline_diff_html(patch: str) -> str:
+    """Render a unified diff patch as an in-flow document diff.
+
+    Hunk and meta headers are dropped; consecutive content lines of the same
+    kind (context / deletion / insertion) are grouped and rendered through
+    the shared MarkdownIt instance's BLOCK renderer, so document structure
+    (headings, lists, tables, code fences) survives — per-line
+    ``renderInline`` would flatten all of it to plain text. Deletion groups
+    are wrapped in ``<div class="diff-del-block">``, insertion groups in
+    ``<div class="diff-add-block">``; context groups render as plain
+    markdown. Empty patch returns ``""``.
+    """
+    if not patch:
+        return ""
+    md = _md()
+    groups: list[tuple[str, list[str]]] = []
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            kind, text = "add", line[1:]
+        elif line.startswith("-") and not line.startswith("---"):
+            kind, text = "del", line[1:]
+        elif line.startswith(" "):
+            kind, text = "ctx", line[1:]
+        else:
+            # Hunk headers, diff/index/rename meta, "\ No newline" markers.
+            continue
+        if groups and groups[-1][0] == kind:
+            groups[-1][1].append(text)
+        else:
+            groups.append((kind, [text]))
+    out = []
+    for kind, texts in groups:
+        rendered = md.render("\n".join(texts))
+        if kind == "add":
+            out.append(f'<div class="diff-add-block">{rendered}</div>')
+        elif kind == "del":
+            out.append(f'<div class="diff-del-block">{rendered}</div>')
+        else:
+            out.append(rendered)
+    return '<div class="diff-inline">' + "\n".join(out) + "</div>"

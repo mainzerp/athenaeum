@@ -313,15 +313,20 @@ class GitRepo:
         _require_sha_shape(sha)
         return _run(self.root, ["show", "--format=", "--patch", sha, "--", path])
 
-    def diff_to_head(self, sha: str, *paths: str) -> str:
+    def diff_to_head(self, sha: str, *paths: str, context: int | None = None) -> str:
         """Unified patch of ``sha``..HEAD limited to ``paths``.
 
         ``git diff <sha> HEAD -- <paths...>``; ``""`` when the tree state
         of those paths matches HEAD. ``GitError`` on a malformed or
-        unknown sha (same contract as ``file_diff``).
+        unknown sha (same contract as ``file_diff``). ``context`` overrides
+        the unified-context line count (pass a value >= the file length for
+        a whole-file diff, e.g. for inline in-flow rendering).
         """
         full = self._require_commit(sha)
-        return _run(self.root, ["diff", full, "HEAD", "--", *paths])
+        args = ["diff"]
+        if context is not None:
+            args.append(f"--unified={context}")
+        return _run(self.root, [*args, full, "HEAD", "--", *paths])
 
     def head_sha(self) -> str | None:
         """Full sha of HEAD; None when unborn or not a repository."""

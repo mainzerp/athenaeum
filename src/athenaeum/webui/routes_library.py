@@ -1,16 +1,18 @@
-"""Library browsing, git history, and whole-bundle transfer: tree (with the
-library-wide history section), document (with the per-document timeline and
-restore), per-commit diff, log viewer, export (zip download), and import
-(replace-restore). The standalone Time-Machine page is gone; its legacy
-``/library/time-machine`` URLs 301-redirect here.
+"""Library browsing and whole-bundle transfer: the document view (tree page
+takeover — the library tree and a sunburst minimap flank the selected
+document with its per-document timeline, inline diff, edit, delete, and
+restore), the log viewer, export (zip download), and import
+(replace-restore). The standalone Time-Machine page and the library-wide
+history section are gone; the legacy ``/library/time-machine`` and
+``/library/document`` URLs 301-redirect here.
 
 Read-only views over the plan §3.2 LibraryBackend surface. All paths are
 bundle-relative and scoped to the logged-in user's own library root, so
 cross-user access is structurally impossible (the path simply does not
 exist in another user's bundle and surfaces as 404). Export/import operate
 on the user's own bundle only; import is a writer class honoring the run
-gates and the per-root write lock (architecture §7). History mutations
-(restore/revert/reset/pull) journal via ``journal_activity``, mirroring
+gates and the per-root write lock (architecture §7). Document mutations
+(restore/edit/delete) journal via ``journal_activity``, mirroring
 the import route's pattern.
 """
 
@@ -46,6 +48,13 @@ router = APIRouter(dependencies=[Depends(deps.csrf_protect)])
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB upload cap (read at call time)
 _UPLOAD_CHUNK = 1024 * 1024
 
+_TREE_PAGE = "/library/tree"
+
+# Unified-context line count for inline (in-flow) diffs: large enough to
+# always cover the whole file, so the rendered view shows the full document
+# with the accumulated changes vs HEAD marked inline — not just the hunks.
+_INLINE_DIFF_CONTEXT = 1_000_000
+
 
 def _backend(
     request: Request,
@@ -78,45 +87,101 @@ def tree_page(
     request: Request,
     conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
     settings: Annotated[Settings, Depends(deps.settings_dep)],
+    path: str | None = None,
+    sha: str | None = None,
     msg: str | None = None,
     error: str | None = None,
 ):
+    """Document view: tree + minimap flank the selected document (``path``);
+    without one the center pane shows an empty state."""
     ctx = _backend(request, conn, settings)
     if ctx is None:
         return deps.login_redirect(conn)
     user, backend = ctx
     entries = backend.list_dir("/")
     history_available = backend.history_available
-    commits, head = [], None
-    if history_available:
-        try:
-            commits = backend.list_commits()
+    doc, fm = None, None
+    tags: list = []
+    trust, stale = None, False
+    body_html, diff_html = "", None
+    timeline, viewed = [], None
+    viewed_index, head = 0, None
+    if path is not None:
+        file_commits = []
+        if history_available:
+            try:
+                file_commits = backend.file_history(path)
+            except (ValueError, GitError):
+                # Reserved paths (index.md/log.md) get no timeline; the never-
+                # raise contract of file_history makes this cheap insurance.
+                file_commits = []
             head = backend.git_head()
-        except GitError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-    cfg = db.get_config(conn, user["id"])
+        # Slider model: oldest-LEFT / newest-RIGHT; the rightmost stop doubles
+        # as the live view (the newest file commit IS the live content).
+        timeline = file_commits[::-1]
+        viewed_index = len(timeline) - 1
+        if sha and history_available:
+            if head and (head == sha or head.startswith(sha)):
+                # The viewed commit IS the live state: plain live view, no banner.
+                doc = _read_document(backend, path)
+            else:
+                try:
+                    doc = backend.read_document_at(path, sha)
+                except (FileNotFoundError, ValueError) as exc:
+                    raise HTTPException(status_code=404, detail="Document not found") from exc
+                except GitError as exc:
+                    raise HTTPException(status_code=404, detail="Commit not found") from exc
+                for index, entry in enumerate(file_commits):
+                    if entry["sha"] == sha or entry["sha"].startswith(sha):
+                        viewed = entry
+                        viewed_index = len(file_commits) - 1 - index
+                        break
+                if viewed is None:
+                    # Commit outside the file's own log (hand-crafted URL); the
+                    # template guards the empty timestamp.
+                    viewed = {"sha": sha, "short": sha[:7], "timestamp": "", "subject": ""}
+                # Historical stop: the inline vs-HEAD diff replaces the body.
+                diff_html = markdown_render.render_inline_diff_html(
+                    backend.file_diff_to_head(sha, path, context=_INLINE_DIFF_CONTEXT)
+                )
+        else:
+            doc = _read_document(backend, path)
+        fm = doc.get("frontmatter") or {}
+        tags = fm.get("tags") or []
+        trust = deps.trust_tier(fm)
+        stale = deps.is_stale(fm)
+        body_html = markdown_render.render_markdown(doc["body"])
+    bootstrap = {
+        "path": path,
+        "timeline": timeline,
+        "viewedIndex": viewed_index,
+        "landedLive": viewed is None,
+        "head": head,
+        "historyAvailable": history_available,
+        # Forms rebuilt client-side after an in-page selection reuse the
+        # session token (already rendered into the server-side forms).
+        "csrf": deps.csrf_token(request),
+    }
     return deps.templates.TemplateResponse(
         request,
-        "tree.html",
+        "document_view.html",
         {
             "user": user,
             "entries": entries,
             "root": "/",
-            "commits": commits,
-            "head": head,
-            # Slider targets: every commit except HEAD, oldest first.
-            "reset_points": [
-                {
-                    "sha": c["sha"],
-                    "short": c["short"],
-                    "timestamp": c["timestamp"],
-                    "subject": c["subject"],
-                }
-                for c in reversed(commits[1:])
-            ],
+            "doc": doc,
+            "fm": fm,
+            "tags": tags,
+            "trust": trust,
+            "stale": stale,
+            "body_html": body_html,
+            "timeline": timeline,
+            "viewed": viewed,
+            "viewed_index": viewed_index,
+            "diff_html": diff_html,
             "history_configured": backend.history_configured,
             "history_available": history_available,
-            "remote_configured": bool(cfg["git_remote_url"]),
+            "bootstrap": bootstrap,
             "msg": msg,
             "error": error,
         },
@@ -145,79 +210,56 @@ def tree_children(
 
 
 @router.get("/library/document")
-def document_page(
+def document_page_redirect(path: str, sha: str | None = None):
+    """Legacy document URL: the document view lives at /library/tree now
+    (keeps graph-page navigation and external bookmarks working)."""
+    params = {"path": path}
+    if sha:
+        params["sha"] = sha
+    return RedirectResponse(f"{_TREE_PAGE}?{urlencode(params)}", status_code=301)
+
+
+@router.get("/library/document/data")
+def document_data(
     request: Request,
     conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
     settings: Annotated[Settings, Depends(deps.settings_dep)],
     path: str,
-    sha: str | None = None,
-    msg: str | None = None,
-    error: str | None = None,
 ):
+    """JSON payload for in-page center-pane swaps (document_view.js)."""
     ctx = _backend(request, conn, settings)
     if ctx is None:
         return deps.login_redirect(conn)
     user, backend = ctx
+    doc = _read_document(backend, path)
+    fm = doc.get("frontmatter") or {}
     history_available = backend.history_available
-    file_commits, viewed, diff_html = [], None, None
+    timeline = []
     head = None
     if history_available:
         try:
-            file_commits = backend.file_history(path)
+            # Reserved paths (index.md/log.md) get no timeline.
+            timeline = backend.file_history(path)[::-1]
         except (ValueError, GitError):
-            # Reserved paths (index.md/log.md) get no timeline; the never-
-            # raise contract of file_history makes this cheap insurance.
-            file_commits = []
+            timeline = []
         head = backend.git_head()
-    # Slider model: oldest-LEFT / newest-RIGHT; the rightmost stop doubles
-    # as the live view (the newest file commit IS the live content).
-    timeline = file_commits[::-1]
-    viewed_index = len(timeline) - 1
-    if sha and history_available:
-        if head and (head == sha or head.startswith(sha)):
-            # The viewed commit IS the live state: plain live view, no banner.
-            doc = _read_document(backend, path)
-        else:
-            try:
-                doc = backend.read_document_at(path, sha)
-            except (FileNotFoundError, ValueError) as exc:
-                raise HTTPException(status_code=404, detail="Document not found") from exc
-            except GitError as exc:
-                raise HTTPException(status_code=404, detail="Commit not found") from exc
-            for index, entry in enumerate(file_commits):
-                if entry["sha"] == sha or entry["sha"].startswith(sha):
-                    viewed = entry
-                    viewed_index = len(file_commits) - 1 - index
-                    break
-            if viewed is None:
-                # Commit outside the file's own log (hand-crafted URL); the
-                # template guards the empty timestamp.
-                viewed = {"sha": sha, "short": sha[:7], "timestamp": "", "subject": ""}
-            diff_html = markdown_render.render_diff_html(backend.file_diff_at(sha, path))
-    else:
-        doc = _read_document(backend, path)
-    fm = doc.get("frontmatter") or {}
-    return deps.templates.TemplateResponse(
-        request,
-        "document.html",
-        {
-            "user": user,
-            "doc": doc,
-            "fm": fm,
-            "tags": fm.get("tags") or [],
-            "trust": deps.trust_tier(fm),
-            "stale": deps.is_stale(fm),
-            "body_html": markdown_render.render_markdown(doc["body"]),
-            "timeline": timeline,
-            "viewed": viewed,
-            "viewed_index": viewed_index,
-            "diff_html": diff_html,
-            "history_configured": backend.history_configured,
-            "history_available": history_available,
-            "msg": msg,
-            "error": error,
-        },
-    )
+    return {
+        "path": path,
+        "title": fm.get("title") or path,
+        "description": fm.get("description") or "",
+        "type": fm.get("type") or "unknown",
+        "status": fm.get("status") or "stable",
+        "tags": fm.get("tags") or [],
+        "trust": deps.trust_tier(fm),
+        "stale": deps.is_stale(fm),
+        "body": doc["body"],
+        "body_html": markdown_render.render_markdown(doc["body"]),
+        "timeline": timeline,
+        "viewed_index": len(timeline) - 1,
+        "head": head,
+        "history_available": history_available,
+        "history_configured": backend.history_configured,
+    }
 
 
 @router.get("/library/document/diff")
@@ -227,24 +269,34 @@ def document_diff(
     settings: Annotated[Settings, Depends(deps.settings_dep)],
     path: str,
     sha: str,
+    mode: str = "transcript",
 ):
-    """JSON preview diff of one document: ``sha`` vs current HEAD (slider)."""
+    """JSON preview diff of one document: ``sha`` vs current HEAD (slider).
+
+    ``mode="transcript"`` (default) returns the per-line patch transcript;
+    ``mode="inline"`` returns the in-flow document diff.
+    """
     ctx = _backend(request, conn, settings)
     if ctx is None:
         return deps.login_redirect(conn)
     user, backend = ctx
+    if mode not in ("transcript", "inline"):
+        raise HTTPException(status_code=400, detail="Unknown diff mode")
     if not backend.history_available:
         raise HTTPException(status_code=404, detail="History unavailable")
     head = backend.git_head()
     if head and (head == sha or head.startswith(sha)):
         return {"diff_html": ""}
     try:
+        if mode == "inline":
+            patch = backend.file_diff_to_head(sha, path, context=_INLINE_DIFF_CONTEXT)
+            return {"diff_html": markdown_render.render_inline_diff_html(patch)}
         patch = backend.file_diff_to_head(sha, path)
+        return {"diff_html": markdown_render.render_diff_html(patch)}
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="Document not found") from exc
     except GitError as exc:
         raise HTTPException(status_code=404, detail="Commit not found") from exc
-    return {"diff_html": markdown_render.render_diff_html(patch)}
 
 
 @router.get("/library/log")
@@ -280,9 +332,7 @@ def log_content(
     )
 
 
-# --- git history (timeline restore, library-wide mutations, diff) --------------
-
-_TREE_PAGE = "/library/tree"
+# --- document history mutations (timeline restore) ----------------------------
 
 
 def _error_redirect(message: str):
@@ -337,7 +387,7 @@ def document_restore(
         backend.restore_file_from_commit(path, sha)
     except (GitError, ValueError) as exc:
         outcome, error_text = "error", str(exc)
-        result = deps.redirect(f"/library/document?{urlencode({'path': path, 'error': str(exc)})}")
+        result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'path': path, 'error': str(exc)})}")
     except Exception as exc:
         outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
         raise
@@ -350,8 +400,7 @@ def document_restore(
         if seed_cache is not None:
             seed_cache.invalidate(user["id"])
         result = deps.redirect(
-            f"/library/document?"
-            f"{urlencode({'path': path, 'msg': f'Restored to commit {sha[:7]}.'})}"
+            f"{_TREE_PAGE}?{urlencode({'path': path, 'msg': f'Restored to commit {sha[:7]}.'})}"
         )
     finally:
         _journal(
@@ -367,155 +416,45 @@ def document_restore(
     return result
 
 
-@router.get("/library/diff")
-def history_diff_page(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-    commit: str,
-):
-    ctx = _backend(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, backend = ctx
-    try:
-        diff = backend.commit_diff(commit)
-    except GitError as exc:
-        raise HTTPException(status_code=404, detail="Commit not found") from exc
-    subject, short = "", commit[:7]
-    try:
-        for entry in backend.list_commits():
-            if entry["sha"] == commit or entry["sha"].startswith(commit):
-                subject, short = entry["subject"], entry["short"]
-                break
-    except GitError:
-        pass  # the diff above succeeded; the header falls back to the sha
-    return deps.templates.TemplateResponse(
-        request,
-        "diff.html",
-        {"user": user, "diff": diff, "short": short, "subject": subject},
-    )
-
-
-@router.post("/library/history/{sha}/revert")
-def history_revert(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-    sha: str,
-):
-    """Undo one commit (reverse-apply + one log-faithful commit)."""
-    ctx = _backend(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, backend = ctx
-    started_at, start = db.utcnow(), time.perf_counter()
-    outcome, error_text = "ok", None
-    try:
-        backend.revert_commit(sha)
-    except GitError as exc:
-        outcome, error_text = "error", str(exc)
-        result = _error_redirect(str(exc))
-    except Exception as exc:
-        outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
-        raise
-    else:
-        result = deps.redirect(f"{_TREE_PAGE}?msg=Commit+reverted.")
-    finally:
-        _journal(
-            settings,
-            user["id"],
-            "time_machine_revert",
-            json.dumps({"sha": sha}),
-            started_at,
-            start,
-            outcome,
-            error_text,
-        )
-    return result
-
-
-@router.post("/library/history/reset")
-def history_reset(
-    request: Request,
-    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
-    settings: Annotated[Settings, Depends(deps.settings_dep)],
-    sha: str = Form(...),
-):
-    """Reset the library to an earlier commit (append-only, undoable)."""
-    ctx = _backend(request, conn, settings)
-    if ctx is None:
-        return deps.login_redirect(conn)
-    user, backend = ctx
-    started_at, start = db.utcnow(), time.perf_counter()
-    outcome, error_text = "ok", None
-    try:
-        backend.reset_to_commit(sha)
-    except GitError as exc:
-        outcome, error_text = "error", str(exc)
-        result = _error_redirect(str(exc))
-    except Exception as exc:
-        outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
-        raise
-    else:
-        result = deps.redirect(f"{_TREE_PAGE}?msg=Library+reset.+Use+the+slider+again+to+undo.")
-    finally:
-        _journal(
-            settings,
-            user["id"],
-            "time_machine_reset",
-            json.dumps({"sha": sha}),
-            started_at,
-            start,
-            outcome,
-            error_text,
-        )
-    return result
-
-
-@router.post("/library/history/pull")
-def history_pull(
+@router.post("/library/document/edit")
+def document_edit(
     request: Request,
     conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
     settings: Annotated[Settings, Depends(deps.settings_dep)],
     manager: Annotated[LibrarianManager | None, Depends(deps.manager_dep)],
+    path: str = Form(...),
+    body: str = Form(...),
 ):
-    """Fast-forward pull from the configured remote (button only rendered
-    when one is configured; divergence surfaces as an error flash)."""
+    """Edit ONE document's body (frontmatter untouched; one new commit)."""
     ctx = _backend(request, conn, settings)
     if ctx is None:
         return deps.login_redirect(conn)
     user, backend = ctx
-    cfg = db.get_config(conn, user["id"])
-    if not cfg["git_remote_url"]:
-        return _error_redirect("No remote configured.")
     started_at, start = db.utcnow(), time.perf_counter()
     outcome, error_text = "ok", None
     try:
-        backend.git_pull()
-    except GitError as exc:
+        backend.edit_concept(path, new_body=body, agent_label="webui")
+    except (FileNotFoundError, ValueError) as exc:
         outcome, error_text = "error", str(exc)
-        result = _error_redirect(str(exc))
+        result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'path': path, 'error': str(exc)})}")
     except Exception as exc:
         outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
         raise
     else:
-        # The WebUI route is the sole pull trigger: evict the cached
-        # librarian so the next agent run reconciles embeddings/FTS, and
-        # invalidate the per-request seed cache (belt and braces — the
-        # log.md mtime self-heal covers it anyway).
+        # Same post-write hygiene as document_restore: evict the cached
+        # librarian and invalidate the per-request seed cache.
         if manager is not None:
             manager.evict(user["id"])
         seed_cache = getattr(request.app.state, "seed_cache", None)
         if seed_cache is not None:
             seed_cache.invalidate(user["id"])
-        result = deps.redirect(f"{_TREE_PAGE}?msg=Pulled.")
+        result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'path': path, 'msg': 'Saved.'})}")
     finally:
         _journal(
             settings,
             user["id"],
-            "time_machine_pull",
-            "{}",
+            "document_edit",
+            json.dumps({"path": path}),
             started_at,
             start,
             outcome,
@@ -524,7 +463,53 @@ def history_pull(
     return result
 
 
-# --- legacy Time-Machine URLs (folded into tree/document, 0.22.0) --------------
+@router.post("/library/document/delete")
+def document_delete(
+    request: Request,
+    conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
+    settings: Annotated[Settings, Depends(deps.settings_dep)],
+    manager: Annotated[LibrarianManager | None, Depends(deps.manager_dep)],
+    path: str = Form(...),
+):
+    """Delete ONE document (one new commit; the log entry keeps the record)."""
+    ctx = _backend(request, conn, settings)
+    if ctx is None:
+        return deps.login_redirect(conn)
+    user, backend = ctx
+    started_at, start = db.utcnow(), time.perf_counter()
+    outcome, error_text = "ok", None
+    try:
+        backend.delete_concept(path, agent_label="webui")
+    except (FileNotFoundError, ValueError) as exc:
+        outcome, error_text = "error", str(exc)
+        result = _error_redirect(str(exc))
+    except Exception as exc:
+        outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
+        raise
+    else:
+        if manager is not None:
+            manager.evict(user["id"])
+        seed_cache = getattr(request.app.state, "seed_cache", None)
+        if seed_cache is not None:
+            seed_cache.invalidate(user["id"])
+        name = path.rstrip("/").rsplit("/", 1)[-1]
+        # No path on the redirect: the document is gone.
+        result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'msg': f'Deleted {name}.'})}")
+    finally:
+        _journal(
+            settings,
+            user["id"],
+            "document_delete",
+            json.dumps({"path": path}),
+            started_at,
+            start,
+            outcome,
+            error_text,
+        )
+    return result
+
+
+# --- legacy Time-Machine URLs (folded into the tree page, 0.22.0) ----------------
 # No login gate, no backend: plain 301s keep old bookmarks alive. A 301 on a
 # POST is re-issued as GET by browsers (method not preserved) — only reachable
 # from pre-upgrade stale pages; the router-level csrf_protect still runs first.
@@ -537,7 +522,8 @@ def time_machine_page_redirect():
 
 @router.get("/library/time-machine/diff")
 def time_machine_diff_redirect(commit: str):
-    return RedirectResponse(f"/library/diff?{urlencode({'commit': commit})}", status_code=301)
+    # The per-commit diff page is gone with the library-wide history section.
+    return RedirectResponse(_TREE_PAGE, status_code=301)
 
 
 @router.post("/library/time-machine/{sha}/revert")
