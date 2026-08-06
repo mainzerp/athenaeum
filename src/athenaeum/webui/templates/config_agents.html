@@ -26,7 +26,7 @@
         <select class="input-field" id="connection_id" name="connection_id">
           <option value="" {% if not cfg["librarian_connection_id"] %}selected{% endif %}>Default</option>
           {% for c in connections %}
-          <option value="{{ c['id'] }}" {% if cfg["librarian_connection_id"] == c["id"] %}selected{% endif %}>{{ c["provider"] }}</option>
+          <option value="{{ c['id'] }}" {% if cfg["librarian_connection_id"] == c["id"] %}selected{% endif %}>{{ c["label"] }}</option>
           {% endfor %}
         </select>
         <p class="muted text-sm mt-1">Connection this agent uses; 'Default' follows the default set on the Provider page.</p>
@@ -71,7 +71,7 @@
         <select class="input-field" id="connection_id" name="connection_id">
           <option value="" {% if not cfg["curator_connection_id"] %}selected{% endif %}>Default</option>
           {% for c in connections %}
-          <option value="{{ c['id'] }}" {% if cfg["curator_connection_id"] == c["id"] %}selected{% endif %}>{{ c["provider"] }}</option>
+          <option value="{{ c['id'] }}" {% if cfg["curator_connection_id"] == c["id"] %}selected{% endif %}>{{ c["label"] }}</option>
           {% endfor %}
         </select>
       </div>
@@ -188,7 +188,7 @@
         <select class="input-field" id="connection_id" name="connection_id">
           <option value="" {% if not cfg["embedding_connection_id"] %}selected{% endif %}>Default</option>
           {% for c in connections %}
-          <option value="{{ c['id'] }}" {% if cfg["embedding_connection_id"] == c["id"] %}selected{% endif %}>{{ c["provider"] }}</option>
+          <option value="{{ c['id'] }}" {% if cfg["embedding_connection_id"] == c["id"] %}selected{% endif %}>{{ c["label"] }}</option>
           {% endfor %}
         </select>
         <p class="muted text-sm mt-1">API source only; anthropic connections have no embeddings endpoint.</p>

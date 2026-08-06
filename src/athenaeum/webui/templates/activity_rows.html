@@ -10,7 +10,7 @@
         {% else %}
         {% for e in in_flight %}
         <tr>
-          <td>{{ e["started_at"] | dt }}</td>
+          <td><time data-utc="{{ e['started_at'] }}" datetime="{{ e['started_at'] }}">{{ e["started_at"] | dt }}</time></td>
           <td>{{ e["tool"] }}</td>
           <td>{{ e["token_label"] or "" }}</td>
           <td><code>{{ e["arguments"] }}</code></td>
@@ -34,7 +34,7 @@
       <tbody>
         {% for row in journal %}
         <tr>
-          <td>{{ row["started_at"] | dt }}</td>
+          <td><time data-utc="{{ row['started_at'] }}" datetime="{{ row['started_at'] }}">{{ row["started_at"] | dt }}</time></td>
           <td>{{ row["tool"] }}</td>
           <td>{{ row["token_label"] or "" }}</td>
           <td>

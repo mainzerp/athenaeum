@@ -103,6 +103,27 @@
     return pad2(date.getUTCHours()) + ":" + pad2(date.getUTCMinutes());
   }
 
+  /* ----- UTC timestamps -> browser-local display -----
+     <time data-utc="ISO"> renders server-side UTC text as a no-JS fallback;
+     with JS the text is rewritten to local YYYY-MM-DD HH:MM. Runs on load
+     and after every htmx swap (the Activity table polls every 5s). */
+
+  function renderLocalTimes(root) {
+    var els = root.querySelectorAll("time[data-utc]");
+    for (var i = 0; i < els.length; i++) {
+      var date = new Date(els[i].getAttribute("data-utc"));
+      if (isNaN(date.getTime())) {
+        continue;
+      }
+      els[i].textContent =
+        date.getFullYear() +
+        "-" + pad2(date.getMonth() + 1) +
+        "-" + pad2(date.getDate()) +
+        " " + pad2(date.getHours()) +
+        ":" + pad2(date.getMinutes());
+    }
+  }
+
   /* ----- Copy helper ----- */
 
   function copySourceText(el) {
@@ -163,6 +184,12 @@
         }
       }
     }
+
+    /* Server-rendered UTC timestamps shown in browser-local time */
+    renderLocalTimes(document);
+    document.addEventListener("htmx:afterSwap", function (event) {
+      renderLocalTimes(event.detail.target || document);
+    });
 
     /* Global delegation: data-confirm + data-loading on forms */
     document.addEventListener("submit", function (event) {
