@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.22.0**
+Current version: **0.23.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -21,7 +21,7 @@ The version must stay in sync across:
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
 
-### 0.23.0 (in development)
+### 0.23.0
 
 Document Time Machine rework: the per-document slider is reversed to
 oldest-left/newest-right (rightmost stop = live view) and moving it shows a
@@ -72,6 +72,21 @@ code spans/fences surface as the new `code_span_escape_candidates` curate
 finding — the curator LLM judges each listed occurrence (artifact → repair
 with real characters; intentional documentation → leave unchanged) and
 confirmed-intentional literals are re-reported on later runs until fixed.
+
+WebUI graph/activity rework: the library tree and document pages are merged
+into a single document view with a minimap for quick navigation and the
+inline time-machine diff; the trace replay graph is rebuilt on the sunburst
+view (the vendored graph3d bundle, ~5.4k lines, is removed) with index.md
+trace hops routed through the sunburst core, and the standalone traces list
+is folded into the Activity page. Activity timestamps render in local time,
+agent/connection labels identify the originating client, and the page footer
+is dropped. Dependency security: cryptography bumped to 50.0.0
+(PYSEC-2026-3552).
+
+Commits: `a24712a` fix(ui), `fc19b4b` feat(webui), `13a8738` feat(webui),
+`90d2cde` fix(deps), `ab63b04` fix(search), `6614d1e` docs(readme),
+`28c4ae2` feat(curate), `19f0eff` feat, `4c05d44` feat(webui), `295047d`
+feat(webui).
 
 ### 0.22.0
 
