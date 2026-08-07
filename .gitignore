@@ -39,3 +39,6 @@ htmlcov/
 # IDE
 .idea/
 .vscode/
+
+# Scratch/working files
+graph_rework.md
