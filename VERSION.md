@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.23.1**
+Current version: **0.24.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,15 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.24.0
+
+Add `intfloat/multilingual-e5-base` (768 dims) to the local embedding model
+shortlist as the new default (`47315ea`); existing shortlist entries remain
+selectable, E5 prefix handling applies automatically, and the semantic
+duplicate threshold falls back to the conservative 0.85 default until live
+calibration. Existing per-user configs are unchanged; switching models in the
+WebUI triggers the background re-embed as before.
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
