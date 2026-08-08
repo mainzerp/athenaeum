@@ -601,8 +601,8 @@ async def test_warm_local_embedding_models(monkeypatch, tmp_path):
 
 
 def test_local_model_shortlist_shape():
-    assert LOCAL_MODEL_SHORTLIST[0] == ("BAAI/bge-small-en-v1.5", 384)
-    assert len(LOCAL_MODEL_SHORTLIST) == 4
+    assert LOCAL_MODEL_SHORTLIST[0] == ("intfloat/multilingual-e5-base", 768)
+    assert len(LOCAL_MODEL_SHORTLIST) == 5
     assert all(isinstance(dims, int) and dims > 0 for _, dims in LOCAL_MODEL_SHORTLIST)
 
 

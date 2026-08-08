@@ -24,6 +24,7 @@ from athenaeum.librarian.embed import (
 # WebUI labels. Hardcoded — fastembed may be absent, so its supported-model
 # listing is never consulted here.
 LOCAL_MODEL_SHORTLIST: list[tuple[str, int]] = [
+    ("intfloat/multilingual-e5-base", 768),
     ("BAAI/bge-small-en-v1.5", 384),
     ("BAAI/bge-base-en-v1.5", 768),
     ("sentence-transformers/all-MiniLM-L6-v2", 384),
