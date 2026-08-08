@@ -389,6 +389,13 @@
   erfolgt. Fix-Kandidat fuer die naechste Iteration: `store_knowledge` serverseitig
   nach dem Run die relates_to-Konzepte deterministisch nachverlinken (nicht dem
   Modell ueberlassen), oder die Store-Summary an `links_after` spiegeln.
+- **F22 vierte Bestaetigung (2026-08-08, e5-base-Lessons-Store):** Der
+  Abschluss-Store (`/athenaeum/lessons/embedding-model-intfloat-multilingual-e5-base-lessons`)
+  behauptete "Linked from /athenaeum/versions/v0.12.0.md and
+  /ha-agenthub/embedding-model-switch-e5-base-lessons.md" — `links_after`
+  zeigte erneut `unbacklinked`, `healthy: false`. Reparatur per
+  `update_knowledge` mit expliziter `[text](/abs/pfad.md)`-Anweisung
+  funktionierte sofort (`healthy: true`). Befund unveraendert.
 - **Deployment-Kontext (2026-08-04):** Die Kimi-MCP-Config
   (`~/.kimi-code/mcp.json`) zeigt auf `https://athenaeum.mzrsvr.net/mcp`
   (REMOTE, lief 0.20.0) — die Dogfooding-Library lebt dort, nicht im
