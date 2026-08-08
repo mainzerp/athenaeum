@@ -471,14 +471,19 @@ class Librarian:
                 raise self._provider_failure(exc, tracker, iterations) from exc
             track_usage(response.usage)
         if telemetry is not None:
-            telemetry.iterations = iterations
+            # Accumulate, never overwrite: the F11 nudge retry runs _run twice
+            # in one request, and the retry's numbers must ADD to the first
+            # run's (llm_calls already extends), otherwise the journal/trace
+            # summary under-accounts the tokens the first run burned.
+            telemetry.iterations += iterations
             telemetry.llm_calls.extend(llm_calls)
-            telemetry.llm = {
-                "provider": llm_config.provider,
-                "model": llm_config.model,
-                "iterations": iterations,
-                **totals,
-            }
+            merged = dict(telemetry.llm) if telemetry.llm else {}
+            merged["provider"] = llm_config.provider
+            merged["model"] = llm_config.model
+            merged["iterations"] = merged.get("iterations", 0) + iterations
+            for key, value in totals.items():
+                merged[key] = merged.get(key, 0) + value
+            telemetry.llm = merged
         return _RunResult(
             text=response.text or "",
             tracker=tracker,
@@ -500,7 +505,7 @@ class Librarian:
 
     # --- post-processing -------------------------------------------------
 
-    def _concept_entries(self, tracker: _Tracker) -> list[dict]:
+    async def _concept_entries(self, tracker: _Tracker) -> list[dict]:
         """Deterministic concept metadata for every concept the run touched."""
         candidates: list[str] = []
         for path in tracker.read_paths:
@@ -517,7 +522,7 @@ class Librarian:
                 continue
             seen.add(concept_id)
             try:
-                doc = self.backend.read_document(path)
+                doc = await asyncio.to_thread(self.backend.read_document, path)
             except Exception as exc:
                 # e.g. deleted during the run — the entry is skipped, not fatal
                 logger.warning("concept entry: read failed for %s; skipping (%s)", path, exc)
@@ -534,7 +539,7 @@ class Librarian:
             )
         return entries
 
-    def _stored_entries(self, tracker: _Tracker) -> list[dict]:
+    async def _stored_entries(self, tracker: _Tracker) -> list[dict]:
         """Map tracked writes onto the store_knowledge output vocabulary.
 
         Moves surface as ``moved`` with a ``from_id`` (the old concept id)
@@ -546,7 +551,7 @@ class Librarian:
             title = write["id"]
             if action != "deleted":
                 try:
-                    doc = self.backend.read_document(f"{write['id']}.md")
+                    doc = await asyncio.to_thread(self.backend.read_document, f"{write['id']}.md")
                     title = (doc.get("frontmatter") or {}).get("title", title)
                 except Exception as exc:
                     # Title falls back to the concept id; the entry is kept.
@@ -637,7 +642,7 @@ class Librarian:
             result = await self._run(task, agent_label)
             answer: dict[str, Any] = {
                 "answer": result.text,
-                "concepts": self._concept_entries(result.tracker),
+                "concepts": await self._concept_entries(result.tracker),
             }
             follow_ups = _parse_follow_ups(result.text)
             if follow_ups:
@@ -659,10 +664,10 @@ class Librarian:
         partial-success result (``partial=True``) instead of raising.
         """
         result = await self._run_write_once(task, agent_label, requested_by, via)
-        if self._stored_entries(result.tracker):
+        if await self._stored_entries(result.tracker):
             return result
         retry = await self._run_write_once(task + NO_WRITE_NUDGE, agent_label, requested_by, via)
-        if self._stored_entries(retry.tracker):
+        if await self._stored_entries(retry.tracker):
             return retry
         raise LibrarianNoWriteError("librarian completed the write task without writing anything")
 
@@ -697,7 +702,7 @@ class Librarian:
         lines = []
         for concept_id, score in ranked:
             try:
-                doc = self.backend.read_document(f"{concept_id}.md")
+                doc = await asyncio.to_thread(self.backend.read_document, f"{concept_id}.md")
             except Exception as exc:
                 logger.warning(
                     "related-concepts: read failed for %s; skipping (%s)", concept_id, exc
@@ -870,7 +875,7 @@ class Librarian:
         writes (D1.1), present only when the verified list is non-empty (D1.3).
         """
         response: dict[str, Any] = {
-            "stored": self._stored_entries(result.tracker),
+            "stored": await self._stored_entries(result.tracker),
             "summary": result.text,
         }
         if result.partial:
@@ -974,17 +979,28 @@ class Librarian:
                     "verified": [],
                 }
             task = build_maintain_preamble(status, instructions)
-            result = await self._run(task, agent_label)
+            try:
+                result = await self._run(task, agent_label)
+            except _ProviderRunError as exc:
+                # AGENT-05: a mid-loop provider failure after landed writes is a
+                # partial success, not a failed run (L2/_run_write_once pattern).
+                logger.warning(
+                    "provider failed mid-run; keeping %d landed write(s)",
+                    len(exc.tracker.writes),
+                )
+                result = _RunResult(
+                    text="", tracker=exc.tracker, iterations=exc.iterations, partial=True
+                )
             # Epoch ordering (L15): verification lands BEFORE the final rescan,
             # so the post-run status and the verified receipts share one epoch.
             verified = await self._verify_repairs(result.tracker, agent_label)
             final_status = await asyncio.to_thread(self.backend.status)
             healthy = bool(final_status.get("healthy"))
-            return {
-                "actions": self._stored_entries(result.tracker),
+            response: dict[str, Any] = {
+                "actions": await self._stored_entries(result.tracker),
                 # L15: the LLM narrates from pre-run status; append the
                 # deterministic post-run verdict so epochs don't mix.
-                "summary": result.text
+                "summary": (PARTIAL_SUMMARY if result.partial else result.text)
                 + _post_run_note(
                     healthy,
                     "the library is now healthy.",
@@ -994,6 +1010,9 @@ class Librarian:
                 "healthy": healthy,
                 "verified": verified,
             }
+            if result.partial:
+                response["partial"] = True
+            return response
 
     async def _verify_repairs(self, tracker: _Tracker, agent_label: str | None) -> list[dict]:
         """Post-run verification (F18-pattern deterministic post-step); never raises.
@@ -1009,9 +1028,15 @@ class Librarian:
         completed curator run (_semantic_duplicates never-raise precedent).
         """
         receipts: list[dict] = []
+        seen: set[str] = set()
         for write in tracker.writes:
             if write["action"] != "updated":
                 continue
+            if write["id"] in seen:
+                # One concept edited twice in a run yields exactly one
+                # verify_concept call and one receipt.
+                continue
+            seen.add(write["id"])
             try:
                 await asyncio.to_thread(
                     self.backend.verify_concept,
@@ -1181,12 +1206,23 @@ class Librarian:
             task = build_curate_preamble(
                 report, instructions, addendum=self.config.curate_prompt_addendum
             )
-            result = await self._run(
-                task,
-                agent_label,
-                llm_config=self._curate_llm(),
-                provider=self._curate_provider_or_default(),
-            )
+            try:
+                result = await self._run(
+                    task,
+                    agent_label,
+                    llm_config=self._curate_llm(),
+                    provider=self._curate_provider_or_default(),
+                )
+            except _ProviderRunError as exc:
+                # AGENT-05: a mid-loop provider failure after landed writes is a
+                # partial success, not a failed run (L2/_run_write_once pattern).
+                logger.warning(
+                    "provider failed mid-run; keeping %d landed write(s)",
+                    len(exc.tracker.writes),
+                )
+                result = _RunResult(
+                    text="", tracker=exc.tracker, iterations=exc.iterations, partial=True
+                )
             # Epoch ordering (L15): verification lands BEFORE the final rescan.
             verified = await self._verify_repairs(result.tracker, agent_label)
             # L15: re-scan post-run so the response reports ONE epoch — what
@@ -1206,9 +1242,9 @@ class Librarian:
             )
             final_status = await asyncio.to_thread(self.backend.status)
             organized = self.backend.findings_empty(final)
-            return {
-                "actions": hygiene_actions + self._stored_entries(result.tracker),
-                "summary": result.text
+            response: dict[str, Any] = {
+                "actions": hygiene_actions + await self._stored_entries(result.tracker),
+                "summary": (PARTIAL_SUMMARY if result.partial else result.text)
                 + _post_run_note(
                     organized,
                     "no open findings remain; the library is well-organized.",
@@ -1226,3 +1262,6 @@ class Librarian:
                     "broken_links": len(final_status["health"]["broken_links"]),
                 },
             }
+            if result.partial:
+                response["partial"] = True
+            return response

@@ -128,9 +128,9 @@ def test_first_run_setup_page(client):
 def test_bootstrap_admin_via_env(tmp_path, monkeypatch):
     """ATHENAEUM_BOOTSTRAP_ADMIN_* pre-seeds the owner at startup (plan §3.6)."""
     monkeypatch.setenv("ATHENAEUM_DATA_ROOT", str(tmp_path))
-    monkeypatch.setenv("ATHENAEUM_SECRET_KEY", "bootstrap-secret")
+    monkeypatch.setenv("ATHENAEUM_SECRET_KEY", "bootstrap-secret-key-0123456789abc")
     monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_USERNAME", "owner")
-    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD", "owner-pw")
+    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD", "owner-password-1")
 
     app = create_app(get_settings())
     with CsrfTestClient(app, follow_redirects=False) as client:
@@ -138,7 +138,7 @@ def test_bootstrap_admin_via_env(tmp_path, monkeypatch):
         response = client.get("/setup")
         assert response.status_code == 303
         assert response.headers["location"] == "/login"
-        response = client.post("/login", data={"username": "owner", "password": "owner-pw"})
+        response = client.post("/login", data={"username": "owner", "password": "owner-password-1"})
         assert response.status_code == 303
         assert client.get("/library/tree").status_code == 200
 

@@ -1,6 +1,9 @@
 """Tests for athenaeum.library.seed."""
 
 import logging
+import os
+
+import pytest
 
 from athenaeum.library.backend import LibraryBackend
 from athenaeum.library.seed import MAX_SEED_BYTES, generate_seed
@@ -100,6 +103,35 @@ def test_seed_concepts_hide_deprecated(tmp_path):
     assert "gone" not in seed
     # _tree is a structural filename view: the deprecated file still shows
     assert "old.md" in seed
+
+
+def test_seed_multiline_description_rendered_single_line(tmp_path):
+    """LIBRARY-10: a multi-line frontmatter description collapses at the
+    sink — the seed keeps one line per concept."""
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/a.md",
+        {"type": "Concept", "title": "A", "description": "first line\nsecond line"},
+        "body\n",
+    )
+    seed = generate_seed(backend)
+    assert "- /a.md (type: Concept) - first line second line" in seed
+
+
+def test_seed_tree_skips_symlinked_dirs(tmp_path):
+    """LIBRARY-02: the seed's structural tree view never follows symlinks."""
+    backend = make_backend(tmp_path)
+    root = tmp_path / "lib"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("---\ntype: Concept\n---\nsecret\n", encoding="utf-8")
+    try:
+        os.symlink(outside, root / "escape", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    seed = generate_seed(backend)
+    assert "escape" not in seed
+    assert "secret" not in seed
 
 
 # --- SeedCache fallback (CS-11) ----------------------------------------------

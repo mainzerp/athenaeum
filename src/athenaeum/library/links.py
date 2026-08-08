@@ -11,6 +11,7 @@ from extraction and rewriting, so image assets never become graph citizens.
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
 from collections.abc import Iterator
@@ -67,14 +68,30 @@ def resolve_target(source_path: str, target: str) -> str:
 
 
 def iter_concept_files(root: str | Path) -> Iterator[tuple[str, Path]]:
-    """Yield ``(bundle_path, absolute_path)`` for every concept document."""
+    """Yield ``(bundle_path, absolute_path)`` for every concept document.
+
+    os.walk with ``followlinks=False`` plus explicit symlink screening:
+    symlinked directories are never descended into (on any Python) and
+    symlinked files are never yielded — a symlink pointing outside the
+    root (or a symlink cycle) can neither escape the bundle nor hang the
+    scan. Dot-paths and RESERVED_NAMES are filtered as before; the yield
+    order stays globally sorted.
+    """
     root = Path(root)
-    for path in sorted(root.rglob("*.md")):
+    paths: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [
+            d for d in dirnames if not d.startswith(".") and not (Path(dirpath) / d).is_symlink()
+        ]
+        for name in filenames:
+            if name.startswith(".") or not name.endswith(".md") or name in RESERVED_NAMES:
+                continue
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                continue
+            paths.append(path)
+    for path in sorted(paths):
         rel = path.relative_to(root)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        if path.name in RESERVED_NAMES:
-            continue
         yield "/" + rel.as_posix(), path
 
 

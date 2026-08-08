@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import logging
 import math
 import sys
 import types
@@ -343,6 +344,51 @@ async def test_openai_embeddings_missing_data_raises():
         await create_embedding_provider(config).embed(["x"], config)
 
 
+@respx.mock
+async def test_openai_embeddings_http_error_maps_to_provider_error():
+    """AGENT-08: raise_for_status failures surface as EmbeddingProviderError,
+    not raw httpx exceptions (llm.http_status_error wording)."""
+    respx.post("https://api.openai.com/v1/embeddings").mock(
+        return_value=httpx.Response(500, text="Internal Server Error")
+    )
+    config = openai_embed_config()
+    with pytest.raises(EmbeddingProviderError, match="openai returned HTTP 500"):
+        await create_embedding_provider(config).embed(["x"], config)
+
+
+@respx.mock
+async def test_openai_embeddings_out_of_order_items_sorted_by_index():
+    """AGENT-08: a gateway that reorders data[] must not silently mis-assign
+    vectors — items are sorted by their int index when all carry one."""
+    respx.post("https://api.openai.com/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 2, "embedding": [3.0]},
+                    {"index": 0, "embedding": [1.0]},
+                    {"index": 1, "embedding": [2.0]},
+                ]
+            },
+        )
+    )
+    config = openai_embed_config()
+    vectors = await create_embedding_provider(config).embed(["one", "two", "three"], config)
+    assert vectors == [[1.0], [2.0], [3.0]]  # input order restored
+
+
+@respx.mock
+async def test_openai_embeddings_missing_embedding_key_raises_provider_error():
+    """AGENT-08: an item without embedding is an EmbeddingProviderError,
+    not a raw KeyError."""
+    respx.post("https://api.openai.com/v1/embeddings").mock(
+        return_value=httpx.Response(200, json={"data": [{"index": 0}]})
+    )
+    config = openai_embed_config()
+    with pytest.raises(EmbeddingProviderError, match="without embedding"):
+        await create_embedding_provider(config).embed(["x"], config)
+
+
 # --- providers: Gemini ---------------------------------------------------------
 
 
@@ -365,6 +411,18 @@ async def test_gemini_embeddings_request_shape_and_task_type_per_kind():
     await provider.embed(["d1", "d2"], config, kind=KIND_DOCUMENT)
     bodies = [json.loads(call.request.content) for call in route.calls[1:]]
     assert [b["taskType"] for b in bodies] == ["RETRIEVAL_DOCUMENT", "RETRIEVAL_DOCUMENT"]
+
+
+@respx.mock
+async def test_gemini_embeddings_http_error_maps_to_provider_error():
+    """AGENT-08: raise_for_status failures surface as EmbeddingProviderError,
+    not raw httpx exceptions (llm.http_status_error wording)."""
+    respx.post("https://generativelanguage.googleapis.com/v1beta/models/embed-x:embedContent").mock(
+        return_value=httpx.Response(429, text="Too Many Requests")
+    )
+    config = EmbeddingConfig(source="api", model="embed-x", provider="gemini", api_key="gk")
+    with pytest.raises(EmbeddingProviderError, match="gemini returned HTTP 429"):
+        await create_embedding_provider(config).embed(["x"], config)
 
 
 # --- providers: factory + local -------------------------------------------------
@@ -820,6 +878,29 @@ async def test_sync_writes_move_deletes_old_path_row(tmp_path):
     loaded = service.load()
     assert set(loaded) == {"new/b.md"}  # no stale old-path row
     assert len(provider.calls) == 1  # the new path embedded in one batch
+
+
+async def test_sync_writes_move_delete_failure_never_raises(tmp_path, monkeypatch, caplog):
+    """LIBRARY-07: a failing moved-from delete is logged and skipped — it
+    cannot escape sync_writes' NEVER-raise contract."""
+    db_path = make_db(tmp_path)
+    root = tmp_path / "lib"
+    write_concept(root, "new/b.md", "Beta", "body b")
+    service, provider = make_service(db_path)
+
+    def boom(concept_path):
+        raise RuntimeError("sqlite down")
+
+    monkeypatch.setattr(service, "delete", boom)
+    with caplog.at_level(logging.WARNING, logger="athenaeum.embeddings"):
+        await service.sync_writes(
+            make_backend(root),
+            [{"id": "new/b", "title": "Beta", "action": "moved", "from_id": "old/a"}],
+        )
+
+    assert "embedding sync skipped old/a.md" in caplog.text
+    assert set(service.load()) == {"new/b.md"}  # the surviving write still embedded
+    assert len(provider.calls) == 1
 
 
 async def test_sync_writes_deprecated_deletes_row(tmp_path):

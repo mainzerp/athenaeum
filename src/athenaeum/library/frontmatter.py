@@ -86,11 +86,22 @@ def write_bytes_atomic(path: str | Path, data: bytes) -> None:
 
 
 def _split_raw(text: str) -> tuple[str | None, str]:
-    """Split into ``(frontmatter_text, body)``; frontmatter_text None if absent."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
+    """Split into ``(frontmatter_text, body)``; frontmatter_text None if absent.
+
+    Tolerance on the opening side: one leading UTF-8 BOM and leading blank
+    lines are skipped before the opening ``---`` (a document without one
+    there keeps returning ``(None, text)`` with the original text). The
+    CLOSING delimiter is exact: only a bare ``---`` at column 0 (how
+    ``dump_document`` always writes it) closes the block — an indented
+    ``  ---`` line inside a block scalar is content, not the delimiter.
+    """
+    lines = text.removeprefix("\ufeff").split("\n")
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start >= len(lines) or lines[start].strip() != "---":
         return None, text
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            return "\n".join(lines[1:i]), "\n".join(lines[i + 1 :])
+    for i in range(start + 1, len(lines)):
+        if lines[i] == "---":
+            return "\n".join(lines[start + 1 : i]), "\n".join(lines[i + 1 :])
     raise FrontmatterError("frontmatter block is not closed by a '---' line")

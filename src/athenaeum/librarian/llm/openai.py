@@ -68,14 +68,30 @@ def _parse_tool_call(tc: dict) -> ToolCall:
     Invalid argument JSON (e.g. truncated by max_tokens) does NOT raise here —
     that would kill the run from inside the adapter (L5). The raw payload rides
     along as a MalformedToolArguments placeholder so dispatch raises a
-    model-recoverable tool error instead.
+    model-recoverable tool error instead; the same holds for argument JSON
+    that parses to a non-dict. Missing structural fields (id, function.name)
+    ARE a provider-contract violation — LLMProviderError (F7), never a raw
+    KeyError.
     """
-    raw_arguments = tc["function"].get("arguments") or "{}"
+    function = tc.get("function") if isinstance(tc, dict) else None
+    function = function if isinstance(function, dict) else {}
+    call_id = tc.get("id") if isinstance(tc, dict) else None
+    name = function.get("name")
+    if not call_id or not name:
+        raise LLMProviderError(
+            f"provider returned a tool call without id/function.name: {str(tc)[:200]}"
+        )
+    raw_arguments = function.get("arguments") or "{}"
     try:
         arguments = json.loads(raw_arguments)
     except json.JSONDecodeError as exc:
         arguments = MalformedToolArguments(raw_arguments, error=str(exc))
-    return ToolCall(id=tc["id"], name=tc["function"]["name"], arguments=arguments)
+    else:
+        if not isinstance(arguments, dict):
+            arguments = MalformedToolArguments(
+                raw_arguments, error="arguments must be a JSON object"
+            )
+    return ToolCall(id=call_id, name=name, arguments=arguments)
 
 
 class OpenAIProvider:
@@ -124,7 +140,15 @@ class OpenAIProvider:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise http_status_error(config.provider, exc) from exc
-        data = response.json()
+        try:
+            data = response.json()
+        except json.JSONDecodeError as exc:
+            # A 200 with a non-JSON body (e.g. an HTML page behind a
+            # misconfigured base_url) is a provider failure, not a raw
+            # JSONDecodeError escaping the F7 classification.
+            raise LLMProviderError(
+                f"{config.provider} returned a non-JSON response body: {response.text[:200]}"
+            ) from exc
 
         # OpenRouter and some compatible gateways return HTTP 200 with an error
         # payload, or a success body without choices — never index blindly.

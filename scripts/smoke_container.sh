@@ -18,7 +18,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-export ATHENAEUM_SECRET_KEY="${ATHENAEUM_SECRET_KEY:-smoke-secret-key}"
+# Default must satisfy the SERVER-03 strength validator (>= 32 chars).
+export ATHENAEUM_SECRET_KEY="${ATHENAEUM_SECRET_KEY:-smoke-secret-key-0123456789abcdef}"
 SMOKE_PORT="${SMOKE_PORT:-8000}"
 
 # The only host-side deviation from docker-compose.yml: the published port

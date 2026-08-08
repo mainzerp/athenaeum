@@ -217,6 +217,89 @@ def test_import_accepts_legacy_versions_members(tmp_path):
     assert (root / ".athenaeum" / "versions" / "v1.json").is_file()
 
 
+def test_import_decompressed_size_cap_aborts(tmp_path, monkeypatch):
+    """LIBRARY-01: a zip bomb aborts on the running decompressed total across
+    ALL members; the staging tree is removed and the live bundle untouched."""
+    root = _init_root(tmp_path)
+    before = _snapshot(root)
+    archive = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("index.md", "# I\n")
+        zf.writestr("log.md", "# L\n")
+        zf.writestr("payload.md", "x" * 10_000)
+    monkeypatch.setattr(transfer, "MAX_EXTRACT_BYTES", 5_000)
+    with pytest.raises(transfer.CorruptArchiveError, match="decompressed size cap"):
+        transfer.stage_import(root, archive)
+    assert not (tmp_path / transfer.STAGING_DIRNAME).exists()
+    assert _snapshot(root) == before
+
+
+def test_import_member_count_cap_aborts(tmp_path, monkeypatch):
+    """LIBRARY-01: the member-count cap aborts hostile archives too."""
+    root = _init_root(tmp_path)
+    archive = tmp_path / "many.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("index.md", "# I\n")
+        zf.writestr("log.md", "# L\n")
+        for i in range(5):
+            zf.writestr(f"m{i}.md", "x")
+    monkeypatch.setattr(transfer, "MAX_EXTRACT_MEMBERS", 3)
+    with pytest.raises(transfer.CorruptArchiveError, match="member cap"):
+        transfer.stage_import(root, archive)
+    assert not (tmp_path / transfer.STAGING_DIRNAME).exists()
+
+
+@pytest.mark.parametrize("member", [".GIT/hooks/post-commit", ".git./x", ".git /x"])
+def test_import_rejects_git_member_variants(tmp_path, member):
+    """SERVER-01: .git variants that resolve to the same directory on
+    case/quote-insensitive filesystems are rejected like exact .git."""
+    root = _init_root(tmp_path)
+    with pytest.raises(transfer.UnsafeMemberError, match=r"\.git members are not allowed"):
+        transfer.stage_import(root, _evil_zip(tmp_path, member))
+    assert not (tmp_path / transfer.STAGING_DIRNAME).exists()
+
+
+def test_export_excludes_symlink_members(tmp_path):
+    """LIBRARY-02: a symlinked dir pointing outside the root is never
+    descended or archived; a symlinked file is skipped."""
+    root = _init_root(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret\n", encoding="utf-8")
+    try:
+        os.symlink(outside, root / "escape", target_is_directory=True)
+        os.symlink(root / "index.md", root / "linked.md")
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    export_zip = tmp_path / "export.zip"
+    transfer.export_bundle(root, export_zip)
+    with zipfile.ZipFile(export_zip) as zf:
+        names = zf.namelist()
+    assert not any(name.startswith("escape") for name in names)
+    assert "linked.md" not in names
+    assert "index.md" in names  # real content still archived
+
+
+def test_import_lock_helper_per_user_and_peek():
+    """SERVER-06: the per-user import lock is stable per uid and the route's
+    409 path peeks it with wait=False semantics (test_webui.py route-level
+    coverage belongs to Part 3)."""
+    from athenaeum.webui.routes_library import _import_lock_for
+
+    lock = _import_lock_for("lock-peek-user")
+    assert _import_lock_for("lock-peek-user") is lock
+    assert _import_lock_for("other-user") is not lock
+    assert not lock.locked()
+
+    async def acquire() -> None:
+        await lock.acquire()
+
+    asyncio.run(acquire())
+    assert lock.locked()  # state persists after the loop closes (CPython 3.12+)
+    lock.release()
+    assert not lock.locked()
+
+
 @pytest.mark.skipif(not gittool.git_available(), reason="git binary required")
 def test_import_reinitializes_git_history(tmp_path):
     """The swapped-in tree gets a fresh repo with one restore commit."""

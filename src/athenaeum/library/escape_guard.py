@@ -31,6 +31,7 @@ from . import frontmatter as fm_mod
 from . import links as links_mod
 
 ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_U_TAIL_RE = re.compile(r"u([0-9a-fA-F]{4})")
 
 MAX_CODE_SPAN_OCCURRENCES_PER_FILE = 10
 MAX_CODE_SPAN_CANDIDATE_FILES = 20
@@ -91,21 +92,52 @@ def _split_fence_segments(body: str) -> list[tuple[bool, str]]:
 
 
 def _decode_plain(text: str, stats: Counter) -> str:
-    """Decode ``\\uXXXX`` escapes in plain (non-code) text, updating *stats*."""
+    """Decode ``\\uXXXX`` escapes in plain (non-code) text, updating *stats*.
 
-    def repl(match: re.Match) -> str:
-        codepoint = int(match.group(1), 16)
+    Backslash parity: ``\\\\`` pairs are consumed first (collapsing to one
+    backslash), so only an ODD backslash run before ``uXXXX`` decodes the
+    final escape — an even run is escaped backslashes and the sequence
+    stays literal (``\\u2011`` the artifact decodes; ``\\\\u2011`` the
+    intentional literal does not). Backslash runs not followed by a
+    ``uXXXX`` tail pass through byte-untouched.
+    """
+
+    def decode(codepoint: int, literal: str) -> str:
         if 0xD800 <= codepoint <= 0xDFFF:
             # Surrogates cannot be UTF-8 encoded; leave the literal and
             # record the skip instead of crashing on chr()/write.
             stats["skipped"] += 1
-            stats[f"skipped:{match.group(0)}"] += 1
-            return match.group(0)
+            stats[f"skipped:{literal}"] += 1
+            return literal
         stats["decoded"] += 1
-        stats[f"decoded:{match.group(0)}"] += 1
+        stats[f"decoded:{literal}"] += 1
         return chr(codepoint)
 
-    return ESCAPE_RE.sub(repl, text)
+    out: list[str] = []
+    pos = 0
+    while pos < len(text):
+        bs = text.find("\\", pos)
+        if bs == -1:
+            out.append(text[pos:])
+            break
+        run_end = bs
+        while run_end < len(text) and text[run_end] == "\\":
+            run_end += 1
+        tail = _U_TAIL_RE.match(text, run_end)
+        if tail is None:
+            # Not an escape context: the run passes through byte-untouched.
+            out.append(text[pos:run_end])
+            pos = run_end
+            continue
+        out.append(text[pos:bs])
+        out.append("\\" * ((run_end - bs) // 2))  # consumed pairs collapse
+        literal = f"\\u{tail.group(1)}"
+        if (run_end - bs) % 2 == 0:
+            out.append(tail.group(0))  # even run: the escape stays literal
+        else:
+            out.append(decode(int(tail.group(1), 16), literal))
+        pos = tail.end()
+    return "".join(out)
 
 
 def _iter_code_spans(segment: str) -> Iterator[tuple[int, int]]:
@@ -230,6 +262,25 @@ def scan_escape_artifacts(root: str | Path) -> list[dict]:
     return dirty
 
 
+def _odd_run_escape_starts(text: str) -> Iterator[int]:
+    """Start offsets of escape-introducing ``\\uXXXX`` matches in ``text``.
+
+    Same backslash parity as ``_decode_plain``: ESCAPE_RE always matches at
+    the run's final backslash, so the match decodes exactly when the run of
+    backslashes ending at (and including) that position has ODD length.
+    Keeps candidate counting in agreement with decoding.
+    """
+    for match in ESCAPE_RE.finditer(text):
+        start = match.start()
+        run = 0
+        i = start
+        while i >= 0 and text[i] == "\\":
+            run += 1
+            i -= 1
+        if run % 2 == 1:
+            yield start
+
+
 def scan_code_span_escapes(body: str) -> list[dict]:
     """Literal ``\\uXXXX`` occurrences inside code spans/fenced blocks of one body.
 
@@ -247,12 +298,12 @@ def scan_code_span_escapes(body: str) -> list[dict]:
     offset = 0  # 0-based line index of the current segment start
     for is_fenced, text in _split_fence_segments(body):
         if is_fenced:
-            positions = [m.start() for m in ESCAPE_RE.finditer(text)]
+            positions = list(_odd_run_escape_starts(text))
         else:
             positions = [
-                start + m.start()
+                start + pos
                 for start, end in _iter_code_spans(text)
-                for m in ESCAPE_RE.finditer(text[start:end])
+                for pos in _odd_run_escape_starts(text[start:end])
             ]
         for pos in positions:
             line_index = offset + text.count("\n", 0, pos)

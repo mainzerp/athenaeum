@@ -24,7 +24,8 @@ from athenaeum.app import create_app
 from athenaeum.config import Settings
 from athenaeum.library.backend import provision_library
 
-TEST_SECRET_KEY = "athenaeum-test-secret-key"
+# >= 32 chars: the config.py secret_key validator (SERVER-03) parses this too.
+TEST_SECRET_KEY = "athenaeum-test-secret-key-0123456789"
 
 
 class CsrfTestClient(TestClient):

@@ -310,6 +310,74 @@ def test_postgres_connect_failure_sanitized(tmp_path, monkeypatch):
     assert "s3cret" not in str(excinfo.value)
 
 
+def test_postgres_connect_failure_scrubs_conninfo(tmp_path, monkeypatch):
+    """SERVER-10: driver errors carrying conninfo leak neither host, port,
+    username, nor password — each is replaced with ***."""
+    conninfo_message = (
+        'connection to server at "pg.internal" (10.0.0.5), port 5432 failed: '
+        'FATAL: password authentication failed for user "ro_user"'
+    )
+
+    class DownPsycopg:
+        def connect(self, **kwargs):
+            raise RuntimeError(conninfo_message)
+
+    monkeypatch.setattr(computation, "psycopg", DownPsycopg())
+    row = conn_row(
+        "unused", runtime="postgres", host="pg.internal", port=5432, dbname="d", username="ro_user"
+    )
+    with pytest.raises(ComputationError) as excinfo:
+        execute(
+            row,
+            "s3cret",
+            {"runtime": "postgres"},
+            "# Computation\n```sql\nSELECT 1\n```\n",
+            None,
+        )
+    message = str(excinfo.value)
+    for leaked in ("pg.internal", "5432", "ro_user", "s3cret"):
+        assert leaked not in message
+    assert "***" in message
+
+
+def test_postgres_query_failure_scrubs_conninfo(tmp_path, monkeypatch):
+    """The query error path scrubs the same values as the connect path."""
+
+    class FailOnQueryPsycopg:
+        class _Conn:
+            read_only = False
+
+            def cursor(self):
+                return self
+
+            def execute(self, sql, params=None):
+                if sql.startswith("SELECT set_config"):
+                    return
+                raise RuntimeError('relation "secrets" of ro_user@pg.internal does not exist')
+
+            def close(self):
+                return None
+
+        def connect(self, **kwargs):
+            return self._Conn()
+
+    monkeypatch.setattr(computation, "psycopg", FailOnQueryPsycopg())
+    row = conn_row(
+        "unused", runtime="postgres", host="pg.internal", port=5432, dbname="d", username="ro_user"
+    )
+    with pytest.raises(ComputationError, match="postgres query failed") as excinfo:
+        execute(
+            row,
+            "s3cret",
+            {"runtime": "postgres"},
+            "# Computation\n```sql\nSELECT 1\n```\n",
+            None,
+        )
+    message = str(excinfo.value)
+    assert "pg.internal" not in message
+    assert "ro_user" not in message
+
+
 # --- execute: runtime gating ----------------------------------------------------
 
 

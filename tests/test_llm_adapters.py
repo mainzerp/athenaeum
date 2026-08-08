@@ -19,6 +19,8 @@ from athenaeum.librarian.llm import (
     MalformedToolArgumentsError,
     create_provider,
 )
+from athenaeum.librarian.llm.anthropic import _convert as anthropic_convert
+from athenaeum.librarian.llm.gemini import _convert as gemini_convert
 from athenaeum.librarian.llm.openai import OpenAIProvider, _convert_messages
 from athenaeum.librarian.tools import dispatch
 
@@ -604,3 +606,220 @@ def test_llm_config_none_api_key_becomes_empty_string():
     can never be constructed."""
     config = LLMConfig(provider="openai", model="m", api_key=None)  # type: ignore[arg-type]
     assert config.api_key == ""
+
+
+# --- AGENT-01 / AGENT-02: turn-structure merging -------------------------------
+
+
+# Cap-exit shape (probe-confirmed): user, assistant/model, user(tool results),
+# user(FINAL_ANSWER_REQUEST) — adapters must merge the trailing user text into
+# the tool-result turn so no two consecutive user entries remain.
+CAP_EXIT_MESSAGES = [
+    {"role": "system", "content": "sys"},
+    {"role": "user", "content": "q"},
+    {
+        "role": "assistant",
+        "content": "checking",
+        "tool_calls": [{"id": "c1", "name": "list_dir", "arguments": {"path": "/"}}],
+    },
+    {"role": "tool", "tool_call_id": "c1", "name": "list_dir", "content": "[]"},
+    {"role": "user", "content": "final answer now"},
+]
+
+
+def test_gemini_parallel_tool_results_merge_into_one_user_content():
+    """AGENT-01: consecutive tool results become ONE user content holding all
+    functionResponse parts (strict Gemini endpoints reject consecutive
+    same-role contents)."""
+    messages = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "gemini-0", "name": "list_dir", "arguments": {"path": "/"}},
+                {"id": "gemini-1", "name": "read_document", "arguments": {"path": "/a.md"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "gemini-0", "name": "list_dir", "content": "[]"},
+        {
+            "role": "tool",
+            "tool_call_id": "gemini-1",
+            "name": "read_document",
+            "content": "{}",
+        },
+    ]
+    _, contents = gemini_convert(messages)
+
+    assert len(contents) == 3  # user, model, one merged user
+    merged = contents[2]
+    assert merged["role"] == "user"
+    assert merged["parts"] == [
+        {"functionResponse": {"name": "list_dir", "response": {"result": "[]"}}},
+        {"functionResponse": {"name": "read_document", "response": {"result": "{}"}}},
+    ]
+
+
+def test_gemini_user_text_after_tool_results_merges_into_same_content():
+    """AGENT-02: the cap-exit final-answer request appends to the tool-result
+    user content instead of opening a second consecutive user turn."""
+    _, contents = gemini_convert(CAP_EXIT_MESSAGES)
+
+    roles = [entry["role"] for entry in contents]
+    assert roles == ["user", "model", "user"]
+    merged = contents[2]
+    assert merged["parts"] == [
+        {"functionResponse": {"name": "list_dir", "response": {"result": "[]"}}},
+        {"text": "final answer now"},  # results first, text last
+    ]
+
+
+def test_anthropic_user_text_after_tool_results_merges_into_same_message():
+    """AGENT-02: same merge for Anthropic — one user message whose content is
+    the tool_result blocks followed by the text block."""
+    _, messages = anthropic_convert(CAP_EXIT_MESSAGES)
+
+    roles = [entry["role"] for entry in messages]
+    assert roles == ["user", "assistant", "user"]
+    merged = messages[2]
+    assert merged["content"] == [
+        {"type": "tool_result", "tool_use_id": "c1", "content": "[]"},
+        {"type": "text", "text": "final answer now"},  # results first, text last
+    ]
+
+
+def test_anthropic_consecutive_tool_results_still_merge():
+    """Regression guard: the AGENT-02 merge keeps the pre-existing batching of
+    consecutive tool results into a single user message."""
+    messages = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "c1", "name": "list_dir", "arguments": {}},
+                {"id": "c2", "name": "list_dir", "arguments": {}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "list_dir", "content": "[]"},
+        {"role": "tool", "tool_call_id": "c2", "name": "list_dir", "content": "[]"},
+    ]
+    _, converted = anthropic_convert(messages)
+
+    assert [entry["role"] for entry in converted] == ["user", "assistant", "user"]
+    assert converted[2]["content"] == [
+        {"type": "tool_result", "tool_use_id": "c1", "content": "[]"},
+        {"type": "tool_result", "tool_use_id": "c2", "content": "[]"},
+    ]
+
+
+# --- AGENT-07 / AGENT-09: response-parsing + malformed-argument hardening -------
+
+
+@respx.mock
+async def test_openai_non_json_body_on_200_raises_provider_error():
+    """AGENT-07: a 200 with a non-JSON body (e.g. an HTML page behind a
+    misconfigured openai-compatible base_url) is an LLMProviderError, not a
+    raw JSONDecodeError."""
+    respx.post("http://localhost:9000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, text="<html>Not an API</html>")
+    )
+    config = openai_config(base_url="http://localhost:9000/v1")
+    with pytest.raises(LLMProviderError, match="non-JSON response body"):
+        await create_provider(config).complete(SIMPLE_MESSAGES, [], config)
+
+
+@respx.mock
+async def test_openai_tool_call_missing_function_name_raises_provider_error():
+    """AGENT-07: a tool_call entry without function.name violates the provider
+    contract — LLMProviderError (F7), not a raw KeyError."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [{"id": "call_1", "type": "function", "function": {}}],
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    config = openai_config()
+    with pytest.raises(LLMProviderError, match="without id/function.name"):
+        await create_provider(config).complete(SIMPLE_MESSAGES, TOOLS, config)
+
+
+@respx.mock
+async def test_openai_non_dict_arguments_become_recoverable():
+    """AGENT-07: argument JSON that parses to a non-dict (42) routes into the
+    MalformedToolArguments path — dispatch raises a model-recoverable error."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "read_document", "arguments": "42"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    config = openai_config()
+    response = await create_provider(config).complete(SIMPLE_MESSAGES, TOOLS, config)
+
+    arguments = response.tool_calls[0].arguments
+    assert isinstance(arguments, MalformedToolArguments)
+    with pytest.raises(MalformedToolArgumentsError, match="arguments must be a JSON object"):
+        await dispatch("read_document", arguments, backend=None)
+
+
+@respx.mock
+async def test_anthropic_non_json_body_on_200_raises_provider_error():
+    """AGENT-07: same non-JSON classification for the Anthropic adapter."""
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, text="<html>Not an API</html>")
+    )
+    config = anthropic_config()
+    with pytest.raises(LLMProviderError, match="non-JSON response body"):
+        await create_provider(config).complete(SIMPLE_MESSAGES, [], config)
+
+
+@respx.mock
+async def test_anthropic_missing_content_on_200_raises_provider_error():
+    """AGENT-07: a 200 without content is an unusable response, not an empty
+    answer (parity with the Gemini CS-10 raise)."""
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json={"id": "msg_x", "usage": {}})
+    )
+    config = anthropic_config()
+    with pytest.raises(LLMProviderError, match="without content"):
+        await create_provider(config).complete(SIMPLE_MESSAGES, [], config)
+
+
+async def test_dispatch_short_circuits_malformed_arguments():
+    """AGENT-09: malformed payloads never reach _require_args' substring
+    membership test — even when the raw payload happens to contain every
+    required key name as a substring."""
+    # required key "path" IS a substring of the raw payload
+    payload = MalformedToolArguments('{"path": "/x', error="truncated")
+    with pytest.raises(MalformedToolArgumentsError, match="malformed tool-call arguments"):
+        await dispatch("read_document", payload, backend=None)
+    # required key names NOT substrings: was a misleading "missing required
+    # argument(s)" ValueError before the AGENT-09 short-circuit
+    payload = MalformedToolArguments("42", error="arguments must be a JSON object")
+    with pytest.raises(MalformedToolArgumentsError, match="arguments must be a JSON object"):
+        await dispatch("read_document", payload, backend=None)

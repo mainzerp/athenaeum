@@ -7,7 +7,9 @@ result shaping, and the mint/telemetry helpers.
 """
 
 import json
+import logging
 import re
+from pathlib import Path
 
 import pytest
 
@@ -129,6 +131,31 @@ def test_keep_prunes_on_create(tmp_path):
     assert remaining == ["20260728T180001Z-bbbbbbbb.json"]
 
 
+def test_prune_tolerates_unlink_oserror(tmp_path, monkeypatch, caplog):
+    """A locked trace file is logged and skipped; prune must not raise."""
+    store = TraceStore(tmp_path)
+    for i in range(3):
+        store.create(make_trace(f"20260728T18000{i}Z-aaaaaaaa"))
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *args, **kwargs):
+        if self.name.startswith("20260728T180000Z"):
+            raise OSError("file locked")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    with caplog.at_level(logging.WARNING, logger="athenaeum.librarian.tracing"):
+        deleted = store.prune(1)
+
+    assert deleted == 1  # only the file that actually unlinked counts
+    remaining = sorted(p.name for p in (tmp_path / ".traces").iterdir())
+    assert remaining == [
+        "20260728T180000Z-aaaaaaaa.json",  # survived: unlink failed
+        "20260728T180002Z-aaaaaaaa.json",
+    ]
+    assert "trace prune: could not delete" in caplog.text
+
+
 def test_mint_request_id_format():
     request_id = mint_request_id()
     assert re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", request_id)
@@ -172,6 +199,23 @@ def test_session_no_events_no_llm_writes_nothing(tmp_path):
     session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "library_maintain", None)
     session.finish("ok")
     assert session.close() is None
+    assert not (tmp_path / ".traces").exists()
+
+
+def test_session_close_persistence_failure_returns_none(tmp_path, monkeypatch, caplog):
+    """Containment: a TraceStore.create failure is logged and swallowed —
+    trace persistence must never fail the observed run."""
+    session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "request_knowledge", None)
+    session.record("list_dir", {"path": "/"}, [], None, 0.4)
+    session.finish("ok")
+
+    def boom(self, trace):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(TraceStore, "create", boom)
+    with caplog.at_level(logging.WARNING, logger="athenaeum.librarian.tracing"):
+        assert session.close() is None
+    assert "trace persistence failed for 20260728T180000Z-aaaabbbb" in caplog.text
     assert not (tmp_path / ".traces").exists()
 
 

@@ -256,6 +256,8 @@ _SCHEMA: list[tuple[str, list[tuple[str, str | None, str | None]], list[str]]] =
             # consecutive failures (reset on success)
             ("failures", "failures INTEGER NOT NULL DEFAULT 0", None),
             ("locked_until", "locked_until TEXT", None),  # ISO 8601 UTC; NULL = not locked
+            # SERVER-09: last touch; rows idle for 7+ days are pruned on write
+            ("updated_at", "updated_at TEXT", "updated_at TEXT"),
         ],
         [],
     ),
@@ -518,13 +520,14 @@ def create_first_admin(
         conn.execute(
             "INSERT INTO librarian_configs"
             " (user_id, curate_schedule_enabled, curate_schedule_time,"
-            "  trace_keep, activity_keep)"
-            " VALUES (?, 1, ?, ?, ?)",
+            "  trace_keep, activity_keep, payload_keep)"
+            " VALUES (?, 1, ?, ?, ?, ?)",
             (
                 user_id,
                 DEFAULT_SCHEDULE_TIME,
                 DEFAULT_TRACE_KEEP,
                 DEFAULT_ACTIVITY_KEEP,
+                DEFAULT_PAYLOAD_KEEP,
             ),
         )
     return get_user_by_id(conn, user_id)
@@ -556,20 +559,22 @@ def record_login_failure(conn: sqlite3.Connection, key: str, *, now: datetime | 
     """Count one failed login for ``key``; lock with exponential backoff.
 
     Returns the applied lockout in seconds (0 below LOGIN_MAX_FAILURES).
+
+    SERVER-09: the increment is one atomic upsert (RETURNING the new count),
+    so parallel failures on separate connections cannot lose an increment the
+    way the old read-modify-write could. Rows idle for 7+ days (updated_at)
+    are pruned opportunistically inside the same transaction.
     """
     now = now or datetime.now(UTC)
     with conn:
-        conn.execute(
-            "INSERT INTO login_attempts (key, failures, locked_until) VALUES (?, 0, NULL)"
-            " ON CONFLICT(key) DO NOTHING",
-            (key,),
-        )
-        failures = (
-            conn.execute("SELECT failures FROM login_attempts WHERE key = ?", (key,)).fetchone()[
-                "failures"
-            ]
-            + 1
-        )
+        failures = conn.execute(
+            "INSERT INTO login_attempts (key, failures, locked_until, updated_at)"
+            " VALUES (?, 1, NULL, ?)"
+            " ON CONFLICT(key) DO UPDATE SET failures = failures + 1,"
+            " updated_at = excluded.updated_at"
+            " RETURNING failures",
+            (key, now.isoformat()),
+        ).fetchone()["failures"]
         lockout = 0
         locked_until = None
         if failures >= LOGIN_MAX_FAILURES:
@@ -579,8 +584,12 @@ def record_login_failure(conn: sqlite3.Connection, key: str, *, now: datetime | 
             )
             locked_until = (now + timedelta(seconds=lockout)).isoformat()
         conn.execute(
-            "UPDATE login_attempts SET failures = ?, locked_until = ? WHERE key = ?",
-            (failures, locked_until, key),
+            "UPDATE login_attempts SET locked_until = ? WHERE key = ?",
+            (locked_until, key),
+        )
+        conn.execute(
+            "DELETE FROM login_attempts WHERE updated_at < ?",
+            ((now - timedelta(days=7)).isoformat(),),
         )
     return lockout
 

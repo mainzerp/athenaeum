@@ -173,11 +173,18 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _driver_message(exc: Exception, secret: str | None = None) -> str:
-    """Client-safe driver error text: type name + message, password scrubbed."""
+def _driver_message(exc: Exception, *sensitive: object) -> str:
+    """Client-safe driver error text: type name + message, sensitive values scrubbed.
+
+    Every non-empty value (password, host, port, username — SERVER-10) is
+    replaced with ``***``; longest first so overlapping values scrub cleanly.
+    """
     msg = f"{type(exc).__name__}: {exc}"
-    if secret:
-        msg = msg.replace(secret, "***")
+    values = sorted(
+        (text for value in sensitive if (text := str(value or ""))), key=len, reverse=True
+    )
+    for text in values:
+        msg = msg.replace(text, "***")
     return msg
 
 
@@ -243,7 +250,14 @@ def run_postgres(
         )
     except Exception as exc:
         raise ComputationError(
-            f"cannot connect to postgres: {_driver_message(exc, password)}"
+            "cannot connect to postgres: "
+            + _driver_message(
+                exc,
+                password,
+                conn_row.get("host"),
+                conn_row.get("port"),
+                conn_row.get("username"),
+            )
         ) from exc
     try:
         conn.read_only = True  # psycopg3: the transaction is READ ONLY
@@ -258,7 +272,14 @@ def run_postgres(
             rows = cursor.fetchmany(row_cap + 1)
         except Exception as exc:
             raise ComputationError(
-                f"postgres query failed: {_driver_message(exc, password)}"
+                "postgres query failed: "
+                + _driver_message(
+                    exc,
+                    password,
+                    conn_row.get("host"),
+                    conn_row.get("port"),
+                    conn_row.get("username"),
+                )
             ) from exc
     finally:
         conn.close()

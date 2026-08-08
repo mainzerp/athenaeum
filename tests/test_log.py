@@ -49,6 +49,29 @@ def test_agent_label_suffix(tmp_path):
     assert "(requested by agent:bot-1)" in read_log(tmp_path)
 
 
+def test_multiline_text_collapsed_to_one_line(tmp_path):
+    """LIBRARY-04: entry text is collapsed at the sink — a forged
+    ``## YYYY-MM-DD`` inside the text can neither split the entry nor
+    poison the legacy-flip heuristic afterwards."""
+    append_entry(tmp_path, "Creation", "first.")
+    append_entry(tmp_path, "Update", "line one\n## 1900-01-01\nforged heading")
+    content = read_log(tmp_path)
+    assert "\n## 1900-01-01\n" not in content
+    assert "* **Update**: line one ## 1900-01-01 forged heading" in content
+    # a follow-up append must not trigger the legacy flip (no forged heading)
+    append_entry(tmp_path, "Move", "after.")
+    content = read_log(tmp_path)
+    assert content.index("first.") < content.index("line one") < content.index("after.")
+
+
+def test_multiline_agent_label_collapsed(tmp_path):
+    """LIBRARY-04: the agent label is collapsed before the suffix is built."""
+    append_entry(tmp_path, "Creation", "x.", agent_label="bot\n## 1900-01-01")
+    content = read_log(tmp_path)
+    assert "(requested by agent:bot ## 1900-01-01)" in content
+    assert "\n## 1900-01-01\n" not in content
+
+
 def test_unknown_kind_rejected(tmp_path):
     with pytest.raises(ValueError, match="unknown log entry kind"):
         append_entry(tmp_path, "Magic", "x.")

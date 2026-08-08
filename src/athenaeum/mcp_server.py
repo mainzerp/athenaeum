@@ -245,7 +245,9 @@ async def _agent_run(
         raise
     finally:
         _trace_var.reset(trace_token)
-        session.close()
+        # Trace persistence is filesystem I/O — keep it off the loop (A1);
+        # failure containment lives inside close() itself.
+        await asyncio.to_thread(session.close)
 
 
 class BearerAuthMiddleware(Middleware):

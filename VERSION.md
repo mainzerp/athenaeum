@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.23.0**
+Current version: **0.23.1**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -20,6 +20,21 @@ The version must stay in sync across:
 
 > Entries for 0.1.0–0.2.1 were recorded retroactively; the repository was not
 > yet under version control, so no commit hashes are available.
+
+### 0.23.1
+
+Deep-review 2026-08 security and robustness patch (36 findings): import/export
+hardening (LIBRARY-01, SERVER-01, SERVER-06); symlink screening of the scan
+layer (LIBRARY-02); LLM adapter turn-structure merging (AGENT-01, AGENT-02);
+frontmatter tolerance + graph containment (LIBRARY-05, LIBRARY-12, SERVER-05);
+async offload + trace/embedding error containment (AGENT-03, AGENT-04,
+LIBRARY-07); provenance/sanitization guards (LIBRARY-03, LIBRARY-04,
+LIBRARY-06, LIBRARY-10, LIBRARY-11); login/auth hardening (SERVER-02,
+SERVER-04, SERVER-08, SERVER-09, SERVER-13); secret-key validation +
+decryption error surfacing (SERVER-03, AGENT-10); curator partial-success +
+verification/telemetry (AGENT-05, AGENT-06, AGENT-11); provider error
+classification (AGENT-07, AGENT-08, AGENT-09); misc robustness (LIBRARY-08,
+LIBRARY-09, SERVER-07, SERVER-10, SERVER-11, SERVER-12).
 
 ### 0.23.0
 

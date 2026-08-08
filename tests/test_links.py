@@ -9,6 +9,7 @@ from athenaeum.library.links import (
     extract_body_links,
     extract_frontmatter_links,
     inbound_links,
+    iter_concept_files,
     resolve_target,
     rewrite_links,
 )
@@ -171,3 +172,44 @@ def test_broken_links_symlink_escape_reported_broken(tmp_path):
     write(tmp_path, "/a.md", FM + "[s](/link/secret.md)\n")
     assert broken_links(tmp_path) == [{"source": "/a.md", "target": "/link/secret.md"}]
     assert secret.read_text(encoding="utf-8").endswith("secret\n")  # untouched
+
+
+def test_iter_concept_files_skips_symlinked_dir(tmp_path):
+    """LIBRARY-02: a symlinked dir pointing outside the root is neither
+    yielded nor recursed — the escape's content never becomes a concept."""
+    outside = tmp_path.parent / (tmp_path.name + "_outside")
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.md").write_text(FM + "secret\n", encoding="utf-8")
+    try:
+        os.symlink(outside, tmp_path / "escape", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    write(tmp_path, "/a.md", FM + "a\n")
+    assert [bundle for bundle, _ in iter_concept_files(tmp_path)] == ["/a.md"]
+
+
+def test_iter_concept_files_skips_symlinked_file(tmp_path):
+    """LIBRARY-02: a symlinked .md file (even one resolving outside the
+    root) is never yielded."""
+    outside = tmp_path.parent / (tmp_path.name + "_outside")
+    outside.mkdir(exist_ok=True)
+    secret = outside / "secret.md"
+    secret.write_text(FM + "secret\n", encoding="utf-8")
+    try:
+        os.symlink(secret, tmp_path / "linked.md")
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    write(tmp_path, "/a.md", FM + "a\n")
+    assert [bundle for bundle, _ in iter_concept_files(tmp_path)] == ["/a.md"]
+
+
+def test_iter_concept_files_symlink_cycle_does_not_raise(tmp_path):
+    """LIBRARY-02: a symlink cycle inside the root can neither hang nor
+    crash the scan (os.walk followlinks=False)."""
+    (tmp_path / "sub").mkdir()
+    try:
+        os.symlink(tmp_path, tmp_path / "sub" / "cycle", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    write(tmp_path, "/sub/a.md", FM + "a\n")
+    assert [bundle for bundle, _ in iter_concept_files(tmp_path)] == ["/sub/a.md"]

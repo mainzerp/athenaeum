@@ -18,7 +18,7 @@ from athenaeum import db, isolation
 from athenaeum.computation import ComputationRunner
 from athenaeum.embeddings import EmbeddingService, EmbedStatusRegistry
 from athenaeum.fts import FtsIndex
-from athenaeum.librarian.agent import Librarian, LibrarianConfig
+from athenaeum.librarian.agent import Librarian, LibrarianConfig, LibrarianNotConfiguredError
 from athenaeum.librarian.embed import EmbeddingConfig, create_embedding_provider
 from athenaeum.librarian.gate import RunGate
 from athenaeum.librarian.llm import LLMConfig, create_provider
@@ -91,6 +91,28 @@ class LibrarianManager:
         isolation.validate_user_id(user_id)
         return self.data_root / "users" / user_id / "library"
 
+    def _decrypt_api_key(self, user_id: str, connection_id: str, api_key: str) -> str:
+        """Decrypt a stored provider key; surface failures as config errors.
+
+        A rotated ``ATHENAEUM_SECRET_KEY`` makes stored Fernet ciphertexts
+        undecryptable; an unclassified ``InvalidToken`` escaping from
+        ``_load_config`` bricks every agent call for the user with a generic
+        internal error (AGENT-10). Raise the targeted configuration error
+        instead (the existing not-configured error path).
+        """
+        if self._key_decryptor is None or not api_key:
+            return api_key
+        try:
+            return self._key_decryptor(api_key)
+        except Exception as exc:
+            logger.warning(
+                "undecryptable api key for user %s connection %s", user_id, connection_id
+            )
+            raise LibrarianNotConfiguredError(
+                "provider key undecryptable; re-enter the API key in the librarian "
+                "settings (secret key rotated?)"
+            ) from exc
+
     def _load_config(self, user_id: str) -> LibrarianConfig:
         """Read the librarian_configs row; absent row = unconfigured defaults."""
         with db.connect(self.db_path) as conn:
@@ -142,8 +164,7 @@ class LibrarianManager:
 
         def build_llm(conn_row, model: str | None) -> LLMConfig:
             api_key = conn_row["api_key_enc"] if conn_row["api_key_enc"] is not None else ""
-            if self._key_decryptor is not None and api_key:
-                api_key = self._key_decryptor(api_key)
+            api_key = self._decrypt_api_key(user_id, conn_row["id"], api_key)
             # L22: `is not None` coercions — a stored 0 (e.g. max_iterations,
             # retention keeps) is a legitimate value, not "unset".
             return LLMConfig(
@@ -177,8 +198,7 @@ class LibrarianManager:
                 emb_conn = resolve(embedding_connection_id)
                 if emb_conn is not None and emb_conn["provider"] != "anthropic":
                     api_key = emb_conn["api_key_enc"] if emb_conn["api_key_enc"] is not None else ""
-                    if self._key_decryptor is not None and api_key:
-                        api_key = self._key_decryptor(api_key)
+                    api_key = self._decrypt_api_key(user_id, emb_conn["id"], api_key)
                     embedding = EmbeddingConfig(
                         source="api",
                         model=embedding_model,

@@ -38,13 +38,15 @@ GITIGNORE_CONTENT = """# Athenaeum internal stores — not library content
 .athenaeum/payloads/
 .traces/
 # Atomic-write temp siblings leaked by a hard crash
-.*.tmp
+*.tmp
 """
 
 GIT_USER_NAME = "Athenaeum Librarian"
 GIT_USER_EMAIL = "athenaeum@localhost"
 
 _SHA_RE = re.compile(r"^[0-9a-f]{4,40}$")
+# git name-status rename records: R plus the zero-padded similarity score.
+_RENAME_STATUS_RE = re.compile(r"^R\d{3}$")
 _STDERR_TAIL = 500
 
 
@@ -201,7 +203,12 @@ class GitRepo:
         for line in out.splitlines():
             if not line.strip():
                 continue
-            sha, short, timestamp, subject = line.split("\x1f", 3)
+            parts = line.split("\x1f")
+            if len(parts) != 4:
+                # Defensive: a polluted record (e.g. a multi-line subject
+                # from an external commit) is skipped, never unpack-crashed.
+                continue
+            sha, short, timestamp, subject = parts
             commits.append(
                 {
                     "sha": sha,
@@ -270,9 +277,15 @@ class GitRepo:
 
         for line in out.splitlines():
             if "\x1f" in line:
+                parts = line.split("\x1f")
+                if len(parts) != 4:
+                    # Defensive: a polluted record (e.g. a multi-line
+                    # subject from an external commit) is skipped, never
+                    # unpack-crashed.
+                    continue
                 close_block()
                 block_renames = []
-                sha, short, timestamp, subject = line.split("\x1f", 3)
+                sha, short, timestamp, subject = parts
                 entry = {
                     "sha": sha,
                     "short": short,
@@ -283,7 +296,10 @@ class GitRepo:
                 }
             elif line.strip() and entry is not None:
                 parts = line.split("\t")
-                if parts[0].startswith("R") and len(parts) == 3:
+                # Only real name-status rename records (R + 3-digit score,
+                # exactly old/new tab fields) count — anything else (e.g. a
+                # stray subject continuation line) is ignored.
+                if _RENAME_STATUS_RE.match(parts[0]) and len(parts) == 3:
                     block_renames.append((parts[1], parts[2]))
         close_block()
         if commits:

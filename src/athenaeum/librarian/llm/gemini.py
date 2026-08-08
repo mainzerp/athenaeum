@@ -22,16 +22,35 @@ def _convert(messages: list[dict]) -> tuple[dict | None, list[dict]]:
 
     Gemini function calls carry no IDs; tool results are matched by function
     name. Synthetic IDs are assigned to parsed tool calls on the way out.
+    Consecutive tool results merge into ONE user content holding all
+    functionResponse parts (AGENT-01: parallel calls), and a user text
+    message immediately following a tool-result batch appends its text part
+    to that same content (AGENT-02: cap-exit shape) — the converted sequence
+    never holds two consecutive user entries.
     """
     system_parts: list[str] = []
     contents: list[dict] = []
+    pending_tool_results: list[dict] = []
+
+    def flush_tool_results() -> None:
+        if pending_tool_results:
+            contents.append({"role": "user", "parts": list(pending_tool_results)})
+            pending_tool_results.clear()
+
     for msg in messages:
         role = msg["role"]
         if role == "system":
             system_parts.append(msg["content"])
         elif role == "user":
-            contents.append({"role": "user", "parts": [{"text": msg["content"]}]})
+            if pending_tool_results:
+                # Merge into the pending batch: one user turn holding the
+                # functionResponse parts followed by the text part.
+                pending_tool_results.append({"text": msg["content"]})
+                flush_tool_results()
+            else:
+                contents.append({"role": "user", "parts": [{"text": msg["content"]}]})
         elif role == "assistant":
+            flush_tool_results()
             parts: list[dict[str, Any]] = []
             if msg.get("content"):
                 parts.append({"text": msg["content"]})
@@ -46,21 +65,17 @@ def _convert(messages: list[dict]) -> tuple[dict | None, list[dict]]:
                 )
             contents.append({"role": "model", "parts": parts})
         elif role == "tool":
-            contents.append(
+            pending_tool_results.append(
                 {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "functionResponse": {
-                                "name": msg["name"],
-                                "response": {"result": msg["content"]},
-                            }
-                        }
-                    ],
+                    "functionResponse": {
+                        "name": msg["name"],
+                        "response": {"result": msg["content"]},
+                    }
                 }
             )
         else:
             raise ValueError(f"Unknown message role {role!r}")
+    flush_tool_results()
     system = {"parts": [{"text": "\n\n".join(system_parts)}]} if system_parts else None
     return system, contents
 

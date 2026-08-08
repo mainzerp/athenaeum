@@ -84,7 +84,10 @@ class _MCPCatchAll:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "lifespan" or scope.get("path", "").startswith("/mcp"):
+        # SERVER-12: exact /mcp or a child path only — a bare startswith would
+        # also route WebUI typos like /mcpfoo into the FastMCP app.
+        path = scope.get("path", "")
+        if scope["type"] == "lifespan" or path == "/mcp" or path.startswith("/mcp/"):
             await self.app(scope, receive, send)
             return
         if scope["type"] == "websocket":

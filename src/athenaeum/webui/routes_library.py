@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
@@ -47,6 +48,21 @@ router = APIRouter(dependencies=[Depends(deps.csrf_protect)])
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB upload cap (read at call time)
 _UPLOAD_CHUNK = 1024 * 1024
+
+# Per-user import locks: a whole-bundle import (spool -> stage -> swap) is
+# serialized per user; a concurrent second import is a 409 conflict (the
+# fixed staging dir STAGING_DIRNAME is unreachable concurrently this way).
+_import_locks: dict[str, asyncio.Lock] = {}
+
+
+def _import_lock_for(uid: str) -> asyncio.Lock:
+    """The per-user import lock (module-level: one import per user at a time)."""
+    lock = _import_locks.get(uid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _import_locks[uid] = lock
+    return lock
+
 
 _TREE_PAGE = "/library/tree"
 
@@ -582,7 +598,7 @@ def library_export(
     if user is None:
         return deps.login_redirect(conn)
     root = deps.library_root_for(settings, user["id"])
-    tmp_zip = root.parent / f"library.export-{os.getpid()}.tmp.zip"
+    tmp_zip = root.parent / f"library.export-{os.getpid()}-{uuid4().hex}.tmp.zip"
     telemetry = RequestTelemetry(trace_id=mint_request_id())
     started_at = db.utcnow()
     start = time.perf_counter()
@@ -684,42 +700,59 @@ async def library_import(
         return deps.login_redirect(conn)
     uid = user["id"]
     root = deps.library_root_for(settings, uid)
-    upload_tmp = root.parent / "library.import-upload.tmp.zip"
+    upload_tmp = root.parent / f"library.import-upload-{uuid4().hex}.tmp.zip"
     telemetry = RequestTelemetry(trace_id=mint_request_id())
     started_at = db.utcnow()
     start = time.perf_counter()
     outcome, error_text = "ok", None
     try:
-        total = await _spool_upload(file, upload_tmp)
-        if total > MAX_UPLOAD_BYTES:
-            outcome, error_text = "error", "archive exceeds the 512 MB upload limit"
+        lock = _import_lock_for(uid)
+        # Check-then-acquire is atomic: acquiring a free asyncio.Lock never
+        # suspends, so no task can interleave between the two (run_gate
+        # precedent).
+        if lock.locked():
+            outcome, error_text = "error", "an import is already in progress"
             return _library_page_error(
-                request, conn, settings, user, "Archive exceeds the 512 MB upload limit.", 413
+                request,
+                conn,
+                settings,
+                user,
+                "An import is already in progress for this library; retry shortly.",
+                409,
             )
-        try:
-            staging = await asyncio.to_thread(transfer.stage_import, root, upload_tmp)
-        except transfer.TransferError as exc:
-            outcome, error_text = "error", str(exc)
-            return _library_page_error(request, conn, settings, user, str(exc), 400)
-        try:
-            if manager is not None:
-                async with manager.run_gate.acquire(uid, KIND_LIBRARIAN, wait=False):
-                    async with manager.run_gate.acquire(uid, KIND_CURATOR, wait=False):
-                        await _replace_and_refresh(
-                            request, conn, settings, manager, user, root, staging
-                        )
-            else:
-                await _replace_and_refresh(request, conn, settings, manager, user, root, staging)
-        except AgentRunBusyError as exc:
-            outcome, error_text = "error", str(exc)
-            return _library_page_error(request, conn, settings, user, str(exc), 409)
-        except transfer.TransferError as exc:
-            outcome, error_text = "error", str(exc)
-            return _library_page_error(request, conn, settings, user, str(exc), 400)
-        return deps.redirect(
-            "/config/library?msg=Library+imported.+The+previous+library+was+"
-            "backed+up+to+import-backup.zip."
-        )
+        async with lock:
+            total = await _spool_upload(file, upload_tmp)
+            if total > MAX_UPLOAD_BYTES:
+                outcome, error_text = "error", "archive exceeds the 512 MB upload limit"
+                return _library_page_error(
+                    request, conn, settings, user, "Archive exceeds the 512 MB upload limit.", 413
+                )
+            try:
+                staging = await asyncio.to_thread(transfer.stage_import, root, upload_tmp)
+            except transfer.TransferError as exc:
+                outcome, error_text = "error", str(exc)
+                return _library_page_error(request, conn, settings, user, str(exc), 400)
+            try:
+                if manager is not None:
+                    async with manager.run_gate.acquire(uid, KIND_LIBRARIAN, wait=False):
+                        async with manager.run_gate.acquire(uid, KIND_CURATOR, wait=False):
+                            await _replace_and_refresh(
+                                request, conn, settings, manager, user, root, staging
+                            )
+                else:
+                    await _replace_and_refresh(
+                        request, conn, settings, manager, user, root, staging
+                    )
+            except AgentRunBusyError as exc:
+                outcome, error_text = "error", str(exc)
+                return _library_page_error(request, conn, settings, user, str(exc), 409)
+            except transfer.TransferError as exc:
+                outcome, error_text = "error", str(exc)
+                return _library_page_error(request, conn, settings, user, str(exc), 400)
+            return deps.redirect(
+                "/config/library?msg=Library+imported.+The+previous+library+was+"
+                "backed+up+to+import-backup.zip."
+            )
     except Exception as exc:
         outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
         raise

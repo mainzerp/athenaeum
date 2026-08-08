@@ -10,6 +10,8 @@ session keys used across the WebUI are defined here.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import sqlite3
 from typing import Annotated
 
@@ -21,10 +23,36 @@ from athenaeum.config import Settings
 from athenaeum.library.backend import provision_library
 from athenaeum.webui import deps
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(dependencies=[Depends(deps.csrf_protect)])
 
 # Session keys (signed-cookie session provided by SessionMiddleware).
 SESSION_USER_ID = "user_id"
+SESSION_PW_MARKER = "pw_marker"
+
+
+def password_marker(password_hash: str) -> str:
+    """Truncated fingerprint of the credential a session was issued against.
+
+    Stored in the session at login (SERVER-04); ``deps.current_user`` compares
+    it against the CURRENT password hash, so an admin password reset
+    invalidates every session issued under the old credential.
+    """
+    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()[:16]
+
+
+# SERVER-08: lazily built dummy hash for the unknown-user login path, so both
+# branches pay one argon2 verification (no user-enumeration timing signal).
+# Lazy, not import-time: module import and tests that never log in stay cheap.
+_DUMMY_HASH: str | None = None
+
+
+def _dummy_hash() -> str:
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = security.hash_password("athenaeum-dummy-password")
+    return _DUMMY_HASH
 
 
 def _render_setup(request: Request, error: str | None = None) -> HTMLResponse:
@@ -45,6 +73,14 @@ def bootstrap_admin_if_configured(settings: Settings) -> bool:
     username = settings.bootstrap_admin_username
     password = settings.bootstrap_admin_password
     if not username or not password:
+        return False
+    if not username.strip() or len(password) < security.MIN_PASSWORD_LENGTH:
+        # SERVER-13: never seed a credential the setup form would refuse.
+        logger.warning(
+            "refusing ATHENAEUM_BOOTSTRAP_ADMIN_* pre-seed: blank username or "
+            "password shorter than %d characters",
+            security.MIN_PASSWORD_LENGTH,
+        )
         return False
     db_path = deps.db_path_for(settings)
     deps.ensure_db(db_path)
@@ -99,6 +135,7 @@ def setup_submit(
         return deps.redirect("/login")
     provision_library(settings.data_root, user["id"])
     request.session[SESSION_USER_ID] = user["id"]
+    request.session[SESSION_PW_MARKER] = password_marker(user["password_hash"])
     return deps.redirect("/")
 
 
@@ -127,7 +164,14 @@ def login_submit(
             request, f"Too many failed attempts. Try again in {remaining} seconds."
         )
     user = db.get_user_by_username(conn, username)
-    if user is None or not security.verify_password(user["password_hash"], password):
+    if user is None:
+        # Constant-work unknown-user path (SERVER-08): pay the same argon2
+        # verification as the known-user branch; the result is discarded.
+        security.verify_password(_dummy_hash(), password)
+        verified = False
+    else:
+        verified = security.verify_password(user["password_hash"], password)
+    if not verified:
         for key in throttle_keys:
             db.record_login_failure(conn, key)
         return _render_login(request, "Invalid username or password.")
@@ -135,6 +179,7 @@ def login_submit(
         db.reset_login_failures(conn, key)
     request.session.clear()
     request.session[SESSION_USER_ID] = user["id"]
+    request.session[SESSION_PW_MARKER] = password_marker(user["password_hash"])
     return deps.redirect("/")
 
 

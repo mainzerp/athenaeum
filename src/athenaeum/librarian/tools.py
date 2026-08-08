@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Protocol
 
+from athenaeum.librarian.llm import MalformedToolArguments, MalformedToolArgumentsError
+
 
 class Backend(Protocol):
     """Structural subset of LibraryBackend (plan section 3.2) used by dispatch."""
@@ -324,6 +326,12 @@ async def dispatch(
     loop never blocks the event loop (A1/A3). The lock then serializes
     worker threads, never the loop thread.
     """
+    if isinstance(args, MalformedToolArguments):
+        # AGENT-09: short-circuit BEFORE `args or {}` and _require_args —
+        # its `key not in args` membership test is a SUBSTRING match on this
+        # str subclass and would mis-read the raw payload (misleading
+        # "missing required argument(s)" wording for malformed arguments).
+        raise MalformedToolArgumentsError(f"malformed tool-call arguments: {args.error}")
     args = args or {}
     _require_args(name, args)
     if name == "list_dir":

@@ -1,5 +1,6 @@
 """Tests for athenaeum.library.gittool (real git binary required)."""
 
+import fnmatch
 import shutil
 import subprocess
 
@@ -281,3 +282,60 @@ def test_file_diff_middle_and_root(tmp_path):
     (root / "b.md").write_text("b3\n", encoding="utf-8")
     repo.commit_all("touch b only")
     assert repo.file_diff(repo.head_sha(), "a.md") == ""
+
+
+def test_list_commits_skips_malformed_lines(tmp_path, monkeypatch):
+    """LIBRARY-08: polluted log output (e.g. multi-line subjects from
+    external commits) is skipped, never unpack-crashed."""
+    sha = "a" * 40
+
+    def fake_run(root, args, *, timeout=30):
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return sha + "\n"
+        if args[0] == "log":
+            return (
+                f"{sha}\x1f{sha[:7]}\x1f2026-01-01T00:00:00+00:00\x1ffirst line\n"
+                "second line without separators\n"
+            )
+        if args[0] == "rev-list":
+            return sha + "\n"
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(gittool, "_run", fake_run)
+    commits = GitRepo(tmp_path / "lib").list_commits()
+    assert [c["subject"] for c in commits] == ["first line"]
+    assert commits[0]["is_root"] is True
+
+
+def test_file_commits_ignores_non_name_status_lines(tmp_path, monkeypatch):
+    """LIBRARY-08: only real name-status rename records (R + 3-digit score)
+    are tracked — a stray line never pollutes rename following."""
+    sha_a, sha_b = "a" * 40, "b" * 40
+
+    def fake_run(root, args, *, timeout=30):
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return sha_b + "\n"
+        if args[0] == "log":
+            return (
+                f"{sha_b}\x1f{sha_b[:7]}\x1f2026-01-02T00:00:00+00:00\x1fEdit notes\n"
+                "Rogue\tsubject\tnew.md\n"  # NOT a name-status record
+                f"{sha_a}\x1f{sha_a[:7]}\x1f2026-01-01T00:00:00+00:00\x1fAdd notes\n"
+                "A\tnew.md\n"
+            )
+        if args[0] == "rev-list":
+            return sha_a + "\n"
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(gittool, "_run", fake_run)
+    commits = GitRepo(tmp_path / "lib").file_commits("new.md")
+    assert [c["subject"] for c in commits] == ["Edit notes", "Add notes"]
+    # the bogus "Rogue" line must not rename-track: both commits keep the
+    # current path
+    assert [c["path"] for c in commits] == ["new.md", "new.md"]
+
+
+def test_gitignore_covers_all_tmp_siblings():
+    """LIBRARY-09: leaked atomic-write tmp siblings (``<name>.<pid>-<uuid>.tmp``)
+    are not dot-prefixed, so ``.*.tmp`` missed them; ``*.tmp`` covers all."""
+    assert "*.tmp" in GITIGNORE_CONTENT.splitlines()
+    assert fnmatch.fnmatch("a.md.123-deadbeef.tmp", "*.tmp")

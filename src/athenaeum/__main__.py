@@ -20,12 +20,21 @@ def main() -> None:
 
     from athenaeum.app import create_app
 
+    # Trusted-proxy story (SERVER-02): only when forwarded_allow_ips is set do
+    # we let uvicorn honor X-Forwarded-* from those peers; otherwise the
+    # uvicorn default (loopback only, headers effectively untrusted for remote
+    # clients) keeps request.client.host honest for the login throttle.
+    uvicorn_kwargs: dict = {}
+    if settings.forwarded_allow_ips:
+        uvicorn_kwargs["proxy_headers"] = True
+        uvicorn_kwargs["forwarded_allow_ips"] = settings.forwarded_allow_ips
     uvicorn.run(
         create_app(settings),
         host=settings.host,
         port=settings.port,
         workers=1,
         log_level=settings.log_level.lower(),
+        **uvicorn_kwargs,
     )
 
 

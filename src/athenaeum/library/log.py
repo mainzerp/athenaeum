@@ -43,7 +43,12 @@ def append_entry(
     if kind not in KINDS:
         raise ValueError(f"unknown log entry kind: {kind!r}")
     day = (today or date.today()).isoformat()
+    # Single-line sink (mirrors gittool._sanitize): a multi-line text or
+    # label must never forge a fake ``## YYYY-MM-DD`` heading or split one
+    # entry across lines.
+    text = " ".join(str(text).split())
     if agent_label:
+        agent_label = " ".join(str(agent_label).split())
         text = f"{text} (requested by agent:{agent_label})"
     entry = f"* **{kind}**: {text}"
     path = Path(root) / "log.md"

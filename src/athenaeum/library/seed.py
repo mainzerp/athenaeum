@@ -75,7 +75,7 @@ def _tree(root: Path) -> list[str]:
 
     def walk(directory: Path, depth: int) -> None:
         for child in sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name)):
-            if child.name.startswith("."):
+            if child.name.startswith(".") or child.is_symlink():
                 continue
             if child.is_dir():
                 lines.append("  " * depth + child.name + "/")
@@ -99,6 +99,6 @@ def _concepts(root: Path) -> list[str]:
         line = f"- {bundle_path} (type: {fm.get('type', '?')})"
         description = fm.get("description")
         if isinstance(description, str) and description:
-            line += f" - {description}"
+            line += f" - {' '.join(description.split())}"
         out.append(line)
     return out

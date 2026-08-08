@@ -324,8 +324,13 @@ class EmbeddingService:
                 moved_from.append(canonical_path(f"{write['from_id']}.md"))
         for concept_path in moved_from:
             # Delete the OLD path's row so it cannot leak into top_k ranking
-            # (L8); a same-run re-create of that path is upserted below.
-            self.delete(concept_path)
+            # (L8); a same-run re-create of that path is upserted below. A
+            # failure here (e.g. sqlite) is logged and skipped — it cannot
+            # escape the NEVER-raise contract (fts.py precedent).
+            try:
+                self.delete(concept_path)
+            except Exception as exc:
+                logger.warning("embedding sync skipped %s: %s", concept_path, exc)
         pending: list[tuple[str, str, str]] = []  # (concept_path, text, hash)
         for concept_path, write in by_path.items():
             try:

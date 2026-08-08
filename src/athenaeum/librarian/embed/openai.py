@@ -32,7 +32,15 @@ class OpenAIEmbeddingProvider:
                 headers={"Authorization": f"Bearer {config.api_key}"},
                 json=body,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                # Mirror llm.http_status_error: HTTP failures surface as
+                # EmbeddingProviderError, never raw httpx exceptions.
+                body_text = exc.response.text[:200]
+                raise EmbeddingProviderError(
+                    f"{config.provider} returned HTTP {exc.response.status_code}: {body_text}"
+                ) from exc
             data = response.json()
 
         # OpenRouter and some compatible gateways return HTTP 200 with an error
@@ -49,4 +57,17 @@ class OpenAIEmbeddingProvider:
             raise EmbeddingProviderError(
                 f"{config.provider} returned {len(items)} embeddings for {len(texts)} texts"
             )
-        return [list(item["embedding"]) for item in items]
+        # The API guarantees input order via each item's int index; a
+        # non-conformant gateway that reorders data[] must not silently
+        # mis-assign vectors to texts — sort when every item carries an index.
+        if all(isinstance(item.get("index"), int) for item in items):
+            items = sorted(items, key=lambda item: item["index"])
+        vectors: list[list[float]] = []
+        for item in items:
+            embedding = item.get("embedding")
+            if embedding is None:
+                raise EmbeddingProviderError(
+                    f"{config.provider} returned an item without embedding"
+                )
+            vectors.append(list(embedding))
+        return vectors

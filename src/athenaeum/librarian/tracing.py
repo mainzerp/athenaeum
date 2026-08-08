@@ -11,6 +11,7 @@ ContextVars mirror the ``_identity_var`` mechanism in athenaeum.identity.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
@@ -22,6 +23,8 @@ from typing import Any
 
 from athenaeum.librarian.tools import WRITE_ACTIONS
 from athenaeum.library.frontmatter import write_text_atomic
+
+logger = logging.getLogger(__name__)
 
 TRACE_DIR = ".traces"
 
@@ -111,14 +114,24 @@ class TraceStore:
         return (self.store / f"{trace_id}.json").is_file()
 
     def prune(self, keep_last: int) -> int:
-        """Delete all but the newest ``keep_last`` traces; returns deletions."""
+        """Delete all but the newest ``keep_last`` traces; returns deletions.
+
+        A per-file unlink failure (e.g. a locked file) is logged and skipped —
+        pruning must never fail the trace write that triggered it.
+        """
         if not self.store.is_dir():
             return 0
         files = sorted(f for f in self.store.glob("*.json") if _TRACE_ID_RE.fullmatch(f.stem))
         excess = files[: max(0, len(files) - keep_last)]
+        deleted = 0
         for path in excess:
-            path.unlink()
-        return len(excess)
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning("trace prune: could not delete %s; skipping", path, exc_info=True)
+                continue
+            deleted += 1
+        return deleted
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -249,7 +262,11 @@ class TraceSession:
         self._ended_at = datetime.now(UTC)
 
     def close(self) -> str | None:
-        """Write the trace file (when events or llm data exist); returns trace_id."""
+        """Write the trace file (when events or llm data exist); returns trace_id.
+
+        Containment: a persistence failure is logged and swallowed (returns
+        None) — trace writing must never fail the observed run.
+        """
         if self._closed:
             return None
         self._closed = True
@@ -270,7 +287,15 @@ class TraceSession:
             "llm": llm,
             "events": list(self._events),
         }
-        return TraceStore(self.root, keep=self.keep).create(trace)
+        try:
+            return TraceStore(self.root, keep=self.keep).create(trace)
+        except Exception:
+            logger.warning(
+                "trace persistence failed for %s; the run is unaffected",
+                self.trace_id,
+                exc_info=True,
+            )
+            return None
 
 
 _trace_var: ContextVar[TraceSession | None] = ContextVar("athenaeum_trace", default=None)

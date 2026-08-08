@@ -1,6 +1,7 @@
 """Tests for athenaeum.library.backend.LibraryBackend compound writes."""
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -91,6 +92,15 @@ def test_reserved_names_refused(tmp_path):
             backend.create_concept(path, {"type": "Concept"}, "x\n")
 
 
+def test_reserved_name_path_components_refused(tmp_path):
+    """LIBRARY-11: reserved names are refused in ANY path component, not
+    just the basename (a mid-path index.md would shadow a directory index)."""
+    backend = make_backend(tmp_path)
+    for path in ("/a/index.md/x.md", "/log.md/x.md", "/index.md/x.md"):
+        with pytest.raises(ValueError, match="reserved"):
+            backend.create_concept(path, {"type": "Concept"}, "x\n")
+
+
 def test_non_md_and_existing_and_typeless_refused(tmp_path):
     backend = make_backend(tmp_path)
     with pytest.raises(ValueError, match=".md"):
@@ -128,6 +138,19 @@ def test_edit_never_touches_verified(tmp_path):
     result = backend.verify_concept("/a.md", by="athenaeum-curator/0.1.0")
     assert result == {"id": "/a", "action": "verified"}
     assert backend.read_document("/a.md")["frontmatter"]["verified"]
+
+
+def test_edit_never_touches_generated(tmp_path):
+    """LIBRARY-03: 'generated' provenance is refused like 'verified' —
+    _inject_generated stays the sole writer."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept"}, "x\n")
+    with pytest.raises(ValueError, match="generated"):
+        backend.edit_concept("/a.md", frontmatter_patch={"generated": {"by": "mallory"}})
+    with pytest.raises(ValueError, match="generated"):
+        backend.edit_concept("/a.md", remove_keys=["generated"])
+    # Untouched: the creation-time provenance survives the refused edits.
+    assert backend.read_document("/a.md")["frontmatter"]["generated"]["by"] == ACTOR
 
 
 def test_create_concept_strips_caller_supplied_verified(tmp_path):
@@ -434,6 +457,23 @@ def test_reconcile_repairs_stale_index(tmp_path):
     backend.reconcile()
     assert not any(w["code"] == "index-drift" for w in backend.validate()["warnings"])
     assert "a.md" in index_path.read_text(encoding="utf-8")
+
+
+def test_reconcile_skips_symlinked_dirs(tmp_path):
+    """LIBRARY-02: reconcile never descends into a symlinked directory, so
+    no index.md is regenerated inside (or through) the escape."""
+    backend = make_backend(tmp_path)
+    root = tmp_path / "lib"
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    try:
+        os.symlink(outside, root / "escape", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this host")
+    backend.reconcile()
+    assert not (outside / "index.md").exists()
+    assert not (outside / "sub" / "index.md").exists()
+    assert not (root / "escape" / "index.md").exists()
 
 
 def test_status_healthy_bundle(tmp_path):
@@ -799,6 +839,38 @@ def test_surrogate_escape_left_literal(tmp_path):
     assert len(warnings) == 1
     assert "Skipped 1 escape(s)" in warnings[0]
     assert "\\ud800" in warnings[0]
+
+
+def test_escaped_backslash_escape_stays_literal(tmp_path):
+    """LIBRARY-06: an escaped backslash must not decode — ``\\u2011`` with an
+    EVEN backslash run is an intentional literal, not an artifact."""
+    backend = make_backend(tmp_path)
+    body = "an escaped \\\\u2011 stays literal\n"  # two literal backslashes
+    result = backend.create_concept("/a.md", {"type": "Concept"}, body)
+    assert backend.read_document("/a.md")["body"] == body
+    assert result == {"id": "/a", "action": "created"}  # no decode, no warnings
+
+
+def test_odd_backslash_run_decodes_final_escape(tmp_path):
+    """LIBRARY-06: pairs collapse, then the ODD run's final ``\\uXXXX``
+    decodes — ``\\\\\\u2011`` (3 backslashes) becomes ``\\`` + U+2011."""
+    backend = make_backend(tmp_path)
+    result = backend.create_concept("/a.md", {"type": "Concept"}, "x \\\\\\u2011 y\n")
+    assert backend.read_document("/a.md")["body"] == "x \\" + "\u2011" + " y\n"
+    warnings = result["warnings"]
+    assert len(warnings) == 1
+    assert "Auto-decoded 1 literal unicode escape sequence(s)" in warnings[0]
+
+
+def test_code_span_scan_parity_even_run_not_reported(tmp_path):
+    """LIBRARY-06: the code-span scan applies the same parity — an
+    escaped-backslash sequence inside a code span is literal, not a
+    candidate (candidate counting agrees with decoding)."""
+    backend = make_backend(tmp_path)
+    body = "use `\\\\u2011` here\n"  # two literal backslashes in the span
+    result = backend.create_concept("/a.md", {"type": "Concept"}, body)
+    assert backend.read_document("/a.md")["body"] == body
+    assert result == {"id": "/a", "action": "created"}  # no warnings at all
 
 
 def test_edit_decodes_new_body(tmp_path):

@@ -24,7 +24,7 @@ from athenaeum.library.backend import LibraryBackend, provision_library
 from athenaeum.webui import ROUTERS, deps
 from conftest import CsrfTestClient
 
-SECRET = "test-secret-key"
+SECRET = "test-secret-key-timemachine-0123456"  # >= 32 chars (SERVER-03 validator)
 
 skipif_no_git = pytest.mark.skipif(shutil.which("git") is None, reason="git binary required")
 

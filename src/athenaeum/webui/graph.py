@@ -21,6 +21,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from athenaeum.config import Settings
+from athenaeum.library import frontmatter as fm_mod
 from athenaeum.webui import deps
 
 router = APIRouter()
@@ -138,13 +139,25 @@ def build_universe(backend: object, metric: str = "link_density") -> dict:
     and spreads the low end for a much more even radial fill.
     """
     concepts, _folders = _walk(backend)
-    known = {c["path"] for c in concepts}
+    # Read every document up front: broken frontmatter would otherwise kill the
+    # whole payload; skip such nodes, mirroring the list_dir tolerance
+    # (backend.py). ``known`` counts only readable concepts so every edge
+    # endpoint stays a node id.
+    kept: list[dict] = []
+    docs: list[dict] = []
+    for concept in concepts:
+        try:
+            doc = backend.read_document(concept["path"])
+        except (fm_mod.FrontmatterError, ValueError):
+            continue
+        kept.append(concept)
+        docs.append(doc)
+    known = {c["path"] for c in kept}
     nodes = []
     edges_out: list[set[str]] = []
     timestamps: list[float | None] = []
     raw_generated: list[str | None] = []
-    for concept in concepts:
-        doc = backend.read_document(concept["path"])
+    for concept, doc in zip(kept, docs, strict=True):
         fm = doc.get("frontmatter") or {}
         body = doc.get("body") or ""
         concept_id = concept["path"][: -len(".md")]
@@ -175,7 +188,7 @@ def build_universe(backend: object, metric: str = "link_density") -> dict:
             in_degree[target] = in_degree.get(target, 0) + 1
     degrees = [
         len(targets) + in_degree.get(concept["path"], 0)
-        for targets, concept in zip(edges_out, concepts, strict=True)
+        for targets, concept in zip(edges_out, kept, strict=True)
     ]
 
     if metric == "recency":
@@ -207,7 +220,7 @@ def build_universe(backend: object, metric: str = "link_density") -> dict:
     edges = sorted(
         (
             {"source": concept["path"][: -len(".md")], "target": target[: -len(".md")]}
-            for targets, concept in zip(edges_out, concepts, strict=True)
+            for targets, concept in zip(edges_out, kept, strict=True)
             for target in targets
         ),
         key=lambda e: (e["source"], e["target"]),

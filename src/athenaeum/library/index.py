@@ -55,9 +55,9 @@ def _entry(path: Path) -> str:
     except (fm_mod.FrontmatterError, OSError, UnicodeDecodeError):
         fm = {}
     if isinstance(fm.get("title"), str) and fm["title"]:
-        title = fm["title"]
+        title = " ".join(fm["title"].split())
     if isinstance(fm.get("description"), str) and fm["description"]:
-        description = fm["description"]
+        description = " ".join(fm["description"].split())
     line = f"* [{title}]({path.name})"
     if description:
         line += f" - {description}"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -23,7 +24,10 @@ def _convert(messages: list[dict]) -> tuple[str | None, list[dict]]:
     """Split canonical messages into a system prompt and Anthropic messages.
 
     Tool results become ``tool_result`` content blocks inside user messages;
-    consecutive tool results are merged into a single user message.
+    consecutive tool results are merged into a single user message. A user
+    text message immediately following a tool-result batch merges into that
+    same user message (text block last, AGENT-02: cap-exit shape) — the
+    converted sequence never holds two consecutive user entries.
     """
     system_parts: list[str] = []
     out: list[dict] = []
@@ -39,8 +43,13 @@ def _convert(messages: list[dict]) -> tuple[str | None, list[dict]]:
         if role == "system":
             system_parts.append(msg["content"])
         elif role == "user":
-            flush_tool_results()
-            out.append({"role": "user", "content": msg["content"]})
+            if pending_tool_results:
+                # Merge: one user message whose content is the tool_result
+                # blocks followed by the text block.
+                pending_tool_results.append({"type": "text", "text": msg["content"]})
+                flush_tool_results()
+            else:
+                out.append({"role": "user", "content": msg["content"]})
         elif role == "assistant":
             flush_tool_results()
             blocks: list[dict[str, Any]] = []
@@ -118,7 +127,14 @@ class AnthropicProvider:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise http_status_error(config.provider, exc) from exc
-        data = response.json()
+        try:
+            data = response.json()
+        except json.JSONDecodeError as exc:
+            # A 200 with a non-JSON body is a provider failure, not a raw
+            # JSONDecodeError escaping the F7 classification.
+            raise LLMProviderError(
+                f"{config.provider} returned a non-JSON response body: {response.text[:200]}"
+            ) from exc
 
         if data.get("type") == "error":
             error = data.get("error") or {}
@@ -126,9 +142,15 @@ class AnthropicProvider:
                 f"anthropic returned an error: {error.get('message', 'unknown error')}"
             )
 
+        content = data.get("content")
+        if not content:
+            # An unusable response, not an empty answer — the loop must not
+            # treat it as a finished run (parity with the Gemini CS-10 raise).
+            raise LLMProviderError("anthropic returned a response without content")
+
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
-        for block in data.get("content", []):
+        for block in content:
             if block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
             elif block.get("type") == "tool_use":

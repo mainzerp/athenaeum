@@ -5,6 +5,7 @@ provider layer are replaced here by fakes honoring the pinned contracts
 (plan §3.2 read/versioning surface, §3.4 provider factory).
 """
 
+import asyncio
 import io
 import json
 import re
@@ -25,7 +26,7 @@ from athenaeum.library.gittool import GitError
 from athenaeum.webui import ROUTERS, deps, routes_auth, routes_library
 from conftest import CsrfTestClient
 
-SECRET = "test-secret-key"
+SECRET = "test-secret-key-webui-0123456789ab"  # >= 32 chars (SERVER-03 validator)
 
 
 class FakeBackend:
@@ -2424,7 +2425,7 @@ def test_admin_create_and_reset_user(env):
 def test_bootstrap_admin_if_configured(env, monkeypatch):
     client, _, data_root = env
     monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_USERNAME", "owner")
-    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD", "boot-pw")
+    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD", "boot-password-1")
 
     settings = get_settings()
     assert routes_auth.bootstrap_admin_if_configured(settings)
@@ -2434,7 +2435,116 @@ def test_bootstrap_admin_if_configured(env, monkeypatch):
     # setup page is gone; the pre-seeded owner can log in
     response = client.get("/setup")
     assert response.status_code == 303
-    login(client, "owner", "boot-pw")
+    login(client, "owner", "boot-password-1")
+
+
+def test_bootstrap_admin_short_password_refused(env, monkeypatch, caplog):
+    """SERVER-13: an env password below MIN_PASSWORD_LENGTH seeds NO account."""
+    client, _, data_root = env
+    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_USERNAME", "owner")
+    monkeypatch.setenv("ATHENAEUM_BOOTSTRAP_ADMIN_PASSWORD", "short")
+
+    settings = get_settings()
+    with caplog.at_level("WARNING", logger="athenaeum.webui.routes_auth"):
+        assert not routes_auth.bootstrap_admin_if_configured(settings)
+    assert "refusing ATHENAEUM_BOOTSTRAP_ADMIN_* pre-seed" in caplog.text
+    # the refusal happens before any DB write; no account was seeded
+    db_path = Path(data_root) / "app.db"
+    db_module.init_db(db_path)
+    conn = db_module.connect(db_path)
+    try:
+        assert db_module.users_empty(conn)
+    finally:
+        conn.close()
+    # no account seeded: the app still funnels into first-run setup
+    response = client.get("/")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/setup"
+
+
+# --- credential/session hardening (SERVER-04, SERVER-08) ------------------------
+
+
+def test_password_reset_invalidates_existing_session(env):
+    """SERVER-04: sessions carry a marker of the credential they were issued
+    against; an admin reset flips the hash, so the old session is dropped."""
+    client, _, data_root = env
+    make_user(data_root, "owner", "owner-password-1", admin=True)
+    make_user(data_root, "alice", "alice-password-1")
+
+    login(client, "alice", "alice-password-1")
+    assert client.get("/library/tree").status_code == 200
+    alice_session = client.cookies.get("session")
+
+    # the admin resets alice's password from a separate session
+    client.post("/logout")
+    login(client, "owner", "owner-password-1")
+    alice = db_module.get_user_by_username(db_module.connect(Path(data_root) / "app.db"), "alice")
+    response = client.post(
+        f"/admin/users/{alice['id']}/reset-password", data={"new_password": "alice-password-2"}
+    )
+    assert response.status_code == 303
+    # the admin's own session survives (their credential did not change)
+    assert client.get("/admin/users").status_code == 200
+
+    # alice's pre-reset session now redirects to /login (marker mismatch)
+    client.cookies.set("session", alice_session)
+    response = client.get("/library/tree")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+    # she can log in with the new password immediately
+    login(client, "alice", "alice-password-2")
+
+
+def test_login_unknown_user_still_verifies_password(env, monkeypatch):
+    """SERVER-08: the unknown-username branch pays one argon2 verification
+    against a dummy hash (monkeypatched counter, no wall-clock assertion)."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "alice-password-1")
+
+    calls: list[str] = []
+    real_verify = security.verify_password
+
+    def counting_verify(password_hash, password):
+        calls.append(password_hash)
+        return real_verify(password_hash, password)
+
+    monkeypatch.setattr(security, "verify_password", counting_verify)
+    response = client.post("/login", data={"username": "ghost", "password": "whatever-pass"})
+    assert response.status_code == 200
+    assert "Invalid username or password" in response.text
+    assert len(calls) == 1
+    # verified against the lazily built dummy hash, not a user row
+    assert calls[0] == routes_auth._DUMMY_HASH
+    # known user, wrong password: exactly one verification against the row
+    calls.clear()
+    alice = db_module.get_user_by_username(db_module.connect(Path(data_root) / "app.db"), "alice")
+    client.post("/login", data={"username": "alice", "password": "wrong"})
+    assert calls == [alice["password_hash"]]
+
+
+# --- template / MCP mount hardening (SERVER-11, SERVER-12) ----------------------
+
+
+def test_base_html_pins_htmx_with_sri(env):
+    """SERVER-11: the htmx CDN script carries a sha384 SRI pin."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    response = client.get("/tokens")
+    assert response.status_code == 200
+    assert 'src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"' in response.text
+    assert 'integrity="sha384-' in response.text
+    assert 'crossorigin="anonymous"' in response.text
+
+
+def test_mcp_catch_all_matches_exact_path_only(client):
+    """SERVER-12: /mcpfoo is NOT the MCP endpoint — plain 404 JSON, never a
+    FastMCP/JSON-RPC error."""
+    response = client.get("/mcpfoo")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+    assert "jsonrpc" not in response.text.lower()
 
 
 def test_format_datetime():
@@ -2528,6 +2638,34 @@ def test_library_import_413_over_limit(env, monkeypatch):
     assert response.status_code == 413
     assert "512 MB" in response.text
     assert _tree_files(root) == before  # live bundle untouched
+
+
+def test_library_import_409_already_in_progress(env):
+    """SERVER-06: a second import while the per-user lock is held is a 409;
+    the live bundle stays untouched (route-level complement to the
+    _import_lock_for unit test in test_transfer.py)."""
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    root = Path(data_root) / "users" / user["id"] / "library"
+    before = _tree_files(root)
+
+    lock = routes_library._import_lock_for(user["id"])
+
+    async def acquire() -> None:
+        await lock.acquire()
+
+    asyncio.run(acquire())  # held state persists after the loop closes
+    try:
+        response = client.post(
+            "/library/import",
+            files={"file": ("lib.zip", _zip_bytes(IMPORT_MEMBERS), "application/zip")},
+        )
+        assert response.status_code == 409
+        assert "already in progress" in response.text
+        assert _tree_files(root) == before  # live bundle untouched
+    finally:
+        lock.release()
 
 
 def test_library_import_400_corrupt(env):

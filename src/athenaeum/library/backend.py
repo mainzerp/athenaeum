@@ -534,6 +534,13 @@ class LibraryBackend:
                 raise ValueError("'verified' is never modified by edits")
             if remove_keys and "verified" in remove_keys:
                 raise ValueError("'verified' is never modified by edits")
+            # 'generated' is provenance: _inject_generated stays the sole
+            # writer, so edits can neither patch nor remove it (same guard
+            # shape as 'verified' above).
+            if frontmatter_patch and "generated" in frontmatter_patch:
+                raise ValueError("'generated' is never modified by edits")
+            if remove_keys and "generated" in remove_keys:
+                raise ValueError("'generated' is never modified by edits")
             fm, body = fm_mod.split_document(abs_path.read_text(encoding="utf-8"))
             escape_warning = None
             code_span_warning = None
@@ -723,6 +730,7 @@ class LibraryBackend:
                 d
                 for d in self.root.rglob("*")
                 if d.is_dir()
+                and not d.is_symlink()
                 and not any(part.startswith(".") for part in d.relative_to(self.root).parts)
             ]
             for directory in dirs:
@@ -914,8 +922,12 @@ class LibraryBackend:
         name = posixpath.basename(bundle)
         if not name.endswith(".md"):
             raise ValueError(f"concept path must end with .md: {path!r}")
-        if name in RESERVED_NAMES:
-            raise ValueError(f"reserved filename cannot be a concept: {name!r}")
+        # Reserved names are refused in ANY path component, not just the
+        # basename: a mid-path index.md/log.md would shadow a directory's
+        # generated index or the root log.
+        for part in (p for p in bundle.split("/") if p):
+            if part in RESERVED_NAMES:
+                raise ValueError(f"reserved filename cannot be a concept: {part!r}")
         if any(part.startswith(".") for part in bundle.split("/") if part):
             raise ValueError(f"hidden path components not allowed: {path!r}")
         return self._resolve(bundle)
@@ -973,6 +985,8 @@ class LibraryBackend:
             if any(c.name != "index.md" for c in children):
                 break
             for child in children:
+                if child.is_dir():
+                    continue  # defensive: directories are never unlink()ed
                 child.unlink()
             current.rmdir()
             current = current.parent

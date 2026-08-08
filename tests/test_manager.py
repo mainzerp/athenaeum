@@ -1,5 +1,6 @@
 """Tests for LibrarianManager: lazy init, caching, idle eviction, config reload."""
 
+import logging
 import sqlite3
 import threading
 import time
@@ -7,6 +8,7 @@ import time
 import pytest
 
 from athenaeum import db as db_module
+from athenaeum.librarian.agent import LibrarianNotConfiguredError
 from athenaeum.librarian.manager import LibrarianManager
 
 
@@ -366,3 +368,50 @@ def test_key_decryptor_seam(tmp_path):
 def test_plaintext_key_without_decryptor(tmp_path):
     manager = make_manager(make_db(tmp_path), tmp_path)
     assert manager.get("user-1").config.llm.api_key == "enc-key"
+
+
+def test_undecryptable_key_surfaces_targeted_config_error(tmp_path, caplog):
+    """AGENT-10: a key encrypted under a rotated secret raises the targeted
+    configuration error (logged with user/connection context), not an
+    unclassified exception."""
+    from cryptography.fernet import InvalidToken
+
+    def bad_decryptor(enc):
+        raise InvalidToken()
+
+    manager = make_manager(make_db(tmp_path), tmp_path, key_decryptor=bad_decryptor)
+    with caplog.at_level(logging.WARNING, logger="athenaeum.librarian.manager"):
+        with pytest.raises(LibrarianNotConfiguredError, match="undecryptable"):
+            manager.get("user-1")
+    assert "undecryptable api key for user user-1 connection conn-a" in caplog.text
+
+
+def test_undecryptable_embedding_key_surfaces_targeted_config_error(tmp_path, caplog):
+    """AGENT-10: the embedding connection's key has the same containment."""
+    from cryptography.fernet import InvalidToken
+
+    db_path = make_db(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE librarian_configs SET embedding_source = 'api',"
+            " embedding_model = 'embed-x', embedding_connection_id = 'conn-a'"
+            " WHERE user_id = 'user-1'"
+        )
+
+    def bad_decryptor(enc):
+        raise InvalidToken()
+
+    # the librarian connection must decrypt fine; only the embedding key fails
+    calls = {"n": 0}
+
+    def flaky_decryptor(enc):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "dec:enc-key"  # librarian connection (build_llm runs first)
+        raise InvalidToken()
+
+    manager = make_manager(db_path, tmp_path, key_decryptor=flaky_decryptor)
+    with caplog.at_level(logging.WARNING, logger="athenaeum.librarian.manager"):
+        with pytest.raises(LibrarianNotConfiguredError, match="undecryptable"):
+            manager.get("user-1")
+    assert "undecryptable api key for user user-1 connection conn-a" in caplog.text

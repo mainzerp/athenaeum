@@ -38,7 +38,15 @@ class GeminiEmbeddingProvider:
                         "taskType": task_type,
                     },
                 )
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    # Mirror llm.http_status_error: HTTP failures surface as
+                    # EmbeddingProviderError, never raw httpx exceptions.
+                    body_text = exc.response.text[:200]
+                    raise EmbeddingProviderError(
+                        f"gemini returned HTTP {exc.response.status_code}: {body_text}"
+                    ) from exc
                 data = response.json()
                 values = (data.get("embedding") or {}).get("values")
                 if not values:

@@ -55,7 +55,7 @@ A concept carrying just `type` is fully conformant.
 
 | Field | Notes |
 |---|---|
-| `generated` | `{ by, at }`. `by` is REQUIRED within `generated` (an actor, §7); `at` is an ISO 8601 datetime of the last meaningful content change. **Athenaeum extension sub-keys** (extension rule §4.1): `requested_by` (`human:<username>` — the local account whose MCP token requested the write) and `via` (`mcp_chat`); both are preserved on later edits/deprecations unless a new requester is supplied. |
+| `generated` | `{ by, at }`. `by` is REQUIRED within `generated` (an actor, §7); `at` is an ISO 8601 datetime of the last meaningful content change. **Athenaeum extension sub-keys** (extension rule §4.1): `requested_by` (`human:<username>` — the local account whose MCP token requested the write) and `via` (`mcp_chat`); both are preserved on later edits/deprecations unless a new requester is supplied. **Athenaeum writer:** only the backend injects/refreshes `generated` — `edit_concept` refuses it in patches/removals (0.23.1, same rule as `verified`). |
 | `verified` | List of `{ by, at }` verification events. A **bare mapping MUST be accepted as a one-element list** (athenaeum normalizes on read). Independent of `generated.at`. **Athenaeum writer:** only the automatic post-curation verification (actor `athenaeum-curator/<version>`) appends entries — concepts are born unverified and `edit_concept` never touches `verified`; human review happens outside the loop (`human:` verifier). |
 
 **Trust tiers**, derived from `verified` (advisory, never access control):

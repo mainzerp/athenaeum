@@ -368,6 +368,27 @@
   /ha-agenthub/ha-agenthub-architecture-lessons.md. Let's read it.") plus
   rohes Tool-Call-JSON — F10/F21-Mechanik weiterhin offen. Die gemeldeten
   Coverage-Gaps waren diesmal plausibel (Themen waren echtes Neuland).
+- **F22 erneut bestaetigt (2026-08-07, REMOTE):** Der
+  v0.23.0-Abschluss-Store behauptete in der Summary "Back-links added:
+  Linked from existing version concepts v0.21.0 and v0.20.0" — das
+  deterministische `links_after` zeigte `unbacklinked:
+  [/athenaeum/versions/v0.23.0]`, `healthy: false`; kein einziger Backlink
+  wurde geschrieben. Reparatur per `update_knowledge` mit expliziter
+  `[text](/abs/pfad.md)`-Anweisung (F20-Pattern) funktionierte sofort;
+  `library_status` danach healthy, 0 Orphans. Fazit unveraendert: nach
+  jedem Store mit relates_to/backlink-Absicht `links_after`/`library_status`
+  pruefen, bevor die Verlinkung als erledigt gilt.
+- **F22 dritte Bestaetigung (2026-08-07, Deep-Review-0.23.1-Abschluss-Store):** Der
+  Store der neuen `/athenaeum/lessons/deep-code-review-0.23.1-lessons` behauptete in
+  der Summary "It is linked from the related concepts" (0.15.0-lessons, v0.23.0,
+  search-performance-rework) — `links_after` zeigte erneut `unbacklinked`,
+  `healthy: false`. Reparatur per `update_knowledge` mit expliziter
+  `[text](/abs/pfad.md)`-Anweisung (F20-Pattern) funktionierte sofort
+  (`healthy: true`). Befund unveraendert: Detektion (`links_after`) greift, die
+  behaupteten Backlinks werden weiterhin nicht geschrieben — kein Fix seit 0.20.0
+  erfolgt. Fix-Kandidat fuer die naechste Iteration: `store_knowledge` serverseitig
+  nach dem Run die relates_to-Konzepte deterministisch nachverlinken (nicht dem
+  Modell ueberlassen), oder die Store-Summary an `links_after` spiegeln.
 - **Deployment-Kontext (2026-08-04):** Die Kimi-MCP-Config
   (`~/.kimi-code/mcp.json`) zeigt auf `https://athenaeum.mzrsvr.net/mcp`
   (REMOTE, lief 0.20.0) — die Dogfooding-Library lebt dort, nicht im

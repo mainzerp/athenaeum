@@ -31,6 +31,10 @@ REQUIRED_ROOT_FILES = ("index.md", "log.md")
 
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 _EXTRACT_CHUNK = 1024 * 1024
+# Zip-bomb guards: a running decompressed-size total across ALL members and
+# a member count, both read at call time (tests monkeypatch them tiny).
+MAX_EXTRACT_BYTES = 2 * 1024**3
+MAX_EXTRACT_MEMBERS = 100_000
 
 
 class TransferError(ValueError):
@@ -97,25 +101,38 @@ def stage_import(root: str | Path, src_zip: str | Path) -> Path:
                 raise MissingBundleFileError(
                     "archive is not an Athenaeum library export; missing: " + ", ".join(missing)
                 )
-            for info in zf.infolist():
+            extracted_bytes = 0
+            for member_count, info in enumerate(zf.infolist(), start=1):
+                if member_count > MAX_EXTRACT_MEMBERS:
+                    raise CorruptArchiveError(
+                        f"archive exceeds the member cap of {MAX_EXTRACT_MEMBERS}"
+                    )
                 if _is_symlink(info):
                     raise UnsafeMemberError(f"symlink member not allowed: {info.filename!r}")
+                rel = _member_relpath(info.filename.rstrip("/"))
                 # Hook-injection guard: exports never carry .git, so an
                 # archive that does is hostile (supply-chain via git hooks).
-                if ".git" in _member_relpath(info.filename.rstrip("/")).parts:
+                # Normalization-aware: .GIT / ".git." / ".git " variants are
+                # the same directory on case/quote-insensitive filesystems.
+                if any(part.rstrip(". ").lower() == ".git" for part in rel.parts):
                     raise UnsafeMemberError(".git members are not allowed")
                 if info.is_dir():
                     # Explicit dir entries (empty dirs) round-trip; files
                     # create their parents on demand below.
-                    rel = _member_relpath(info.filename.rstrip("/"))
                     staging.joinpath(*rel.parts).mkdir(parents=True, exist_ok=True)
                     continue
-                rel = _member_relpath(info.filename)
                 target = staging.joinpath(*rel.parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     with zf.open(info) as source, open(target, "wb") as dest:
-                        shutil.copyfileobj(source, dest, _EXTRACT_CHUNK)
+                        while chunk := source.read(_EXTRACT_CHUNK):
+                            extracted_bytes += len(chunk)
+                            if extracted_bytes > MAX_EXTRACT_BYTES:
+                                raise CorruptArchiveError(
+                                    "archive exceeds the decompressed size cap of "
+                                    f"{MAX_EXTRACT_BYTES} bytes"
+                                )
+                            dest.write(chunk)
                 except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
                     raise CorruptArchiveError(
                         f"unreadable archive member {info.filename!r}: {exc}"
@@ -201,12 +218,20 @@ def _build_zip(root: Path, dest_zip: Path) -> int:
 
     Entries are sorted by POSIX relpath; directories get explicit entries
     (name + ``/``) so empty dirs (e.g. an empty ``.athenaeum/payloads/``)
-    round-trip. Returns the member count.
+    round-trip. Returns the member count. The walk is os.walk with
+    ``followlinks=False`` plus explicit symlink screening: symlinked dirs
+    are never descended into (on any Python) and symlinked files are never
+    archived (an export must not carry root escapes).
     """
-    entries = sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix())
+    entries: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+        base = Path(dirpath)
+        entries.extend(base / d for d in dirnames)
+        entries.extend(base / name for name in filenames if not (base / name).is_symlink())
     count = 0
     with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for entry in entries:
+        for entry in sorted(entries, key=lambda p: p.relative_to(root).as_posix()):
             rel = entry.relative_to(root)
             if _export_skip(rel):
                 continue

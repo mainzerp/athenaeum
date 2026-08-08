@@ -68,6 +68,43 @@ def test_unclosed_block_raises():
         split_document("---\ntype: Concept\nno closing delimiter\n")
 
 
+def test_indented_delimiter_inside_block_scalar_is_content():
+    """LIBRARY-05: an indented ``  ---`` inside a YAML single-quoted scalar
+    is content, not the closing delimiter (probe: yaml.safe_dump emits this
+    exact shape for multi-line strings, so backend-written files hit it)."""
+    text = dump_document({"type": "Note", "description": "first\n\n---\n\nsecond"}, "body\n")
+    assert "\n  ---\n" in text  # the dump really carries the indented line
+    fm, body = split_document(text)
+    assert fm == {"type": "Note", "description": "first\n\n---\n\nsecond"}
+    assert body == "body\n"
+
+
+def test_indented_delimiter_alone_does_not_close_block():
+    with pytest.raises(FrontmatterError):
+        split_document("---\ntype: Concept\n  ---\nstill frontmatter\n")
+
+
+def test_bom_prefixed_document_splits():
+    """LIBRARY-12: one leading UTF-8 BOM is tolerated before the opening ---."""
+    fm, body = split_document("\ufeff---\ntype: Concept\n---\nbody\n")
+    assert fm == {"type": "Concept"}
+    assert body == "body\n"
+
+
+def test_bom_without_frontmatter_returns_original_text():
+    text = "\ufeff# Just markdown\n"
+    fm, body = split_document(text)
+    assert fm == {}
+    assert body == text
+
+
+def test_leading_blank_lines_before_frontmatter_tolerated():
+    """LIBRARY-12: leading blank lines before the opening --- are skipped."""
+    fm, body = split_document("\n\n---\ntype: Concept\n---\nbody\n")
+    assert fm == {"type": "Concept"}
+    assert body == "body\n"
+
+
 def test_non_mapping_frontmatter_raises():
     with pytest.raises(FrontmatterError):
         split_document("---\n- just\n- a\n- list\n---\nbody\n")

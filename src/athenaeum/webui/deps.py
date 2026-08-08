@@ -159,12 +159,24 @@ def login_redirect(conn: sqlite3.Connection) -> RedirectResponse:
 
 def current_user(request: Request, conn: sqlite3.Connection) -> sqlite3.Row | None:
     """The logged-in user row, or None. Session key is defined in routes_auth."""
-    from athenaeum.webui.routes_auth import SESSION_USER_ID
+    from athenaeum.webui.routes_auth import SESSION_PW_MARKER, SESSION_USER_ID, password_marker
 
     user_id = request.session.get(SESSION_USER_ID)
     if not user_id:
         return None
-    return db.get_user_by_id(conn, user_id)
+    user = db.get_user_by_id(conn, user_id)
+    if user is None:
+        return None
+    # SERVER-04: the session is only valid for the credential it was issued
+    # against. A password change (e.g. admin reset) flips the marker, and a
+    # pre-deploy session has none — both clear the session (forced re-login).
+    marker = request.session.get(SESSION_PW_MARKER)
+    if not isinstance(marker, str) or not hmac.compare_digest(
+        marker, password_marker(user["password_hash"])
+    ):
+        request.session.clear()
+        return None
+    return user
 
 
 def require_user(request: Request, conn: sqlite3.Connection) -> sqlite3.Row | None:

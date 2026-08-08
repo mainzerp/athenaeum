@@ -50,3 +50,15 @@ def test_stable_alphabetical_order(tmp_path):
     index = generate_index(tmp_path, "/")
     lines = [line for line in index.split("\n") if line.startswith("* [")]
     assert lines == ["* [alpha](alpha.md)", "* [mid](mid.md)", "* [zebra](zebra.md)"]
+
+
+def test_multiline_title_description_render_single_line(tmp_path):
+    """LIBRARY-04: multi-line frontmatter values collapse at the sink — an
+    index entry is always exactly one line."""
+    (tmp_path / "a.md").write_text(
+        '---\ntype: Concept\ntitle: "line one\\nline two"\n'
+        'description: "desc one\\ndesc two"\n---\nbody\n',
+        encoding="utf-8",
+    )
+    index = generate_index(tmp_path, "/")
+    assert "* [line one line two](a.md) - desc one desc two" in index

@@ -455,6 +455,57 @@ async def test_maintain_verification_failure_never_fails_run(monkeypatch):
     assert "Post-run verification" not in result["summary"]
 
 
+async def test_maintain_provider_error_after_write_returns_partial_success():
+    """AGENT-05: a mid-loop provider failure on the maintain path keeps the
+    landed writes (partial success); verification + rescan still run."""
+    docs = {"/hub.md": {"frontmatter": {"title": "Hub", "type": "Note"}, "body": "h"}}
+    backend = FakeBackend(docs=docs, healthy=False)
+    provider = FailAfterProvider(
+        [
+            LLMResponse(
+                tool_calls=[tc("c1", "edit_concept", {"path": "/hub.md", "new_body": "h2"})]
+            ),
+            # second complete() raises RuntimeError -> partial result
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_maintain()
+
+    assert result["partial"] is True
+    assert result["actions"] == [{"id": "/hub", "title": "Hub", "action": "updated"}]
+    assert "interrupted" in result["summary"]
+    # verification and the post-run rescan still ran over the landed writes
+    assert result["verified"] == [{"id": "/hub", "by": CURATOR_VERIFIER}]
+    assert ("verify_concept", "/hub.md", CURATOR_VERIFIER, None) in backend.calls
+    assert result["healthy"] is False  # fake backend stays unhealthy
+
+
+async def test_maintain_verifies_concept_edited_twice_exactly_once():
+    """AGENT-06: one concept edited twice in a run yields exactly one
+    verify_concept call and one receipt."""
+    docs = {"/hub.md": {"frontmatter": {"title": "Hub", "type": "Note"}, "body": "h"}}
+    backend = FakeBackend(docs=docs, healthy=False)
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[tc("c1", "edit_concept", {"path": "/hub.md", "new_body": "h2"})]
+            ),
+            LLMResponse(
+                tool_calls=[tc("c2", "edit_concept", {"path": "/hub.md", "new_body": "h3"})]
+            ),
+            LLMResponse(text="repaired"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_maintain()
+
+    assert result["verified"] == [{"id": "/hub", "by": CURATOR_VERIFIER}]
+    verify_calls = [call for call in backend.calls if call[0] == "verify_concept"]
+    assert verify_calls == [("verify_concept", "/hub.md", CURATOR_VERIFIER, None)]
+
+
 async def test_handle_store_tracks_writes_and_injects_agent_label():
     docs = {
         "/existing.md": {
@@ -1470,6 +1521,38 @@ async def test_curate_runs_loop_on_findings(tmp_path):
     assert "/thin" in task_prompt and "tidy up" in task_prompt
 
 
+async def test_curate_provider_error_after_write_returns_partial_success(tmp_path):
+    """AGENT-05: the same partial-success recovery backs curate runs."""
+    root = tmp_path / "lib"
+    root.mkdir()
+    (root / "thin.md").write_text("---\ntype: Note\ntitle: Thin\n---\nstub\n", encoding="utf-8")
+    docs = {"/thin.md": {"frontmatter": {"title": "Thin", "type": "Note"}, "body": "stub"}}
+    backend = FakeBackend(docs=docs)
+    provider = FailAfterProvider(
+        [
+            LLMResponse(
+                tool_calls=[tc("c1", "edit_concept", {"path": "/thin.md", "new_body": "enriched"})]
+            ),
+            # second complete() raises RuntimeError -> partial result
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    backend.scan_root = root
+
+    result = await librarian.handle_curate()
+
+    assert result["partial"] is True
+    assert result["actions"] == [{"id": "/thin", "title": "Thin", "action": "updated"}]
+    assert "interrupted" in result["summary"]
+    # verification and the post-run rescan still ran over the landed writes
+    assert result["verified"] == [{"id": "/thin", "by": CURATOR_VERIFIER}]
+    assert result["organized"] is False  # scanned files unchanged by the fake backend
+    assert result["findings"]["thin_concepts"] == [
+        {"id": "/thin", "title": "Thin", "body_chars": 4}
+    ]
+    assert result["health_after"] == {"healthy": True, "orphans": 0, "broken_links": 0}
+
+
 async def test_curate_preamble_includes_addendum(tmp_path):
     root = tmp_path / "lib"
     root.mkdir()
@@ -1725,6 +1808,63 @@ async def test_telemetry_without_reported_usage():
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
+    }
+
+
+async def test_f11_nudge_retry_telemetry_accumulates_across_runs():
+    """AGENT-11: the F11 nudge retry's iterations/tokens ADD to the first
+    run's instead of replacing them in the journal/trace summary."""
+
+    def usage(prompt, completion):
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        }
+
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            # first run: one tool round, no writes
+            LLMResponse(tool_calls=[tc("c1", "list_dir")], usage=usage(10, 2)),
+            LLMResponse(text="nothing to write", usage=usage(20, 3)),
+            # nudge retry: one write round
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c2",
+                        "write_concept",
+                        {
+                            "path": "/n.md",
+                            "frontmatter": {"title": "N", "type": "Note"},
+                            "body": "b",
+                        },
+                    )
+                ],
+                usage=usage(30, 4),
+            ),
+            LLMResponse(text="wrote it", usage=usage(40, 5)),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    telemetry = RequestTelemetry(trace_id="20260728T000000Z-trace005")
+    token = _telemetry_var.set(telemetry)
+    try:
+        result = await librarian.handle_store("knowledge")
+    finally:
+        _telemetry_var.reset(token)
+
+    assert result["stored"] == [{"id": "/n", "title": "N", "action": "created"}]
+    assert len(provider.calls) == 4  # two completions per run
+    assert telemetry.iterations == 2  # 1 + 1, summed across both runs
+    assert len(telemetry.llm_calls) == 4
+    assert telemetry.llm == {
+        "provider": "openai",
+        "model": "m",
+        "iterations": 2,
+        "prompt_tokens": 100,
+        "completion_tokens": 14,
+        "total_tokens": 114,
     }
 
 
@@ -2276,22 +2416,22 @@ async def test_curate_summary_and_findings_share_post_run_epoch(tmp_path):
 # --- CS-11: previously silent swallows now log -------------------------------
 
 
-def test_concept_entries_read_failure_logs_warning(caplog):
+async def test_concept_entries_read_failure_logs_warning(caplog):
     backend = FakeBackend()  # no docs: read_document raises KeyError
     librarian = make_librarian(backend, ScriptedProvider([]))
     tracker = _Tracker(read_paths=["/gone.md"])
     with caplog.at_level(logging.WARNING, logger="athenaeum.librarian.agent"):
-        entries = librarian._concept_entries(tracker)
+        entries = await librarian._concept_entries(tracker)
     assert entries == []
     assert "concept entry: read failed for /gone.md" in caplog.text
 
 
-def test_stored_entries_title_lookup_failure_logs_warning(caplog):
+async def test_stored_entries_title_lookup_failure_logs_warning(caplog):
     backend = FakeBackend()
     librarian = make_librarian(backend, ScriptedProvider([]))
     tracker = _Tracker(writes=[{"id": "/gone", "action": "created"}])
     with caplog.at_level(logging.WARNING, logger="athenaeum.librarian.agent"):
-        stored = librarian._stored_entries(tracker)
+        stored = await librarian._stored_entries(tracker)
     assert stored == [{"id": "/gone", "title": "/gone", "action": "created"}]
     assert "title lookup failed for /gone" in caplog.text
 

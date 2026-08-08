@@ -2,6 +2,7 @@
 
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.fernet import InvalidToken
@@ -201,6 +202,74 @@ def test_set_password(conn, tmp_path):
     user = db.create_user(conn, "bob", security.hash_password("old"))
     db.set_password(conn, user["id"], security.hash_password("new"))
     assert security.verify_password(db.get_user_by_id(conn, user["id"])["password_hash"], "new")
+
+
+def test_create_first_admin_gets_bounded_retention_defaults(conn, tmp_path):
+    """SERVER-07: the first-run owner's config row mirrors create_user (A12),
+    including payload_keep; the one-shot race semantics are unchanged."""
+    user = db.create_first_admin(conn, "owner", security.hash_password("pw"))
+    assert user is not None
+    assert user["is_admin"] == 1
+    cfg = db.get_config(conn, user["id"])
+    assert cfg["trace_keep"] == db.DEFAULT_TRACE_KEEP
+    assert cfg["activity_keep"] == db.DEFAULT_ACTIVITY_KEEP
+    assert cfg["payload_keep"] == db.DEFAULT_PAYLOAD_KEEP
+    # still one-shot: a second call loses the race and creates nothing
+    assert db.create_first_admin(conn, "second", security.hash_password("pw")) is None
+    assert db.get_user_by_username(conn, "second") is None
+
+
+# --- login throttling (SERVER-09) ----------------------------------------------
+
+
+def test_record_login_failure_atomic_under_parallel_writers(tmp_path):
+    """N concurrent failures on separate connections increment N times
+    (atomic upsert; the old read-modify-write could lose increments)."""
+    db_path = tmp_path / "app.db"
+    db.init_db(db_path)
+    thread_count, per_thread = 4, 10
+    errors = []
+
+    def hammer() -> None:
+        conn = db.connect(db_path)
+        try:
+            for _ in range(per_thread):
+                db.record_login_failure(conn, "user:alice")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=hammer) for _ in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert errors == []
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT failures, updated_at FROM login_attempts WHERE key = 'user:alice'"
+        ).fetchone()
+        assert row["failures"] == thread_count * per_thread
+        assert row["updated_at"] is not None  # stamped on every upsert
+    finally:
+        conn.close()
+
+
+def test_record_login_failure_prunes_stale_rows(conn):
+    """Rows idle for 7+ days are deleted opportunistically on the next write."""
+    stale = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    with conn:
+        conn.execute(
+            "INSERT INTO login_attempts (key, failures, locked_until, updated_at)"
+            " VALUES ('user:stale', 2, NULL, ?)",
+            (stale,),
+        )
+    db.record_login_failure(conn, "user:fresh")
+    keys = {row["key"] for row in conn.execute("SELECT key FROM login_attempts")}
+    assert "user:stale" not in keys
+    assert "user:fresh" in keys
 
 
 def test_update_provider_config_key_only_overwritten_when_provided(conn, tmp_path):
