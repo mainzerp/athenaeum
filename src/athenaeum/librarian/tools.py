@@ -135,7 +135,8 @@ TOOL_SCHEMAS: list[dict] = [
             "Returns ranked hits (score is a relative ranking aid — a reranker or "
             "fused-rank score, not a trust signal). "
             "On embedding-pipeline failure the result degrades to title/description "
-            "metadata matches marked fallback: true (empty when nothing matches). "
+            "metadata matches marked fallback: true; if nothing matches there "
+            "either, the call errors — retry via search_metadata with synonyms. "
             "Requires embeddings to be configured; otherwise it "
             "returns an error — use search_metadata then."
         ),

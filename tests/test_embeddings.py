@@ -520,13 +520,13 @@ def install_fake_fastembed(monkeypatch):
 async def test_local_provider_construction_prefixes_and_memoization(monkeypatch, tmp_path):
     install_fake_fastembed(monkeypatch)
     provider = LocalFastembedProvider(cache_dir=tmp_path / "models")
-    config = EmbeddingConfig(source="local", model="intfloat/multilingual-e5-small")
+    config = EmbeddingConfig(source="local", model="intfloat/multilingual-e5-large")
 
     vectors = await provider.embed(["hello"], config, kind=KIND_QUERY)
     assert vectors == [[1.0, 0.0]]
     instance = _FakeTextEmbedding.instances[-1]
     assert instance.kwargs == {
-        "model_name": "intfloat/multilingual-e5-small",
+        "model_name": "intfloat/multilingual-e5-large",
         "cache_dir": str(tmp_path / "models"),
     }
     assert instance.embed_calls == [["query: hello"]]
@@ -553,7 +553,7 @@ async def test_local_provider_prefixes_only_for_e5_models(monkeypatch):
         instance = _FakeTextEmbedding.instances[-1]
         assert instance.embed_calls == [["hello"], ["doc"]]
 
-    e5 = EmbeddingConfig(source="local", model="intfloat/multilingual-e5-small")
+    e5 = EmbeddingConfig(source="local", model="intfloat/multilingual-e5-large")
     await provider.embed(["hello"], e5, kind=KIND_QUERY)
     await provider.embed(["doc"], e5, kind=KIND_DOCUMENT)
     instance = _FakeTextEmbedding.instances[-1]
@@ -571,11 +571,11 @@ async def test_local_provider_runs_inference_off_loop(monkeypatch):
 
     monkeypatch.setattr(asyncio, "to_thread", spy)
     provider = LocalFastembedProvider()
-    await provider.embed(["x"], EmbeddingConfig(source="local", model="m"))
+    await provider.embed(["x"], EmbeddingConfig(source="local", model="BAAI/bge-small-en-v1.5"))
     # model construction (A6: first use downloads ONNX weights) AND the
     # blocking ONNX inference both went through asyncio.to_thread
     assert len(calls) == 2
-    await provider.embed(["y"], EmbeddingConfig(source="local", model="m"))
+    await provider.embed(["y"], EmbeddingConfig(source="local", model="BAAI/bge-small-en-v1.5"))
     assert len(calls) == 4  # memoized construction still goes through to_thread
 
 
@@ -584,14 +584,14 @@ async def test_local_provider_import_guard(monkeypatch):
     local_embed_mod._SHARED_MODELS.clear()  # no cached model -> import attempted
     provider = LocalFastembedProvider()
     with pytest.raises(EmbeddingProviderError, match=r"athenaeum\[local\]"):
-        await provider.embed(["x"], EmbeddingConfig(source="local", model="m"))
+        await provider.embed(["x"], EmbeddingConfig(source="local", model="BAAI/bge-small-en-v1.5"))
 
 
 async def test_local_provider_cache_shared_across_instances(monkeypatch, tmp_path):
     """0.23.0: the ONNX model cache is process-wide — a second provider
     instance (e.g. after librarian eviction) reuses the loaded model."""
     install_fake_fastembed(monkeypatch)
-    config = EmbeddingConfig(source="local", model="m")
+    config = EmbeddingConfig(source="local", model="BAAI/bge-small-en-v1.5")
     cache_dir = tmp_path / "models"
 
     await LocalFastembedProvider(cache_dir=cache_dir).embed(["x"], config)
@@ -654,9 +654,21 @@ async def test_warm_local_embedding_models(monkeypatch, tmp_path):
 
 
 def test_local_model_shortlist_shape():
-    assert LOCAL_MODEL_SHORTLIST[0] == ("intfloat/multilingual-e5-base", 768)
-    assert len(LOCAL_MODEL_SHORTLIST) == 5
+    assert LOCAL_MODEL_SHORTLIST[0] == ("intfloat/multilingual-e5-large", 1024)
+    assert len(LOCAL_MODEL_SHORTLIST) == 4
     assert all(isinstance(dims, int) and dims > 0 for _, dims in LOCAL_MODEL_SHORTLIST)
+
+
+async def test_local_provider_rejects_off_shortlist_model(monkeypatch, tmp_path):
+    """Stored configs holding a model no longer on the shortlist (e.g. the
+    fastembed-unsupported e5-base) fail at embed time with a WebUI pointer
+    instead of a raw fastembed error."""
+    install_fake_fastembed(monkeypatch)
+    provider = LocalFastembedProvider(cache_dir=tmp_path / "models")
+    config = EmbeddingConfig(source="local", model="intfloat/multilingual-e5-base")
+    with pytest.raises(EmbeddingProviderError, match="Agents > Embeddings"):
+        await provider.embed(["x"], config)
+    assert _FakeTextEmbedding.instances == []  # fastembed never touched
 
 
 # --- config resolution (manager._load_config) ------------------------------------

@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.25.2**
+Current version: **0.25.3**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,23 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.25.3
+
+Embedding shortlist correction: `intfloat/multilingual-e5-base` and
+`-e5-small` were never loadable via fastembed 0.8.0 (live failure observed);
+the shortlist now leads with `intfloat/multilingual-e5-large` (1024 dims, the
+only fastembed-supported e5-family model) as the default and drops both
+unsupported entries. Stored off-shortlist local models now fail embed calls
+with an explicit `EmbeddingProviderError` pointing at WebUI reconfiguration
+(Agents > Embeddings) instead of a raw fastembed error. Empty metadata
+fallback in `search_semantic` now raises a RuntimeError chaining the
+embedding-pipeline cause instead of silently returning `[]` — an empty result
+is no longer indistinguishable from a broken embedding pipeline, and the
+trace records an error event rather than a misleading `fallback: false`.
+Manual step for deployments holding e5-base/e5-small: reconfigure the
+embedding model in the WebUI and re-index (e5-large downloads ~2.24 GB on
+first use).
 
 ### 0.25.2
 

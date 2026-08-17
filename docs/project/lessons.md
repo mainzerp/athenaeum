@@ -396,6 +396,11 @@
   zeigte erneut `unbacklinked`, `healthy: false`. Reparatur per
   `update_knowledge` mit expliziter `[text](/abs/pfad.md)`-Anweisung
   funktionierte sofort (`healthy: true`). Befund unveraendert.
+- **F22 sechste Bestaetigung (2026-08-17, Strip-Link-Targets-0.25.2-Lessons-Store):** Store
+  von `/athenaeum/lessons/strip-link-targets-0.25.2-lessons` mit relates_to
+  hybrid-search-0.19.0-lessons — Summary behauptete den Backlink, `links_after`
+  zeigte `unbacklinked`, `healthy: false`. Reparatur per `update_knowledge` mit
+  expliziter `[text](/abs/pfad.md)`-Anweisung sofort `healthy: true`.
 - **F22 fuenfte Bestaetigung (2026-08-17, LOOP_GUARDS-Lessons-Store):** Store
   von `/athenaeum/lessons/agent-loop-guards-2026-08-17-lessons` mit relates_to
   v0.23.0 — Summary behauptete den Backlink, `links_after` zeigte
@@ -477,3 +482,17 @@
   gleiche oeffentliche IP von Dev-Maschine und Server (NAT) tauscht
   "lokal == remote" vor — immer anhand der Activity-DB pruefen, WELCHE
   Instanz die eigenen MCP-Calls journaliert.
+- **F26 — Embedding-Shortlist bot fastembed-unladbare Modelle; stille
+  Degradation der Semantiksuche (2026-08-17, REMOTE, RESOLVED in 0.25.3).**
+  Live-DB hielt `intfloat/multilingual-e5-base`, das fastembed 0.8.0 gar nicht
+  laden kann (nur `multilingual-e5-large` wird unterstuetzt) — Index-State
+  "failed" auf der Statuskarte, aber `search_semantic` degradierte still zur
+  Metadaten-Fallback und lieferte bei leerem Fallback `[]` (ununterscheidbar
+  von "keine Treffer"); der Trace notierte dazu `fallback: false`,
+  byte-identisch zu einem gesunden Leerergebnis. Aufloesung: Shortlist korrigiert
+  (e5-large 1024-dim als Default, e5-base/e5-small entfernt);
+  `LocalFastembedProvider._model` lehnt Off-Shortlist-Modelle mit
+  WebUI-Rekonfigurations-Hinweis ab; leerer Metadaten-Fallback wirft jetzt
+  einen RuntimeError mit gechainter Ursache statt `[]` zurueckzuliefern.
+  Learning: kuratierte Modell-Listen gegen die tatsaechlich installierte
+  Runtime-Registry pruefen, nicht gegen Doku-Annahmen.

@@ -22,13 +22,13 @@ from athenaeum.librarian.embed import (
 
 # Curated shortlist (locked decision k): (model name, dims) with dims in the
 # WebUI labels. Hardcoded — fastembed may be absent, so its supported-model
-# listing is never consulted here.
+# listing is never consulted here. intfloat/multilingual-e5-large is the only
+# e5-family model fastembed 0.8.0 supports (e5-base/e5-small are not loadable).
 LOCAL_MODEL_SHORTLIST: list[tuple[str, int]] = [
-    ("intfloat/multilingual-e5-base", 768),
+    ("intfloat/multilingual-e5-large", 1024),
     ("BAAI/bge-small-en-v1.5", 384),
     ("BAAI/bge-base-en-v1.5", 768),
     ("sentence-transformers/all-MiniLM-L6-v2", 384),
-    ("intfloat/multilingual-e5-small", 384),
 ]
 
 DEFAULT_LOCAL_MODEL = LOCAL_MODEL_SHORTLIST[0][0]
@@ -96,6 +96,12 @@ class LocalFastembedProvider:
         self._cache_dir = cache_dir
 
     def _model(self, model_name: str):
+        if model_name not in {name for name, _ in LOCAL_MODEL_SHORTLIST}:
+            raise EmbeddingProviderError(
+                f"local embedding model {model_name!r} is not supported (not in "
+                "LOCAL_MODEL_SHORTLIST); reconfigure the embedding model in the "
+                "WebUI (Agents > Embeddings)"
+            )
         return _shared_model(model_name, self._cache_dir)
 
     async def embed(

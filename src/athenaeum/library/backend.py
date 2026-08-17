@@ -217,7 +217,9 @@ class LibraryBackend:
         (duck-typed — services without one keep the legacy pure-semantic path
         with cosine scores). An unavailable FTS5 table likewise degrades to
         legacy. An embedding-pipeline failure degrades to title/description
-        metadata matches (``fallback: true``), never an error.
+        metadata matches (``fallback: true``); when the fallback matches
+        nothing either, a RuntimeError is raised so the failure is not
+        indistinguishable from "no hits".
         """
         if self._embedding_service is None:
             raise RuntimeError(
@@ -237,9 +239,9 @@ class LibraryBackend:
             t2 = time.perf_counter()
             logger.debug("search_semantic: semantic leg %.1f ms", (t1 - t0) * 1000)
             logger.debug("search_semantic: fts leg %.1f ms", (t2 - t1) * 1000)
-        except Exception:
+        except Exception as exc:
             logger.warning("semantic search failed; falling back to search_metadata", exc_info=True)
-            return self._metadata_fallback(query, limit)
+            return self._metadata_fallback(query, limit, exc)
         # Normalize keys to the canonical store shape (x.md) before fusion:
         # semantic ids are "/x"-shaped without .md; FTS keys are already x.md.
         sem_keys = [f"{concept_id.lstrip('/')}.md" for concept_id, _ in sem]
@@ -318,9 +320,9 @@ class LibraryBackend:
         deployment without an FTS index keeps."""
         try:
             ranked = await self._embedding_service.search_ids(query, limit)
-        except Exception:
+        except Exception as exc:
             logger.warning("semantic search failed; falling back to search_metadata", exc_info=True)
-            return self._metadata_fallback(query, limit)
+            return self._metadata_fallback(query, limit, exc)
         hits = []
         for concept_id, score in ranked:
             try:
@@ -340,18 +342,29 @@ class LibraryBackend:
             )
         return hits
 
-    def _metadata_fallback(self, query: str, limit: int) -> list[dict]:
+    def _metadata_fallback(
+        self, query: str, limit: int, cause: Exception | None = None
+    ) -> list[dict]:
         """Degraded semantic search: substring match on title and description.
 
         Never the unfiltered library (L7): when nothing matches the query the
-        result is empty; hits are flagged ``fallback: true`` so callers can
-        tell degraded results from ranked ones.
+        fallback cannot stand in for semantic search, so it raises a
+        RuntimeError (chaining the embedding-pipeline cause) instead of
+        returning an empty list indistinguishable from "no hits". Hits are
+        flagged ``fallback: true`` so callers can tell degraded results from
+        ranked ones.
         """
         seen: dict[str, dict] = {}
         for field in ("title", "description"):
             for hit in self.search_metadata(field=field, value=query):
                 seen.setdefault(hit["path"], hit)
-        return [{**hit, "fallback": True} for hit in list(seen.values())[:limit]]
+        hits = [{**hit, "fallback": True} for hit in list(seen.values())[:limit]]
+        if not hits:
+            raise RuntimeError(
+                f"semantic search unavailable (embedding pipeline failed: {cause}); "
+                "no title/description matches either — use search_metadata with synonyms"
+            ) from cause
+        return hits
 
     def link_check(self, path: str | None = None) -> list[dict]:
         return links_mod.broken_links(

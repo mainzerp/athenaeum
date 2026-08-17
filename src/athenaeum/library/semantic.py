@@ -32,12 +32,13 @@ SEMANTIC_DUPLICATE_COSINE = 0.85
 # NOTE (L9): these per-model values were calibrated against vectors that had
 # `query:`/`passage:` prefixes applied to ALL local models. Since the prefix
 # fix, only the E5 family embeds prefixed text — BGE/MiniLM vectors changed
-# basis, so these thresholds may need empirical re-tuning.
+# basis, so these thresholds may need empirical re-tuning. e5-large has no
+# calibrated entry yet and falls back to SEMANTIC_DUPLICATE_COSINE (0.85)
+# until empirically calibrated.
 SEMANTIC_DUPLICATE_THRESHOLDS: dict[str, float] = {
     "BAAI/bge-small-en-v1.5": 0.85,
     "BAAI/bge-base-en-v1.5": 0.85,
     "sentence-transformers/all-MiniLM-L6-v2": 0.80,
-    "intfloat/multilingual-e5-small": 0.82,
 }
 SEMANTIC_DUPLICATE_MAX_PAIRS = 20  # mirrors NEAR_DUPLICATE_MAX_PAIRS
 

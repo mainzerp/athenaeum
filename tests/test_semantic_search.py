@@ -113,13 +113,27 @@ async def test_search_semantic_fallback_matches_description(tmp_path):
 
 
 async def test_search_semantic_fallback_never_dumps_library(tmp_path):
-    """L7: no title/description match -> empty result, not the whole library."""
+    """L7: no title/description match -> error, not the whole library and not
+    an empty list indistinguishable from "no semantic hits"."""
     service = FakeSearchService(error=RuntimeError("embed down"))
     backend = make_backend(tmp_path, service)
     write_concept(backend.root, "a.md", "title: Alpha\ntype: Note\n", "body a")
     write_concept(backend.root, "b.md", "title: Beta\ntype: Project\n", "body b")
 
-    assert await backend.search_semantic("no-such-term-anywhere") == []
+    with pytest.raises(RuntimeError, match="semantic search unavailable"):
+        await backend.search_semantic("no-such-term-anywhere")
+
+
+async def test_search_semantic_empty_fallback_chains_cause(tmp_path):
+    """The empty-fallback error names and chains the embedding-pipeline cause."""
+    service = FakeSearchService(error=RuntimeError("embed down"))
+    backend = make_backend(tmp_path, service)
+    write_concept(backend.root, "a.md", "title: Alpha\ntype: Note\n", "body a")
+
+    with pytest.raises(RuntimeError, match="embed down") as excinfo:
+        await backend.search_semantic("no-such-term-anywhere")
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "embed down"
 
 
 # --- schema + dispatch --------------------------------------------------------

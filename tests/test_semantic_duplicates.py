@@ -109,12 +109,11 @@ def test_threshold_for_model_mapping():
         "BAAI/bge-small-en-v1.5": 0.85,
         "BAAI/bge-base-en-v1.5": 0.85,
         "sentence-transformers/all-MiniLM-L6-v2": 0.80,
-        "intfloat/multilingual-e5-small": 0.82,
     }
     assert semantic_threshold_for_model("BAAI/bge-small-en-v1.5") == 0.85
     assert semantic_threshold_for_model("BAAI/bge-base-en-v1.5") == 0.85
     assert semantic_threshold_for_model("sentence-transformers/all-MiniLM-L6-v2") == 0.80
-    assert semantic_threshold_for_model("intfloat/multilingual-e5-small") == 0.82
+    assert semantic_threshold_for_model("intfloat/multilingual-e5-large") == 0.85
     assert semantic_threshold_for_model("unknown/model") == 0.85
     assert semantic_threshold_for_model(None) == 0.85
     assert SEMANTIC_DUPLICATE_COSINE == 0.85
