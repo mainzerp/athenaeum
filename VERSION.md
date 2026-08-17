@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.25.1**
+Current version: **0.25.2**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,19 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.25.2
+
+Link-stripped indexing text (`c8b7cb2`): `concept_text` now reduces inline markdown
+links `[text](url)` to their anchor text before embedding/FTS indexing
+(`strip_link_targets`), so URLs no longer pollute vectors or the lexical
+index. The transform is fence- and code-span-aware (links inside fenced code
+blocks or inline code spans pass through untouched); images, reference-style
+links, autolinks, and bare URLs are untouched by design. Deploying this
+change makes every stored `content_hash` stale: the first librarian
+reconcile after restart triggers a one-time full re-embed per user (batched;
+API providers incur one corpus-sized token bill) so vectors match the new
+text basis.
 
 ### 0.25.1
 
