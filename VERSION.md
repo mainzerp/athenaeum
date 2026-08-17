@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.25.3**
+Current version: **0.25.4**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,18 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.25.4
+
+WebUI embedding model switch now downloads the new model and re-embeds the
+library in the background immediately on save, instead of deferring both to
+the first agent request (which blocked on the ~2.2 GB fastembed download for
+local models). The save handler compares the old and new `(source, model)`
+binding and, on a real change, spawns a fire-and-forget task that cold-builds
+the librarian off the event loop and triggers its deferred reconcile — reusing
+the existing claim, status registry, and eviction-cancel machinery. Plain
+re-saves (unchanged binding, threshold/hybrid-only changes, disables) only
+evict as before.
 
 ### 0.25.3
 

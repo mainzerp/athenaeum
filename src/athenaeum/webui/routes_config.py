@@ -9,6 +9,8 @@ provider factory. Models live on the agent tabs (D5).
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
 import sqlite3
 import time
@@ -29,6 +31,8 @@ from athenaeum.scheduler import CurateScheduler
 from athenaeum.webui import deps
 
 router = APIRouter(prefix="/config", dependencies=[Depends(deps.csrf_protect)])
+
+logger = logging.getLogger(__name__)
 
 PROVIDERS = ["openai", "anthropic", "gemini", "openrouter", "openai-compatible"]
 
@@ -99,6 +103,32 @@ def _provider_error_redirect(message: str):
 def _evict(manager: LibrarianManager | None, user_id: str) -> None:
     if manager is not None:
         manager.evict(user_id)
+
+
+_EMBED_RECONCILE_TASKS: set[asyncio.Task] = set()
+
+
+def _kick_embed_reconcile(manager: LibrarianManager | None, user_id: str) -> None:
+    """Fire-and-forget: cold-build the librarian, trigger its deferred reconcile.
+
+    Strong-ref set (scheduler start_run_now idiom); the coroutine swallows and
+    logs everything, so the task never raises unobserved. The reconcile's first
+    embed batch downloads a not-yet-cached local model off the event loop
+    (local.py _shared_model memoizes it process-wide).
+    """
+    if manager is None or getattr(manager, "get", None) is None:
+        return  # WebUI test app's FakeManager has no get (getattr idiom, cf. embedding_form)
+    task = asyncio.create_task(_embed_reconcile_after_save(manager, user_id))
+    _EMBED_RECONCILE_TASKS.add(task)
+    task.add_done_callback(_EMBED_RECONCILE_TASKS.discard)
+
+
+async def _embed_reconcile_after_save(manager: LibrarianManager, user_id: str) -> None:
+    try:
+        librarian = await asyncio.to_thread(manager.get, user_id)
+        librarian._maybe_embed_reconcile()
+    except Exception:
+        logger.exception("post-save embedding reconcile kick failed for user %s", user_id)
 
 
 @router.get("/provider")
@@ -558,7 +588,7 @@ def embedding_form(
 
 
 @router.post("/agents/embeddings")
-def embedding_save(
+async def embedding_save(
     request: Request,
     conn: Annotated[sqlite3.Connection, Depends(deps.db_dep)],
     manager: Annotated[LibrarianManager | None, Depends(deps.manager_dep)],
@@ -571,11 +601,14 @@ def embedding_save(
     hybrid_rerank: str | None = Form(None),
 ):
     """Embedding binding; the empty source disables embeddings. Saving evicts
-    the cached librarian so the next build picks up the new config (a model
-    mismatch then auto-triggers the background full re-embed)."""
+    the cached librarian so the next build picks up the new config. A CHANGED
+    (source, model) binding additionally kicks the background full re-embed
+    (incl. the local model download) immediately; plain re-saves only evict."""
     user = deps.current_user(request, conn)
     if user is None:
         return deps.login_redirect(conn)
+    old_cfg = db.get_config(conn, user["id"])
+    old_binding = (old_cfg["embedding_source"], old_cfg["embedding_model"])
     threshold = _validated_threshold(semantic_threshold)
     hybrid_on = hybrid_search is not None
     rerank_on = hybrid_rerank is not None
@@ -583,6 +616,7 @@ def embedding_save(
     if source not in ("", "local", "api"):
         raise HTTPException(status_code=400, detail="Unknown embedding source")
     if not source:
+        new_binding: tuple[str | None, str | None] = (None, None)
         db.update_embedding_config(
             conn,
             user["id"],
@@ -597,6 +631,7 @@ def embedding_save(
         model = local_model.strip()
         if model not in {name for name, _ in LOCAL_MODEL_SHORTLIST}:
             raise HTTPException(status_code=400, detail="Unknown local model")
+        new_binding = ("local", model)
         db.update_embedding_config(
             conn,
             user["id"],
@@ -626,6 +661,7 @@ def embedding_save(
                 status_code=400,
                 detail="anthropic connections have no embeddings endpoint",
             )
+        new_binding = ("api", model)
         db.update_embedding_config(
             conn,
             user["id"],
@@ -637,6 +673,8 @@ def embedding_save(
             hybrid_rerank=rerank_on,
         )
     _evict(manager, user["id"])
+    if new_binding[0] is not None and new_binding != old_binding:
+        _kick_embed_reconcile(manager, user["id"])
     return deps.redirect("/config/agents/embeddings?saved=1")
 
 

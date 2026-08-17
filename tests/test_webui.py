@@ -23,7 +23,7 @@ from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST
 from athenaeum.librarian.gate import RunGate
 from athenaeum.library.backend import provision_library
 from athenaeum.library.gittool import GitError
-from athenaeum.webui import ROUTERS, deps, routes_auth, routes_library
+from athenaeum.webui import ROUTERS, deps, routes_auth, routes_config, routes_library
 from conftest import CsrfTestClient
 
 SECRET = "test-secret-key-webui-0123456789ab"  # >= 32 chars (SERVER-03 validator)
@@ -1102,6 +1102,101 @@ def test_config_agents_embeddings_status_card_renders_run(env):
     assert "State: running" in page
     assert "3/10" in page
     assert "Run model: m" in page
+
+
+def test_embeddings_save_model_change_kicks_reconcile(env, monkeypatch):
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    kicks: list[str] = []
+    monkeypatch.setattr(
+        routes_config, "_kick_embed_reconcile", lambda manager, user_id: kicks.append(user_id)
+    )
+
+    model_a = LOCAL_MODEL_SHORTLIST[0][0]
+    model_b = LOCAL_MODEL_SHORTLIST[1][0]
+    response = client.post(
+        "/config/agents/embeddings", data={"source": "local", "local_model": model_a}
+    )
+    assert response.status_code == 303
+    assert kicks == [user["id"]]  # unconfigured -> configured kicks too
+
+    client.post("/config/agents/embeddings", data={"source": "local", "local_model": model_b})
+    assert kicks == [user["id"], user["id"]]
+
+
+def test_embeddings_save_unchanged_model_does_not_kick(env, monkeypatch):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    kicks: list[str] = []
+    monkeypatch.setattr(
+        routes_config, "_kick_embed_reconcile", lambda manager, user_id: kicks.append(user_id)
+    )
+
+    model = LOCAL_MODEL_SHORTLIST[0][0]
+    client.post("/config/agents/embeddings", data={"source": "local", "local_model": model})
+    kicks.clear()
+
+    # identical re-save: no kick
+    client.post("/config/agents/embeddings", data={"source": "local", "local_model": model})
+    assert kicks == []
+
+    # threshold-only change: same (source, model) binding, still no kick
+    client.post(
+        "/config/agents/embeddings",
+        data={"source": "local", "local_model": model, "semantic_threshold": "0.7"},
+    )
+    assert kicks == []
+
+
+def test_embeddings_disable_does_not_kick(env, monkeypatch):
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    kicks: list[str] = []
+    monkeypatch.setattr(
+        routes_config, "_kick_embed_reconcile", lambda manager, user_id: kicks.append(user_id)
+    )
+
+    client.post(
+        "/config/agents/embeddings",
+        data={"source": "local", "local_model": LOCAL_MODEL_SHORTLIST[0][0]},
+    )
+    kicks.clear()
+
+    client.post("/config/agents/embeddings", data={"source": "", "local_model": ""})
+    assert kicks == []
+
+
+def test_embed_reconcile_after_save_runs_and_never_raises():
+    class FakeLibrarian:
+        def __init__(self):
+            self.reconcile_calls = 0
+
+        def _maybe_embed_reconcile(self):
+            self.reconcile_calls += 1
+
+    class FakeManager:
+        def __init__(self, librarian=None, *, raises=False):
+            self.librarian = librarian or FakeLibrarian()
+            self.raises = raises
+            self.get_calls: list[str] = []
+
+        def get(self, user_id):
+            self.get_calls.append(user_id)
+            if self.raises:
+                raise RuntimeError("build failed")
+            return self.librarian
+
+    manager = FakeManager()
+    asyncio.run(routes_config._embed_reconcile_after_save(manager, "u1"))
+    assert manager.get_calls == ["u1"]
+    assert manager.librarian.reconcile_calls == 1
+
+    failing = FakeManager(raises=True)
+    asyncio.run(routes_config._embed_reconcile_after_save(failing, "u1"))  # logs, never raises
+    assert failing.get_calls == ["u1"]
 
 
 def test_config_save_evicts_cached_librarian(env):

@@ -235,8 +235,8 @@
     {% if embed_status.get("model") %}<p>Run model: {{ embed_status["model"] }}</p>{% endif %}
     {% if embed_status.get("error") %}<p>Last error: {{ embed_status["error"] }}</p>{% endif %}
     {% else %}
-    <p class="muted">No index run yet. The index builds in the background after the
-      first agent request.</p>
+    <p class="muted">No index run yet. The index builds in the background — immediately
+      after a model switch is saved, or on the first agent request.</p>
     {% endif %}
     <p>Stored vectors: {{ embed_stats["rows"] }}</p>
     {% if embed_stats["models"] %}
