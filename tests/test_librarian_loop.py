@@ -701,6 +701,130 @@ async def test_store_cap_exit_with_zero_writes_fails():
         await librarian.handle_store("knowledge")
 
 
+async def test_write_nudge_fires_with_zero_writes_at_threshold():
+    """Store-watchdog: nothing written and WRITE_NUDGE_REMAINING iterations left
+    -> one direct WRITE NOW user message before the next complete()."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "list_dir", {"path": "/"})]),
+            LLMResponse(tool_calls=[tc("c2", "list_dir", {"path": "/a"})]),
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c3",
+                        "write_concept",
+                        {
+                            "path": "/n.md",
+                            "frontmatter": {"title": "N", "type": "Note"},
+                            "body": "b",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, max_iterations=4)
+
+    result = await librarian.handle_store("knowledge")
+
+    # third complete() (after pass 2, remaining == 2) saw the nudge
+    third_call_messages = provider.calls[2][0]
+    nudges = [m for m in third_call_messages if m["role"] == "user" and "WRITE NOW" in m["content"]]
+    assert len(nudges) == 1
+    # the nudge did not break the run: the write still landed
+    assert result["stored"] == [{"id": "/n", "title": "N", "action": "created"}]
+
+
+async def test_write_nudge_not_sent_after_successful_write():
+    """Once a write landed, the watchdog stays silent even past the threshold."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/n.md",
+                            "frontmatter": {"title": "N", "type": "Note"},
+                            "body": "b",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(tool_calls=[tc("c2", "list_dir", {"path": "/"})]),
+            LLMResponse(tool_calls=[tc("c3", "list_dir", {"path": "/a"})]),
+            LLMResponse(text="Stored."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, max_iterations=4)
+
+    result = await librarian.handle_store("knowledge")
+
+    assert result["stored"]
+    for messages, _, _ in provider.calls:
+        assert all("WRITE NOW" not in (m.get("content") or "") for m in messages)
+
+
+async def test_write_nudge_never_fires_on_request_task():
+    """Retrieval runs (and the curator runs sharing the unflagged _run call)
+    never see the write nudge, even with zero writes past the threshold."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "list_dir", {"path": "/"})]),
+            LLMResponse(tool_calls=[tc("c2", "list_dir", {"path": "/a"})]),
+            LLMResponse(tool_calls=[tc("c3", "list_dir", {"path": "/b"})]),
+            LLMResponse(text="Found nothing relevant."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, max_iterations=4)
+
+    result = await librarian.handle_request("anything?")
+
+    assert result["answer"] == "Found nothing relevant."
+    for messages, _, _ in provider.calls:
+        assert all("WRITE NOW" not in (m.get("content") or "") for m in messages)
+
+
+async def test_write_nudge_fires_once_and_final_answer_flow_intact():
+    """The nudge fires at most once per run and the cap-exit FINAL_ANSWER
+    request still goes out with tools == [] as its last message."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            # first run: retrieval only, never writes (distinct paths — exact
+            # duplicate calls would be suppressed by the dedupe guard); the
+            # response after the last allowed pass still has tool calls, so
+            # the cap-exit final-answer request fires
+            LLMResponse(tool_calls=[tc("c1", "list_dir", {"path": "/"})]),
+            LLMResponse(tool_calls=[tc("c2", "list_dir", {"path": "/a"})]),
+            LLMResponse(tool_calls=[tc("c3", "list_dir", {"path": "/b"})]),
+            LLMResponse(tool_calls=[tc("c4", "list_dir", {"path": "/c"})]),
+            LLMResponse(tool_calls=[tc("c5", "list_dir", {"path": "/d"})]),
+            LLMResponse(text="I only read."),  # cap-exit final answer
+            LLMResponse(text="Still only reading."),  # F11 retry ends at once
+        ]
+    )
+    librarian = make_librarian(backend, provider, max_iterations=4)
+
+    with pytest.raises(LibrarianNoWriteError):
+        await librarian.handle_store("knowledge")
+
+    # first run: initial call + 4 tool rounds + cap-exit call = 6 calls
+    first_run_calls = provider.calls[:6]
+    final_call_messages = first_run_calls[-1][0]
+    nudges = [m for m in final_call_messages if m["role"] == "user" and "WRITE NOW" in m["content"]]
+    assert len(nudges) == 1  # fired once, never re-fired on passes 3/4
+    cap_exit_tools = first_run_calls[-1][1]
+    assert cap_exit_tools == []
+    assert final_call_messages[-1]["role"] == "user"
+    assert FINAL_ANSWER_REQUEST in final_call_messages[-1]["content"]
+
+
 class FailAfterProvider:
     """ScriptedProvider variant that raises once the script is exhausted."""
 

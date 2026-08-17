@@ -20,7 +20,9 @@ history (revert / append-only reset), which is always state-consistent.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
+import itertools
 import logging
 import posixpath
 import threading
@@ -46,6 +48,8 @@ from .frontmatter import write_bytes_atomic, write_text_atomic
 from .links import RESERVED_NAMES
 
 logger = logging.getLogger(__name__)
+
+_SUGGEST_CANDIDATE_LIMIT = 2000  # cap the candidate walk for typo suggestions
 
 # Per-root write locks shared by every LibraryBackend instance in this
 # process: several backends can target one library root (WebUI builds fresh
@@ -143,7 +147,9 @@ class LibraryBackend:
     def list_dir(self, path: str = "/") -> list[dict]:
         dir_path = self._resolve(path)
         if not dir_path.is_dir():
-            raise FileNotFoundError(f"not a directory: {path!r}")
+            raise FileNotFoundError(
+                f"not a directory: {path!r}{self._did_you_mean(path, directories=True)}"
+            )
         entries = []
         for child in sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name)):
             if child.name.startswith("."):
@@ -166,7 +172,9 @@ class LibraryBackend:
     def read_document(self, path: str) -> dict:
         abs_path = self._resolve(path)
         if not abs_path.is_file():
-            raise FileNotFoundError(f"no such document: {path!r}")
+            raise FileNotFoundError(
+                f"no such document: {path!r}{self._did_you_mean(path, directories=False)}"
+            )
         text = abs_path.read_text(encoding="utf-8")
         bundle = self._bundle_path(path)
         if posixpath.basename(bundle) in RESERVED_NAMES:
@@ -916,6 +924,26 @@ class LibraryBackend:
     def _bundle_path(path: str) -> str:
         normalized = str(path).replace("\\", "/")
         return normalized if normalized.startswith("/") else "/" + normalized
+
+    def _did_you_mean(self, path: str, *, directories: bool) -> str:
+        """Close-match suffix for a missing-path FileNotFoundError; "" when no match.
+
+        Candidates come from iter_concept_files (symlink-screened, root-relative),
+        so a suggestion can never point outside the library root.
+        """
+        candidates: set[str] = set()
+        walk = links_mod.iter_concept_files(self.root)
+        for bundle_path, _ in itertools.islice(walk, _SUGGEST_CANDIDATE_LIMIT):
+            if directories:
+                candidates.update(self._ancestor_dirs(bundle_path))
+            else:
+                candidates.add(bundle_path)
+        matches = difflib.get_close_matches(
+            self._bundle_path(path), sorted(candidates), n=3, cutoff=0.6
+        )
+        if not matches:
+            return ""
+        return f". Did you mean: {', '.join(repr(m) for m in matches)}?"
 
     def _guard_concept_path(self, path: str) -> Path:
         bundle = self._bundle_path(path)

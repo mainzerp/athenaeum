@@ -103,6 +103,15 @@ PARTIAL_SUMMARY = (
     "finish the task."
 )
 
+WRITE_NUDGE_REMAINING = 2  # mid-loop write nudge fires when this many iterations remain
+
+WRITE_NUDGE = (
+    f"WRITE NOW: only {WRITE_NUDGE_REMAINING} iterations remain and nothing has "
+    "been written yet. Stop searching and reading — call write_concept (or "
+    "edit_concept) immediately with the content you have already prepared. A "
+    "store that ends without a write is a failed store."
+)
+
 
 @dataclass
 class LibrarianConfig:
@@ -466,6 +475,7 @@ class Librarian:
         provider: LLMProvider | None = None,
         requested_by: str | None = None,
         via: str | None = None,
+        write_task: bool = False,
     ) -> _RunResult:
         """Hand-rolled tool-calling loop (plan section 3.4)."""
         llm_config = llm_config or self.config.llm
@@ -496,6 +506,7 @@ class Librarian:
         response = await provider.complete(messages, TOOL_SCHEMAS, llm_config)
         track_usage(response.usage)
         iterations = 0
+        write_nudge_sent = False
         while response.has_tool_calls and iterations < llm_config.max_iterations:
             iterations += 1
             # Per-hop budget marker prefixed to every tool message (never a
@@ -533,6 +544,17 @@ class Librarian:
                         "content": budget + content,
                     }
                 )
+            if (
+                write_task
+                and not write_nudge_sent
+                and not tracker.writes
+                and llm_config.max_iterations - iterations == WRITE_NUDGE_REMAINING
+            ):
+                # Store-watchdog: the model spent the budget on retrieval and has not
+                # written; one direct instruction lands better than another nudge later
+                # (F11/F13 history). Once per run; the F11 retry gets a fresh flag.
+                messages.append({"role": "user", "content": WRITE_NUDGE})
+                write_nudge_sent = True
             try:
                 response = await provider.complete(messages, TOOL_SCHEMAS, llm_config)
             except Exception as exc:
@@ -755,7 +777,9 @@ class Librarian:
         via: str | None = None,
     ) -> _RunResult:
         try:
-            return await self._run(task, agent_label, requested_by=requested_by, via=via)
+            return await self._run(
+                task, agent_label, requested_by=requested_by, via=via, write_task=True
+            )
         except _ProviderRunError as exc:
             logger.warning(
                 "provider failed mid-run; keeping %d landed write(s)", len(exc.tracker.writes)

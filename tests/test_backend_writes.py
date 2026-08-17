@@ -599,6 +599,49 @@ def test_search_and_browse_reads(tmp_path):
     assert backend.link_check() == []
 
 
+# --- did-you-mean suggestions on missing paths (LOOP_GUARDS_2) ----------------------
+
+
+def test_read_document_missing_suggests_close_match(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/athenaeum/x.md", {"type": "Note", "title": "X"}, "x\n")
+
+    with pytest.raises(FileNotFoundError) as exc:
+        backend.read_document("/athenaum/x.md")
+
+    assert "no such document: '/athenaum/x.md'" in str(exc.value)
+    assert "Did you mean: '/athenaeum/x.md'" in str(exc.value)
+
+
+def test_read_document_missing_without_match_keeps_plain_message(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/athenaeum/x.md", {"type": "Note", "title": "X"}, "x\n")
+
+    with pytest.raises(FileNotFoundError) as exc:
+        backend.read_document("/zzz/q.md")
+
+    assert str(exc.value) == "no such document: '/zzz/q.md'"  # no suffix
+
+
+def test_list_dir_missing_suggests_close_match(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/tables/customers.md", {"type": "Concept", "title": "C"}, "x\n")
+
+    with pytest.raises(FileNotFoundError) as exc:
+        backend.list_dir("/tabels")
+
+    assert "not a directory: '/tabels'" in str(exc.value)
+    assert "Did you mean: '/tables'" in str(exc.value)
+
+
+def test_missing_path_suggestions_never_fire_on_escape(tmp_path):
+    """The enrichment sits strictly behind the isolation screen: a traversal
+    attempt still raises PathEscapeError (a ValueError), never a suggestion."""
+    backend = make_backend(tmp_path)
+    with pytest.raises(ValueError, match="parent traversal"):
+        backend.read_document("/../outside.md")
+
+
 # --- per-file history + restore (DOC_TIMELINE, 0.22.0) ---------------------------
 
 
