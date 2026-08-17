@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.25.0**
+Current version: **0.25.1**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,12 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.25.1
+
+Sidebar version placement (`a174675`): the version badge moved from a stacked
+line above the user card into the footer row as its own column
+(avatar | user meta | version | theme toggle).
 
 ### 0.25.0
 
