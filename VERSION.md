@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.24.2**
+Current version: **0.25.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,17 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.25.0
+
+Per-step LLM timing in traces (`2092656`): each `provider.complete` wall time
+is recorded and attached as `llm_ms` to the first tool event of the hop
+(multi-tool responses do not double-count); the aggregate `llm_ms_total` rides
+in the trace's `llm` telemetry dict. The trace replay page shows a per-step
+`+ LLM x ms` span and a total badge; old traces without the fields render
+unchanged. Sidebar version display (`31077ce`): the WebUI sidebar footer now
+shows the running app version above the user card, so the deployed build is
+visible at a glance.
 
 ### 0.24.2
 
