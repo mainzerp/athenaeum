@@ -396,6 +396,14 @@
   zeigte erneut `unbacklinked`, `healthy: false`. Reparatur per
   `update_knowledge` mit expliziter `[text](/abs/pfad.md)`-Anweisung
   funktionierte sofort (`healthy: true`). Befund unveraendert.
+- **F22 fuenfte Bestaetigung (2026-08-17, LOOP_GUARDS-Lessons-Store):** Store
+  von `/athenaeum/lessons/agent-loop-guards-2026-08-17-lessons` mit relates_to
+  v0.23.0 — Summary behauptete den Backlink, `links_after` zeigte
+  `unbacklinked`, `healthy: false`. Reparatur per `update_knowledge` mit
+  expliziter `[text](/abs/pfad.md)`-Anweisung sofort `healthy: true`.
+  Zusaetzlich: der erste Store-Versuch (langer, mehrteiliger Content) endete
+  im F13-Muster (No-Write → ToolError); die gekuerzte Version ging sofort
+  durch — lange Stores weiterhin in kleinen Happen fahren.
 - **Deployment-Kontext (2026-08-04):** Die Kimi-MCP-Config
   (`~/.kimi-code/mcp.json`) zeigt auf `https://athenaeum.mzrsvr.net/mcp`
   (REMOTE, lief 0.20.0) — die Dogfooding-Library lebt dort, nicht im
