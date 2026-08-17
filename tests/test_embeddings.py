@@ -28,6 +28,7 @@ from athenaeum.embeddings import (
     concept_text,
     content_hash,
     cosine,
+    strip_link_targets,
 )
 from athenaeum.librarian.agent import Librarian, LibrarianConfig
 from athenaeum.librarian.embed import (
@@ -199,6 +200,58 @@ def test_concept_text_empty_fields_tolerated():
 def test_content_hash_stable():
     assert content_hash("abc") == hashlib.sha256(b"abc").hexdigest()
     assert content_hash("abc") != content_hash("abd")
+
+
+def test_strip_link_targets_link_free_byte_identical():
+    body = (
+        "plain prose, no links\n"
+        "\n"
+        "```\nsome code, no links\n```\n"
+        "\n"
+        "an inline `code span` and a `lonely backtick\n"
+    )
+    assert strip_link_targets(body) == body  # early out
+    assert strip_link_targets("just plain text") == "just plain text"
+
+
+def test_strip_link_targets_prose():
+    assert (
+        strip_link_targets("see the [caching strategy](/x/caching.md) note")
+        == "see the caching strategy note"
+    )
+    assert strip_link_targets('[t](/x.md "note")') == "t"
+
+
+def test_strip_link_targets_fenced_untouched():
+    fenced = "```\n[text](/x.md)\n```"
+    assert strip_link_targets(fenced) == fenced
+    assert strip_link_targets(fenced + "\nafter [strip me](/x.md)") == fenced + "\nafter strip me"
+    tilde = "~~~\n[text](/x.md)\n~~~"
+    assert strip_link_targets(tilde) == tilde
+
+
+def test_strip_link_targets_code_span_untouched():
+    body = "before [strip](/x.md) `[kept](/y.md)` after"
+    assert strip_link_targets(body) == "before strip `[kept](/y.md)` after"
+
+
+def test_strip_link_targets_images_untouched():
+    body = "![alt](/assets/x.png) and [text](/x.md)"
+    assert strip_link_targets(body) == "![alt](/assets/x.png) and text"
+
+
+def test_strip_link_targets_empty_anchor():
+    assert strip_link_targets("[](/x.md)") == ""
+
+
+def test_strip_link_targets_reference_style_untouched():
+    # reference-style links and bare URLs are out of scope by design
+    body = "[t][ref] and a bare https://example.com url"
+    assert strip_link_targets(body) == body
+
+
+def test_concept_text_strips_body_links():
+    assert concept_text({"title": "T"}, "see [x](/a/b.md)") == "T\n\n\nsee x"
 
 
 # --- math ----------------------------------------------------------------------

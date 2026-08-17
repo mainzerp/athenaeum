@@ -39,6 +39,8 @@ from athenaeum.librarian.embed import (
     EmbeddingConfig,
     EmbeddingProvider,
 )
+from athenaeum.library import escape_guard as escape_guard_mod
+from athenaeum.library.links import LINK_RE
 
 if TYPE_CHECKING:
     from athenaeum.library.backend import LibraryBackend
@@ -52,11 +54,44 @@ RECONCILE_BATCH = 32
 RECONCILE_CLAIM_TTL = 3600.0  # seconds
 
 
+def strip_link_targets(body: str) -> str:
+    """Reduce inline markdown links to their anchor text for indexing.
+
+    ``[text](url)`` (including the optional ``"title"``) becomes ``text``, so
+    link URLs do not pollute embedding vectors or the FTS index. Fence- and
+    code-span aware via ``escape_guard``: links inside fenced code blocks or
+    inline code spans pass through byte-identical. Images (``![alt](src)``)
+    are untouched — ``LINK_RE``'s ``(?<!!)`` lookbehind excludes them, shared
+    with graph extraction. A link-free body round-trips byte-identical (early
+    out). Out of scope by design (untouched): reference-style links
+    (``[t][ref]``), autolinks (``<https://...>``), and bare URLs — ``LINK_RE``
+    is the shared inline-link contract, and a second regex would drift.
+    """
+    if not LINK_RE.search(body):
+        return body
+    parts: list[str] = []
+    for is_fenced, text in escape_guard_mod._split_fence_segments(body):
+        if is_fenced:
+            parts.append(text)
+            continue
+        pos = 0
+        for start, end in escape_guard_mod._iter_code_spans(text):
+            parts.append(LINK_RE.sub(lambda m: m.group(1), text[pos:start]))
+            parts.append(text[start:end])
+            pos = end
+        parts.append(LINK_RE.sub(lambda m: m.group(1), text[pos:]))
+    return "".join(parts)
+
+
 def concept_text(frontmatter: dict, body: str) -> str:
-    """Canonical embedded text: title + description + body (empty-tolerant)."""
+    """Canonical embedded text: title + description + body (empty-tolerant).
+
+    The body is link-stripped (``strip_link_targets``): inline markdown links
+    contribute their anchor text only, outside code fences/spans.
+    """
     title = frontmatter.get("title") or ""
     description = frontmatter.get("description") or ""
-    return f"{title}\n{description}\n\n{body}"
+    return f"{title}\n{description}\n\n{strip_link_targets(body)}"
 
 
 def content_hash(text: str) -> str:

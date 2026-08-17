@@ -20,6 +20,7 @@ from athenaeum.fts import FtsIndex
 from athenaeum.librarian.embed import KIND_DOCUMENT, EmbeddingConfig
 from athenaeum.library.backend import LibraryBackend
 from athenaeum.library.hybrid import (
+    HYBRID_FTS_TABLE,
     HYBRID_QUERY_TOKEN_CAP,
     HYBRID_RERANK_CANDIDATES,
     HYBRID_RERANK_MODEL,
@@ -326,6 +327,34 @@ def test_fts_reconcile_skips_hash_clean_rows(tmp_path):
 
     assert [p for p, _ in fts.search("sentinel", 10)] == ["a.md"]  # untouched
     assert fts.search("stable", 10) == []
+
+
+@requires_fts5
+async def test_fts_and_embeddings_store_identical_link_stripped_text(tmp_path):
+    """Lockstep pin: both legs index the same link-stripped concept_text."""
+    db_path = make_db(tmp_path)
+    root = tmp_path / "lib"
+    root.mkdir()
+    backend = make_backend(root)
+    body = "see the [caching strategy](/athenaeum/lessons/caching.md) note"
+    write_concept(root, "a.md", "Alpha", body)
+    fts = FtsIndex(db_path, "user-1")
+    service = make_service(db_path, fts=fts)
+
+    await service.sync_writes(backend, [{"id": "/a", "action": "created"}])
+
+    doc = backend.read_document("a.md")
+    expected = concept_text(doc["frontmatter"], doc["body"])
+    assert "/athenaeum/lessons/caching.md" not in expected  # link stripped
+    assert "caching strategy" in expected  # anchor text kept
+    stored = service.load()
+    assert stored["a.md"]["content_hash"] == content_hash(expected)
+    with closing(db.connect(db_path)) as conn:
+        row = conn.execute(
+            f"SELECT text FROM {HYBRID_FTS_TABLE}"
+            " WHERE user_id = 'user-1' AND concept_path = 'a.md'"
+        ).fetchone()
+    assert row["text"] == expected
 
 
 @requires_fts5

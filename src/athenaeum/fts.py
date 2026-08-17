@@ -4,8 +4,8 @@ Sibling of ``embeddings.py``: one ``FtsIndex`` per user, sync sqlite3
 short-lived connections via ``db.connect``, and a NEVER-RAISE contract on the
 two lifecycle methods (``sync_writes``/``reconcile``). Keys and text are
 identical to the embeddings table — canonical ``concept_path`` (``x.md``, no
-leading slash), ``concept_text`` output, SHA-256 content hash — so the two
-indexes drift and reconcile in lockstep.
+leading slash), ``concept_text`` output (link-stripped), SHA-256 content
+hash — so the two indexes drift and reconcile in lockstep.
 
 The index rides the embedding service's flows: ``EmbeddingService`` drives
 ``sync_writes`` after librarian writes and ``reconcile`` inside its existing
