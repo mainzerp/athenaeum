@@ -16,6 +16,7 @@
   <span class="badge badge-info">{{ trace["llm"]["provider"] }} / {{ trace["llm"]["model"] }}</span>
   <span class="badge badge-neutral">{{ trace["llm"]["iterations"] }} iteration(s)</span>
   <span class="badge badge-neutral">{{ trace["llm"]["total_tokens"] }} tokens</span>
+  {% if trace["llm"]["llm_ms_total"] is defined %}<span class="badge badge-neutral">LLM {{ "%.0f ms" | format(trace["llm"]["llm_ms_total"]) }}</span>{% endif %}
 </div>
 {% endif %}
 <div class="badges mb-4">
@@ -41,6 +42,7 @@
       <li data-seq="{{ e['seq'] }}">
         <strong>#{{ e["seq"] }} {{ e["tool"] }}</strong>
         <span class="muted">{{ "%.1f ms" | format(e["duration_ms"]) }}</span>
+        {% if e["llm_ms"] is defined %}<span class="muted">+ LLM {{ "%.1f ms" | format(e["llm_ms"]) }}</span>{% endif %}
         {% if e["error"] %}<span class="badge badge-danger">{{ e["error"] }}</span>{% endif %}
         <pre class="log">{{ e["args"] | tojson }} -&gt; {{ e["result"] | tojson }}</pre>
       </li>

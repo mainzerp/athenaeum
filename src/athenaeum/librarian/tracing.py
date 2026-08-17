@@ -226,6 +226,13 @@ class TraceSession:
         self._error: str | None = None
         self._ended_at: datetime | None = None
         self._closed = False
+        self._pending_llm_ms: float | None = None
+
+    def set_pending_llm_ms(self, llm_ms: float) -> None:
+        """Queue the wall time of the LLM call whose response triggered the
+        next tool event(s); ``record`` attaches it to the FIRST event only,
+        so per-trace sums never double-count a multi-tool-call response."""
+        self._pending_llm_ms = llm_ms
 
     def record(
         self,
@@ -243,17 +250,19 @@ class TraceSession:
             error_text = _truncate(f"{type(error).__name__}: {error}", MAX_ERR)
         else:
             error_text = _truncate(str(error), MAX_ERR)
-        self._events.append(
-            {
-                "seq": len(self._events) + 1,
-                "ts": datetime.now(UTC).isoformat(),
-                "tool": name,
-                "args": _summarize_value(args),
-                "duration_ms": duration_ms,
-                "result": None if error is not None else _shape_result(name, args, result),
-                "error": error_text,
-            }
-        )
+        event = {
+            "seq": len(self._events) + 1,
+            "ts": datetime.now(UTC).isoformat(),
+            "tool": name,
+            "args": _summarize_value(args),
+            "duration_ms": duration_ms,
+            "result": None if error is not None else _shape_result(name, args, result),
+            "error": error_text,
+        }
+        if self._pending_llm_ms is not None:
+            event["llm_ms"] = self._pending_llm_ms
+            self._pending_llm_ms = None
+        self._events.append(event)
 
     def finish(self, outcome: str, error: str | None = None) -> None:
         """Mark the request's outcome; called once by the MCP handler layer."""

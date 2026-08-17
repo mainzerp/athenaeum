@@ -195,6 +195,21 @@ def test_session_writes_trace_file(tmp_path):
     assert event["duration_ms"] == 0.4
 
 
+def test_session_records_pending_llm_ms(tmp_path):
+    """The pending LLM wall time attaches to the FIRST following event only,
+    so per-trace sums never double-count a multi-tool-call response."""
+    session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "request_knowledge", None)
+    session.set_pending_llm_ms(12.5)
+    session.record("list_dir", {"path": "/"}, [], None, 0.4)
+    session.record("list_dir", {"path": "/concepts"}, [], None, 0.2)
+    session.finish("ok")
+    trace_id = session.close()
+
+    first, second = read_trace(tmp_path, trace_id)["events"]
+    assert first["llm_ms"] == 12.5
+    assert "llm_ms" not in second
+
+
 def test_session_no_events_no_llm_writes_nothing(tmp_path):
     session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "library_maintain", None)
     session.finish("ok")

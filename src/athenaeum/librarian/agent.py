@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from athenaeum import __version__
 from athenaeum.librarian.embed import EmbeddingConfig
 from athenaeum.librarian.gate import AgentRunBusyError, RunGate
-from athenaeum.librarian.llm import LLMConfig, LLMProvider, create_provider
+from athenaeum.librarian.llm import LLMConfig, LLMProvider, LLMResponse, create_provider
 from athenaeum.librarian.prompts import (
     build_curate_preamble,
     build_maintain_preamble,
@@ -499,12 +499,27 @@ class Librarian:
                 for key in totals:
                     totals[key] += int(usage.get(key) or 0)
 
+        llm_ms_total = 0.0
+
+        async def complete_timed(messages: list[dict], tools: list[dict]) -> LLMResponse:
+            """provider.complete with wall-time accounting: per-step attribution
+            via the trace session's pending slot + a run total for telemetry."""
+            nonlocal llm_ms_total
+            start = time.perf_counter()
+            response = await provider.complete(messages, tools, llm_config)
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            llm_ms_total += elapsed_ms
+            session = _trace_var.get()
+            if session is not None:
+                session.set_pending_llm_ms(elapsed_ms)
+            track_usage(response.usage)
+            return response
+
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": task_prompt},
         ]
-        response = await provider.complete(messages, TOOL_SCHEMAS, llm_config)
-        track_usage(response.usage)
+        response = await complete_timed(messages, TOOL_SCHEMAS)
         iterations = 0
         write_nudge_sent = False
         while response.has_tool_calls and iterations < llm_config.max_iterations:
@@ -556,18 +571,16 @@ class Librarian:
                 messages.append({"role": "user", "content": WRITE_NUDGE})
                 write_nudge_sent = True
             try:
-                response = await provider.complete(messages, TOOL_SCHEMAS, llm_config)
+                response = await complete_timed(messages, TOOL_SCHEMAS)
             except Exception as exc:
                 raise self._provider_failure(exc, tracker, iterations) from exc
-            track_usage(response.usage)
         if response.has_tool_calls:
             # Cap exhausted: final-answer request with no tools.
             messages.append({"role": "user", "content": FINAL_ANSWER_REQUEST})
             try:
-                response = await provider.complete(messages, [], llm_config)
+                response = await complete_timed(messages, [])
             except Exception as exc:
                 raise self._provider_failure(exc, tracker, iterations) from exc
-            track_usage(response.usage)
         if telemetry is not None:
             # Accumulate, never overwrite: the F11 nudge retry runs _run twice
             # in one request, and the retry's numbers must ADD to the first
@@ -581,6 +594,7 @@ class Librarian:
             merged["iterations"] = merged.get("iterations", 0) + iterations
             for key, value in totals.items():
                 merged[key] = merged.get(key, 0) + value
+            merged["llm_ms_total"] = merged.get("llm_ms_total", 0.0) + llm_ms_total
             telemetry.llm = merged
         return _RunResult(
             text=response.text or "",

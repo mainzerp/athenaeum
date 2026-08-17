@@ -2059,6 +2059,68 @@ async def test_trace_records_failed_tool_call(tmp_path):
     assert "KeyError" in tool_message["content"]
 
 
+async def test_trace_records_per_step_llm_ms(tmp_path):
+    """Each tool event that follows a completion carries that completion's
+    wall time; the telemetry total also covers the final-answer completion."""
+    backend = FakeBackend(docs={"/alpha.md": dict(DOC, body="about alpha")})
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "list_dir", {"path": "/"})]),
+            LLMResponse(tool_calls=[tc("c2", "read_document", {"path": "/alpha.md"})]),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    session = TraceSession(tmp_path, "20260728T000000Z-trace006", "request_knowledge", None)
+    telemetry = RequestTelemetry(trace_id="20260728T000000Z-trace006")
+    trace_token = _trace_var.set(session)
+    telemetry_token = _telemetry_var.set(telemetry)
+    try:
+        await librarian.handle_request("what is alpha?")
+    finally:
+        _trace_var.reset(trace_token)
+        _telemetry_var.reset(telemetry_token)
+    session.finish("ok")
+    trace_id = session.close()
+
+    first, second = read_trace(tmp_path, trace_id)["events"]
+    assert first["llm_ms"] >= 0
+    assert second["llm_ms"] >= 0
+    # the total also covers the final-answer completion, which has no
+    # following tool event (ScriptedProvider timing is real wall time)
+    assert telemetry.llm["llm_ms_total"] >= first["llm_ms"] + second["llm_ms"]
+
+
+async def test_trace_llm_ms_attaches_to_first_event_of_batch_only(tmp_path):
+    """One LLM response can carry multiple tool calls: its wall time lands on
+    the FIRST resulting event only, so sums over events never double-count."""
+    backend = FakeBackend(docs={"/alpha.md": dict(DOC, body="about alpha")})
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc("c1", "list_dir", {"path": "/"}),
+                    tc("c2", "read_document", {"path": "/alpha.md"}),
+                ]
+            ),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    session = TraceSession(tmp_path, "20260728T000000Z-trace007", "request_knowledge", None)
+    token = _trace_var.set(session)
+    try:
+        await librarian.handle_request("what is alpha?")
+    finally:
+        _trace_var.reset(token)
+    session.finish("ok")
+    trace_id = session.close()
+
+    first, second = read_trace(tmp_path, trace_id)["events"]
+    assert first["llm_ms"] >= 0
+    assert "llm_ms" not in second
+
+
 async def test_telemetry_collects_usage_across_completions_including_cap_path():
     def usage(prompt, completion):
         return {
@@ -2087,6 +2149,8 @@ async def test_telemetry_collects_usage_across_completions_including_cap_path():
     assert len(provider.calls) == 3
     assert telemetry.iterations == 1
     assert len(telemetry.llm_calls) == 3
+    llm_ms_total = telemetry.llm.pop("llm_ms_total")
+    assert llm_ms_total >= 0
     assert telemetry.llm == {
         "provider": "openai",
         "model": "m",
@@ -2110,6 +2174,8 @@ async def test_telemetry_without_reported_usage():
 
     assert telemetry.iterations == 0
     assert len(telemetry.llm_calls) == 1
+    llm_ms_total = telemetry.llm.pop("llm_ms_total")
+    assert llm_ms_total >= 0
     assert telemetry.llm == {
         "provider": "openai",
         "model": "m",
@@ -2167,6 +2233,8 @@ async def test_f11_nudge_retry_telemetry_accumulates_across_runs():
     assert len(provider.calls) == 4  # two completions per run
     assert telemetry.iterations == 2  # 1 + 1, summed across both runs
     assert len(telemetry.llm_calls) == 4
+    llm_ms_total = telemetry.llm.pop("llm_ms_total")
+    assert llm_ms_total >= 0  # accumulated across both runs, never overwritten
     assert telemetry.llm == {
         "provider": "openai",
         "model": "m",

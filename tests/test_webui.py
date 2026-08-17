@@ -2004,6 +2004,30 @@ def test_trace_replay_page_and_api(env):
     assert [event["tool"] for event in data["events"]] == ["read_document", "list_dir"]
 
 
+def test_trace_replay_page_shows_llm_timing(env):
+    """New-shape traces render per-step LLM time and the total badge; the
+    old-shape test above (no llm_ms fields) is the backward-compat pin."""
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    trace = make_trace(data_root, user["id"])
+    trace["llm"]["llm_ms_total"] = 6300.0
+    trace["events"][0]["llm_ms"] = 6123.4
+    store = Path(data_root) / "users" / user["id"] / "library" / ".traces"
+    (store / f"{trace['trace_id']}.json").write_text(json.dumps(trace), encoding="utf-8")
+    login(client, "alice", "pw")
+
+    response = client.get("/library/traces/20260728T180036Z-a1b2c3d4")
+    assert response.status_code == 200
+    assert "+ LLM 6123.4 ms" in response.text  # per-step span on the first event
+    assert "LLM 6300 ms" in response.text  # aggregate badge
+
+    response = client.get("/api/traces/20260728T180036Z-a1b2c3d4")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["llm"]["llm_ms_total"] == 6300.0
+    assert data["events"][0]["llm_ms"] == 6123.4
+
+
 def test_traces_missing_and_invalid_id_404(env):
     client, _, data_root = env
     make_user(data_root, "alice", "pw")
