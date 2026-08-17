@@ -85,6 +85,9 @@ def _csrf_input(request: Request) -> Markup:
 
 templates.env.globals["csrf_token"] = csrf_token
 templates.env.globals["csrf_input"] = _csrf_input
+# Sidebar footer shows the running version so the deployed build is visible
+# at a glance (see base.html).
+templates.env.globals["app_version"] = __version__
 
 # DB paths whose schema has already been ensured in this process.
 _initialized_dbs: set[str] = set()

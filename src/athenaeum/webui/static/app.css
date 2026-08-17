@@ -300,6 +300,7 @@ body.sidebar-open .sidebar { transform: translateX(0); }
   padding: 14px 20px;
   border-top: 1px solid var(--clr-border);
 }
+.sidebar-version { font-size: 12px; color: var(--clr-text-muted); margin-bottom: 10px; }
 .sidebar-user { display: flex; align-items: center; gap: 12px; }
 .sidebar-avatar {
   width: 32px;

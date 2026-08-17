@@ -16,8 +16,8 @@ import pytest
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
+from athenaeum import __version__, security
 from athenaeum import db as db_module
-from athenaeum import security
 from athenaeum.config import get_settings
 from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST
 from athenaeum.librarian.gate import RunGate
@@ -1338,6 +1338,17 @@ def test_tree_document_log_pages(env):
     response = client.get("/library/log/content")
     assert response.status_code == 200
     assert "Initialization" in response.text
+
+
+def test_sidebar_shows_app_version(env):
+    """The sidebar footer pins the running version above the user card."""
+    client, _, data_root = env
+    make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+
+    response = client.get("/library/tree")
+    assert response.status_code == 200
+    assert f'<div class="sidebar-version">v{__version__}</div>' in response.text
 
 
 # --- document view: per-document timeline, inline diff, restore -----------------
