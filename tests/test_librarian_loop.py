@@ -91,6 +91,19 @@ class FakeBackend:
             for path, doc in self.docs.items()
         ]
 
+    async def search_semantic(self, query, limit=8) -> list[dict]:
+        self.calls.append(("search_semantic", query, limit))
+        return [
+            {
+                "id": "/alpha",
+                "path": "/alpha.md",
+                "title": "Alpha",
+                "type": "Note",
+                "description": "about alpha",
+                "score": 0.9,
+            }
+        ]
+
     def create_concept(
         self,
         path,
@@ -1326,6 +1339,178 @@ async def test_missing_required_arg_is_recoverable_tool_error():
     ]
     assert tool_results
     assert "missing required argument(s): body" in tool_results[0]["content"]
+
+
+async def test_exact_duplicate_search_never_reaches_backend():
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc("c1", "search_metadata", {"field": "type", "value": "note"}),
+                    tc("c2", "search_metadata", {"field": "type", "value": "note"}),
+                ]
+            ),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    await librarian.handle_request("q")
+
+    assert backend.calls.count(("search_metadata", "type", "note")) == 1
+    tool_messages = [m for m in provider.calls[1][0] if m["role"] == "tool"]
+    assert len(tool_messages) == 2  # every tool_call gets a tool message
+    assert "deduplicated" in tool_messages[1]["content"]
+    assert "work from the earlier result" in tool_messages[1]["content"]
+
+
+async def test_fuzzy_near_duplicate_semantic_blocked():
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "search_semantic",
+                        {"query": "how does the librarian store knowledge"},
+                    ),
+                    tc(
+                        "c2",
+                        "search_semantic",
+                        {"query": "how does the librarian store new knowledge"},
+                    ),
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    tc("c3", "search_semantic", {"query": "curator verification schedule"}),
+                ]
+            ),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    await librarian.handle_request("q")
+
+    # token Jaccard 6/7 >= 0.8 blocks the second query; the genuinely
+    # different control query still reaches the backend
+    semantic_calls = [c for c in backend.calls if c[0] == "search_semantic"]
+    assert semantic_calls == [
+        ("search_semantic", "how does the librarian store knowledge", 8),
+        ("search_semantic", "curator verification schedule", 8),
+    ]
+    near_notice = [m for m in provider.calls[1][0] if m["role"] == "tool"][1]
+    assert "deduplicated" in near_notice["content"]
+    assert "near-identical" in near_notice["content"]
+
+
+async def test_reread_blocked():
+    backend = FakeBackend(docs={"/alpha.md": dict(DOC, body="about alpha")})
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc("c1", "read_document", {"path": "/alpha.md"}),
+                    tc("c2", "read_document", {"path": "/alpha.md"}),
+                ]
+            ),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    await librarian.handle_request("q")
+
+    # one loop dispatch + the deterministic post-processing re-read in
+    # _concept_entries; the duplicate LLM call never reached the backend
+    assert backend.calls.count(("read_document", "/alpha.md")) == 2
+    tool_messages = [m for m in provider.calls[1][0] if m["role"] == "tool"]
+    assert len(tool_messages) == 2
+    assert "deduplicated" in tool_messages[1]["content"]
+
+
+async def test_suppressed_duplicate_visible_in_trace(tmp_path):
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc("c1", "search_metadata", {"field": "type", "value": "note"}),
+                    tc("c2", "search_metadata", {"field": "type", "value": "note"}),
+                ]
+            ),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+    session = TraceSession(tmp_path, "20260817T000000Z-dedupe01", "request_knowledge", "agent-x")
+    token = _trace_var.set(session)
+    try:
+        await librarian.handle_request("q", agent_label="agent-x")
+    finally:
+        _trace_var.reset(token)
+    session.finish("ok")
+    trace_id = session.close()
+
+    data = read_trace(tmp_path, trace_id)
+    events = [e for e in data["events"] if e["tool"] == "search_metadata"]
+    assert len(events) == 2  # the suppressed duplicate stays visible in the trace
+    assert events[1]["result"]["deduplicated"] is True
+    assert "work from the earlier result" in events[1]["result"]["error"]
+
+
+async def test_budget_marker_in_tool_results():
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "list_dir", {"path": "/"})]),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider, max_iterations=3)
+
+    await librarian.handle_request("q")
+
+    tool_message = [m for m in provider.calls[1][0] if m["role"] == "tool"][0]
+    assert tool_message["content"].startswith("[budget: 2 iterations remaining] ")
+    json.loads(tool_message["content"].split("] ", 1)[1])  # JSON payload follows the prefix
+
+
+async def test_failed_call_retry_not_blocked():
+    class FlakySearchBackend(FakeBackend):
+        fail_search = True
+
+        def search_metadata(self, field=None, value=None):
+            if self.fail_search:
+                self.calls.append(("search_metadata", field, value))
+                self.fail_search = False
+                raise ValueError("backend exploded")
+            return super().search_metadata(field=field, value=value)
+
+    backend = FlakySearchBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[tc("c1", "search_metadata", {"field": "type", "value": "note"})]
+            ),
+            LLMResponse(
+                tool_calls=[tc("c2", "search_metadata", {"field": "type", "value": "note"})]
+            ),
+            LLMResponse(text="done"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    await librarian.handle_request("q")
+
+    # only successful dispatches enter the dedupe state, so the retry after
+    # the error reaches the backend and returns a real result
+    assert backend.calls.count(("search_metadata", "type", "note")) == 2
+    tool_messages = [m for m in provider.calls[2][0] if m["role"] == "tool"]
+    assert "deduplicated" not in tool_messages[-1]["content"]
 
 
 async def test_trust_tiers_and_staleness_in_concept_entries():

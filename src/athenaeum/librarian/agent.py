@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -130,10 +131,17 @@ class LibrarianConfig:
 
 @dataclass
 class _Tracker:
-    """Backend interactions observed during one agent run."""
+    """Backend interactions observed during one agent run.
+
+    Also carries the per-run dedupe state (``seen_calls``/``seen_queries``)
+    for the duplicate-call guard in ``_dispatch_tracked``; a fresh tracker is
+    minted per ``_run``, so the state resets on the F11 no-write nudge retry.
+    """
 
     read_paths: list[str] = field(default_factory=list)
     writes: list[dict] = field(default_factory=list)  # {"id", "action"}
+    seen_calls: set[tuple[str, str]] = field(default_factory=set)  # exact dedupe keys
+    seen_queries: list[frozenset[str]] = field(default_factory=list)  # search_semantic tokens
 
 
 @dataclass
@@ -146,6 +154,42 @@ class _RunResult:
 
 
 TOOL_RESULT_CHAR_LIMIT = 12_000  # per-tool-result cap fed back to the model (A11)
+
+# TUNABLE: token-set Jaccard similarity at which a search_semantic query counts
+# as a near-duplicate of an earlier successful query in the same run.
+SEMANTIC_QUERY_SIMILARITY_THRESHOLD = 0.8
+
+# Retrieval tools the duplicate-call guard applies to. run_computation (fresh
+# verified figures are its contract), link_check (a whole-library re-check
+# after a repair is legitimate), and all WRITE_ACTIONS are never deduped.
+_DEDUPE_TOOLS = frozenset({"list_dir", "read_document", "search_metadata", "search_semantic"})
+
+
+def _dedupe_key(name: str, args: dict) -> tuple[str, str]:
+    """Exact dedupe key for a tool call: name + canonical JSON of its args."""
+    return (name, json.dumps(args, sort_keys=True, default=str))
+
+
+def _query_tokens(query: str) -> frozenset[str]:
+    """Token set of a semantic query for fuzzy duplicate detection."""
+    return frozenset(re.findall(r"[a-z0-9]+", query.lower()))
+
+
+def _duplicate_result(name: str, *, near: bool) -> dict:
+    """Synthetic result for a suppressed duplicate tool call.
+
+    Returned (not raised) so the loop's success path serializes it into the
+    tool message like any other result; the "error" key matches the
+    recoverable-error envelope the model already knows.
+    """
+    earlier = "a near-identical search_semantic call" if near else "an identical call"
+    return {
+        "deduplicated": True,
+        "error": (
+            f"duplicate {name} call suppressed: {earlier} already ran "
+            "successfully in this run — work from the earlier result instead of re-calling"
+        ),
+    }
 
 
 def _truncate_tool_result(content: str) -> str:
@@ -339,6 +383,26 @@ class Librarian:
         requested_by: str | None = None,
         via: str | None = None,
     ) -> Any:
+        if name in _DEDUPE_TOOLS:
+            key = _dedupe_key(name, args)
+            duplicate = key in tracker.seen_calls
+            near = False
+            if not duplicate and name == "search_semantic":
+                tokens = _query_tokens(str(args.get("query", "")))
+                near = any(
+                    tokens
+                    and len(tokens & seen) / len(tokens | seen)
+                    >= SEMANTIC_QUERY_SIMILARITY_THRESHOLD
+                    for seen in tracker.seen_queries
+                )
+            if duplicate or near:
+                result = _duplicate_result(name, near=near)
+                session = _trace_var.get()
+                if session is not None:
+                    # Record the suppressed duplicate so traces stay faithful
+                    # to what the model actually asked for.
+                    session.record(name, args, result, None, 0.0)
+                return result
         session = _trace_var.get()
         if session is None:
             result = await dispatch(
@@ -368,6 +432,14 @@ class Librarian:
                 session.record(name, args, None, exc, (time.perf_counter() - start) * 1000)
                 raise
             session.record(name, args, result, None, (time.perf_counter() - start) * 1000)
+        if name in _DEDUPE_TOOLS:
+            # Only successful dispatches are recorded, so a failed call may be
+            # retried. Writes do NOT invalidate dedupe state: the model
+            # authored the change itself, so re-reading a path it just wrote
+            # carries no new information and stays suppressed.
+            tracker.seen_calls.add(_dedupe_key(name, args))
+            if name == "search_semantic":
+                tracker.seen_queries.append(_query_tokens(str(args.get("query", ""))))
         if name == "read_document":
             tracker.read_paths.append(args["path"])
         if name in WRITE_ACTIONS and isinstance(result, dict) and "id" in result:
@@ -426,6 +498,10 @@ class Librarian:
         iterations = 0
         while response.has_tool_calls and iterations < llm_config.max_iterations:
             iterations += 1
+            # Per-hop budget marker prefixed to every tool message (never a
+            # suffix: _truncate_tool_result cannot cut a prefix). Wording says
+            # "iterations" — one iteration = one assistant response.
+            budget = f"[budget: {llm_config.max_iterations - iterations} iterations remaining] "
             messages.append(
                 {
                     "role": "assistant",
@@ -454,7 +530,7 @@ class Librarian:
                         "role": "tool",
                         "tool_call_id": call.id,
                         "name": call.name,
-                        "content": content,
+                        "content": budget + content,
                     }
                 )
             try:

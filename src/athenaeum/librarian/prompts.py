@@ -13,6 +13,8 @@ are contractual (semantics fixed, wording may be refined):
 - ANSWER HYGIENE
 - RETRIEVAL: one search_semantic per distinct information need
 - PLACEMENT: NAME THE SUBJECT FIRST before extending or minting a topic area
+- DUPLICATE CALLS ARE REJECTED (deduplicated notice; work from the earlier result)
+- BUDGET MARKER: [budget: N iterations remaining] on every tool result
 """
 
 from __future__ import annotations
@@ -94,7 +96,12 @@ restructure concepts. State coverage gaps plainly.
 - NEVER RE-READ within a task: do not read a document you have already read \
 or repeat a search you already ran. Your earlier tool results stay \
 available — work from them. Redundant calls burn your limited iterations \
-and can crowd out the actual write.
+and can crowd out the actual write. DUPLICATE CALLS ARE REJECTED \
+mechanically and return a deduplicated notice — work from the earlier \
+result instead of re-calling.
+- Every tool result is prefixed with a `[budget: N iterations remaining]` \
+marker: treat N as your hard remaining tool-round budget and converge \
+before it runs out.
 
 ## Write discipline
 

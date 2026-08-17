@@ -32,6 +32,12 @@ def test_default_prompt_pins_semantic_requery_discipline():
     assert "per distinct information need" in DEFAULT_SYSTEM_PROMPT
 
 
+def test_default_prompt_pins_duplicate_rejection_and_budget_marker():
+    assert "DUPLICATE CALLS ARE REJECTED" in DEFAULT_SYSTEM_PROMPT
+    assert "deduplicated" in DEFAULT_SYSTEM_PROMPT
+    assert "[budget: N iterations remaining]" in DEFAULT_SYSTEM_PROMPT
+
+
 def test_default_prompt_pins_deprecated_citation_hygiene():
     """Deprecated concepts are pending removal: never cited, never enriched."""
     assert "Deprecated concepts are pending removal" in DEFAULT_SYSTEM_PROMPT
