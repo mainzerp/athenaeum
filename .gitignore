@@ -22,6 +22,7 @@ venv/
 
 # Local secrets / env files
 .env
+.secrets/
 
 # SubAgent working files (ephemeral, see AGENTS.md)
 docs/SubAgent/
