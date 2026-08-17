@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.24.1**
+Current version: **0.24.2**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,19 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.24.2
+
+Store-watchdog and path suggestions (`d25c354`), from live-trace analysis of a
+store run that burned all iterations on duplicate searches and path typos
+without ever writing: write tasks (`store_knowledge`/`update_knowledge`) now
+get a one-time imperative user-message nudge to write immediately when only 2
+iterations remain and no write has landed yet (retrieval/curator paths never
+nudge; the cap-exit final-answer flow is unchanged). `read_document` and
+`list_dir` FileNotFoundError messages now include `difflib` close-match
+suggestions from the symlink-screened library tree (bounded at 2000
+candidates; plain messages stay byte-identical when nothing matches; path
+escapes still raise without suggestions).
 
 ### 0.24.1
 
