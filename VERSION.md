@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.24.0**
+Current version: **0.24.1**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,24 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.24.1
+
+Librarian agent-loop guards (`0bb969f`): deterministic dedupe of repeated
+retrieval calls in `_dispatch_tracked` — exact match on (tool, args) for
+`list_dir`/`read_document`/`search_metadata`/`search_semantic` plus fuzzy
+token-Jaccard (>= 0.8, TUNABLE `SEMANTIC_QUERY_SIMILARITY_THRESHOLD`) on
+`search_semantic.query`. Suppressed duplicates return a recoverable
+`{"deduplicated": true, ...}` result and stay trace-visible via their own
+trace event; failed calls may retry, writes/`link_check`/`run_computation`
+are never deduped. Every tool message now carries a
+`[budget: N iterations remaining]` prefix so the model can pace itself before
+the `max_iterations` cap. Prompt contract extended ("DUPLICATE CALLS ARE
+REJECTED" + budget marker bullet, pinned in `tests/test_prompts.py`).
+Motivation: live traces showed `request_knowledge` always burning all 10
+iterations (~83-96k tokens) on rephrased searches and re-reads. Also adds
+live-instance debug fetch tooling (`scripts/athenaeum_debug.py`,
+`5a9516e`).
 
 ### 0.24.0
 
