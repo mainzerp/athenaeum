@@ -15,6 +15,7 @@ are contractual (semantics fixed, wording may be refined):
 - PLACEMENT: NAME THE SUBJECT FIRST before extending or minting a topic area
 - DUPLICATE CALLS ARE REJECTED (deduplicated notice; work from the earlier result)
 - BUDGET MARKER: [budget: N iterations remaining] on every tool result
+- BUNDLE INDEPENDENT CALLS: one response counts as one iteration; batch independent calls
 
 The prompt is composed from section constants (``_ROLE_SECTION`` etc.) whose
 concatenation is byte-identical to the historical single literal; the curator
@@ -111,6 +112,11 @@ result instead of re-calling.
 - Every tool result is prefixed with a `[budget: N iterations remaining]` \
 marker: treat N as your hard remaining tool-round budget and converge \
 before it runs out.
+- BUNDLE INDEPENDENT CALLS: one response may carry several tool calls, and \
+one response counts as one iteration — independent calls (e.g. several \
+moves or edits in a restructure) belong in a SINGLE response. Dribbling \
+one call per response wastes your budget; batching is how bulk tasks fit \
+into it.
 """
 
 _WRITE_DISCIPLINE_SECTION = """\

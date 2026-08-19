@@ -7,6 +7,7 @@ build_maintain_preamble, independently of the agent loop.
 
 from athenaeum.curator.prompts import (
     CURATE_TASK_TEMPLATE,
+    CURATOR_SYSTEM_PROMPT,
     MAINTAIN_TASK_TEMPLATE,
     build_curate_preamble,
     build_curator_system_prompt,
@@ -38,6 +39,16 @@ def test_default_prompt_pins_duplicate_rejection_and_budget_marker():
     assert "DUPLICATE CALLS ARE REJECTED" in DEFAULT_SYSTEM_PROMPT
     assert "deduplicated" in DEFAULT_SYSTEM_PROMPT
     assert "[budget: N iterations remaining]" in DEFAULT_SYSTEM_PROMPT
+
+
+def test_prompts_pin_iteration_bundling():
+    """F9: one response = one iteration; independent calls are batched.
+
+    The rule lives in the shared retrieval section, so both agent prompts
+    carry it."""
+    assert "BUNDLE INDEPENDENT CALLS" in DEFAULT_SYSTEM_PROMPT
+    assert "one response counts as one iteration" in DEFAULT_SYSTEM_PROMPT
+    assert "BUNDLE INDEPENDENT CALLS" in CURATOR_SYSTEM_PROMPT
 
 
 def test_default_prompt_pins_deprecated_citation_hygiene():

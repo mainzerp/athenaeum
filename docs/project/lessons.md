@@ -66,6 +66,18 @@
   Moves sauber und ein Folge-Request schloss sie ab. Kein Defekt, aber für
   Bulk-Tasks ggf. Cap erhöhen oder Moves bündeln (ein Tool-Call pro Move
   kostet eine Iteration).
+  **Korrektur/Aufloesung (2026-08-19, RESOLVED):** Die Praemisse "ein
+  Tool-Call = eine Iteration" ist ueberholt — eine Iteration zaehlt pro
+  Assistant-**Response**, und eine Response kann mehrere Tool-Calls
+  tragen (einmal gezaehlt; test-gepinnt in test_librarian_loop.py).
+  Zudem ist `max_iterations` laengst ein PD-1-konformes Setting pro
+  Provider-Connection (Default 10, WebUI/DB). Fix: neue Prompt-Regel
+  "BUNDLE INDEPENDENT CALLS" in der geteilten Retrieval-Sektion (gilt
+  fuer Librarian- und Curator-Prompt, Vertrags-Pin in test_prompts.py) —
+  das Modell soll unabhaengige Calls in einer Response buendeln statt
+  einzeln zu troepfeln. Cap-Erhoehung und Batch-Move-Tool evidenzbasiert
+  verworfen (Kosten-Airbag aus F12/F15 bleibt; Scheduler-Timeout koppelt
+  ans Cap).
 - **F10 — Reasoning-Leakage in Final-Answers (MITIGIERT in 0.4.4).**
   Verdacht war ein fehlender Reasoning-Filter; der Debug-Call (rohes JSON von
   OpenRouter, Modell gpt-oss-120b:nitro) zeigte: Reasoning wird sauber in
