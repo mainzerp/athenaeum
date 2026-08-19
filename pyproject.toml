@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "athenaeum"
-version = "0.26.0"
+version = "0.26.1"
 description = "Self-hosted, LLM-maintained personal knowledge base (OKF v0.2) with MCP server and WebUI"
 requires-python = ">=3.12"
 dependencies = [

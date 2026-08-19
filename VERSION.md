@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.26.0**
+Current version: **0.26.1**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,16 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.26.1
+
+Iteration bundling rule (`7455535`): the agent prompts now pin that one
+assistant response counts as one iteration and that independent tool calls
+(e.g. several moves in a bulk restructure) belong batched in a single
+response — closing F9, whose premise ("one tool call per iteration") was
+outdated. `max_iterations` stays at its per-connection default of 10; a cap
+raise and a batch-move tool were rejected on evidence. Docs corrections in
+architecture.md (counting semantics) and lessons.md (F9 resolved).
 
 ### 0.26.0
 
