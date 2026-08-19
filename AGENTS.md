@@ -24,8 +24,8 @@ This project runs an Athenaeum instance as MCP server (`athenaeum` in the Kimi C
 | Tool | Use it to |
 | ---- | --------- |
 | `mcp__athenaeum__request_knowledge` | Recall knowledge at session start and before non-trivial decisions; also orientation ("what is in the library?") — there is no browse tool. |
-| `mcp__athenaeum__store_knowledge` | Persist NEW durable knowledge: decisions, lessons, patterns, project context (`kind_hint: "lessons"`, `relates_to: ["athenaeum"]`). |
-| `mcp__athenaeum__update_knowledge` | Correct or modify EXISTING knowledge (free-text instruction; the librarian locates the target). |
+| `mcp__athenaeum__store_knowledge` | Persist NEW durable knowledge: decisions, lessons, patterns, project context (`kind_hint: "lessons"`, `relates_to: ["athenaeum"]`). `relates_to` targets that exist are back-linked deterministically server-side (edits surface in the result's `backlinked` field). |
+| `mcp__athenaeum__update_knowledge` | Correct or modify EXISTING knowledge (free-text instruction; the librarian locates the target). Optional `relates_to` gets the same deterministic server-side back-linking. |
 | `mcp__athenaeum__library_status` | Check library health — deterministic, no LLM. `mcp__athenaeum__library_curate` / `mcp__athenaeum__library_maintain` repair taxonomy, graph health, and literal `\uXXXX` content artifacts. |
 | `mcp__athenaeum__run_computation` | Execute an Attested Computation concept's SQL read-only against an admin-configured connection (admin execution toggle, default off); returns the verified receipt. |
 

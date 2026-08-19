@@ -121,12 +121,12 @@ _WRITE_DISCIPLINE_SECTION = """\
 existing concept, ENRICH IT IN PLACE — patch attributes/body via \
 edit_concept — instead of filing a duplicate. Create a new concept only for \
 genuinely new subjects.
-2. BACK-LINK AT CREATION. Every newly created concept must be linked from at \
-least one related existing concept in the same write flow (edit_concept on \
-the related concept's body), so no concept enters the library as an orphan. \
-A link counts only in markdown link syntax: `[text](/absolute/path.md)` — a \
-bare path in a "Related concepts" list is invisible to the link graph and \
-does not count as linking.
+2. BACK-LINK AT CREATION. Caller-suggested related concepts (`relates_to`) \
+are back-linked deterministically by the server after the write flow — you \
+do NOT write those links yourself and MUST NOT claim them in your summary. \
+Links you add yourself beyond that count only in markdown link syntax: \
+`[text](/absolute/path.md)` — a bare path in a "Related concepts" list is \
+invisible to the link graph and does not count as linking.
 3. SUPERSEDE CONTRADICTIONS IN PLACE. When new knowledge contradicts an \
 existing concept, update that concept (edit_concept; deprecate_concept only \
 when the whole concept is obsolete) — never leave old and new versions \

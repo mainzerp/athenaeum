@@ -204,6 +204,67 @@ class FakeBackend:
             }
         return report
 
+    def add_backlink(
+        self, source_path, target_path, *, agent_label=None, requested_by=None, via=None
+    ) -> dict | None:
+        """Faithful mini of LibraryBackend.add_backlink (F22) over self.docs."""
+        self.calls.append(("add_backlink", source_path, target_path, agent_label))
+
+        def _resolve(path):
+            bundle = path.replace("\\", "/")
+            if not bundle.startswith("/"):
+                bundle = "/" + bundle
+            if not bundle.endswith(".md"):
+                bundle += ".md"
+            if bundle in self.docs:
+                return bundle
+            hint = bundle[: -len(".md")].lstrip("/")
+            matches = [
+                key
+                for key in self.docs
+                if (stripped := key[: -len(".md")].lstrip("/")) == hint
+                or stripped.endswith("/" + hint)
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            raise FileNotFoundError(path)
+
+        target = _resolve(target_path)
+        source = _resolve(source_path)
+        if source == target:
+            return None
+        body = self.docs[target]["body"]
+        link_re = re.compile(r"\]\((/[^)\s]+)\)")  # same shape as link_health above
+        if source in set(link_re.findall(body)):
+            return None
+        title = (
+            self.docs[source]["frontmatter"].get("title")
+            or source[: -len(".md")].rsplit("/", 1)[-1]
+        )
+        line = f"- [{title}]({source})"
+        lines = body.split("\n")
+        start = next(
+            (i for i, text in enumerate(lines) if text.rstrip() == "## Related concepts"), None
+        )
+        if start is None:
+            base = body if not body or body.endswith("\n") else body + "\n"
+            new_body = f"{base}\n## Related concepts\n\n{line}\n"
+        else:
+            end = len(lines)
+            for j in range(start + 1, len(lines)):
+                if lines[j].startswith("## "):
+                    end = j
+                    break
+            insert_at = end
+            while insert_at > start + 1 and not lines[insert_at - 1].strip():
+                insert_at -= 1
+            lines.insert(insert_at, line)
+            new_body = "\n".join(lines)
+        self.docs[target]["body"] = new_body
+        self.seed_marker += 1
+        target_title = self.docs[target]["frontmatter"].get("title") or target[: -len(".md")]
+        return {"id": target[: -len(".md")], "title": target_title, "action": "updated"}
+
 
 class ScriptedProvider:
     def __init__(self, responses: list[LLMResponse]):
@@ -996,6 +1057,84 @@ async def test_store_result_includes_links_after(tmp_path, monkeypatch):
         result = await client.call_tool("store_knowledge", {"content": "fresh"})
     assert isinstance(result.data["links_after"]["healthy"], bool)
     assert "Post-run check:" in result.data["summary"]
+
+
+async def test_store_result_includes_backlinked(tmp_path, monkeypatch):
+    """F22: the additive backlinked field survives the MCP layer."""
+    server, manager, backends, providers, seeds = make_stack(
+        tmp_path,
+        {
+            "user-a": [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="write_concept",
+                            arguments={
+                                "path": "/new.md",
+                                "frontmatter": {"title": "New", "type": "Note"},
+                                "body": "b; see [Rel](/rel.md).",
+                            },
+                        )
+                    ]
+                ),
+                LLMResponse(text="stored"),
+            ]
+        },
+    )
+    backends["user-a"].docs["/rel.md"] = {
+        "frontmatter": {"title": "Rel", "type": "Note"},
+        "body": "rel\n",
+    }
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "store_knowledge", {"content": "fresh", "relates_to": ["/rel"]}
+        )
+    assert result.data["backlinked"] == [{"id": "/rel", "title": "Rel"}]
+    assert result.data["links_after"]["healthy"] is True
+    assert "- [New](/new.md)" in backends["user-a"].docs["/rel.md"]["body"]
+
+
+async def test_update_knowledge_forwards_relates_to(tmp_path, monkeypatch):
+    """F22: update_knowledge accepts relates_to and back-links server-side."""
+    server, manager, backends, providers, seeds = make_stack(
+        tmp_path,
+        {
+            "user-a": [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="c1",
+                            name="edit_concept",
+                            arguments={
+                                "path": "/a.md",
+                                "new_body": "about a; see [Rel](/rel.md).\n",
+                            },
+                        )
+                    ]
+                ),
+                LLMResponse(text="updated"),
+            ]
+        },
+    )
+    backends["user-a"].docs["/a.md"] = {
+        "frontmatter": {"title": "A", "type": "Note"},
+        "body": "about a\n",
+    }
+    backends["user-a"].docs["/rel.md"] = {
+        "frontmatter": {"title": "Rel", "type": "Note"},
+        "body": "rel\n",
+    }
+    set_identity(monkeypatch, "user-a", "agent-a")
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "update_knowledge", {"instruction": "fix the a note", "relates_to": ["/rel"]}
+        )
+    # the deterministic back-link ran through the backend with the run's label
+    assert ("add_backlink", "/a.md", "/rel", "agent-a") in backends["user-a"].calls
+    assert result.data["backlinked"] == [{"id": "/rel", "title": "Rel"}]
+    assert "- [A](/a.md)" in backends["user-a"].docs["/rel.md"]["body"]
 
 
 async def test_library_status_writes_no_trace(tmp_path, monkeypatch):

@@ -31,6 +31,7 @@ TRACE_DIR = ".traces"
 MAX_STR = 500  # recorded arg strings are truncated to this length
 MAX_ITEMS = 50  # cap for shaped result lists (hits/entries/broken)
 MAX_ERR = 500  # recorded error strings are truncated to this length
+MAX_ANSWER = 2000  # recorded final-answer text is truncated to this length
 
 _TRACE_ID_RE = re.compile(r"^[0-9A-Za-z-]+$")
 
@@ -227,6 +228,11 @@ class TraceSession:
         self._ended_at: datetime | None = None
         self._closed = False
         self._pending_llm_ms: float | None = None
+        self._answer: str | None = None
+
+    def set_answer(self, text: str) -> None:
+        """Record the request's final answer text (truncated to MAX_ANSWER)."""
+        self._answer = _truncate(text, MAX_ANSWER)
 
     def set_pending_llm_ms(self, llm_ms: float) -> None:
         """Queue the wall time of the LLM call whose response triggered the
@@ -293,6 +299,7 @@ class TraceSession:
             "duration_ms": (time.perf_counter() - self._clock_start) * 1000,
             "outcome": self._outcome or "ok",
             "error": self._error,
+            "answer": self._answer,
             "llm": llm,
             "events": list(self._events),
         }

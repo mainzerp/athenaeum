@@ -634,6 +634,41 @@ def test_list_dir_missing_suggests_close_match(tmp_path):
     assert "Did you mean: '/tables'" in str(exc.value)
 
 
+def test_read_document_suffix_less_path_falls_back_to_md(tmp_path):
+    """A bare concept id / suffix-less path resolves to <path>.md (F21 B1)."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/athenaeum/x.md", {"type": "Note", "title": "X"}, "x\n")
+
+    result = backend.read_document("/athenaeum/x")
+
+    assert result["path"] == "/athenaeum/x.md"
+    assert result["body"] == "x\n"
+
+
+def test_read_document_directory_reports_wrong_tool(tmp_path):
+    """A directory path is a wrong-tool error, not a coverage gap (F21 B2)."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/athenaeum/x.md", {"type": "Note", "title": "X"}, "x\n")
+
+    with pytest.raises(FileNotFoundError) as exc:
+        backend.read_document("/athenaeum")
+
+    assert str(exc.value) == "is a directory, use list_dir: '/athenaeum'"
+    assert "no such document" not in str(exc.value)
+
+
+def test_read_document_suffix_less_miss_still_suggests(tmp_path):
+    """A suffix-less path whose .md fallback also misses still reports a plain
+    miss with did-you-mean behavior preserved (F21 B1)."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/athenaeum/x.md", {"type": "Note", "title": "X"}, "x\n")
+
+    with pytest.raises(FileNotFoundError) as exc:
+        backend.read_document("/athenaeum/y")
+
+    assert "no such document: '/athenaeum/y'" in str(exc.value)
+
+
 def test_missing_path_suggestions_never_fire_on_escape(tmp_path):
     """The enrichment sits strictly behind the isolation screen: a traversal
     attempt still raises PathEscapeError (a ValueError), never a suggestion."""
@@ -1146,3 +1181,124 @@ def test_code_span_candidates_scan_bounds_files(tmp_path):
         )
     entries = backend.code_span_escape_candidates()
     assert len(entries) == escape_guard_mod.MAX_CODE_SPAN_CANDIDATE_FILES
+
+
+# --- add_backlink (F22: deterministic server-side relates_to backlinking) -----
+
+
+def test_add_backlink_creates_related_section(tmp_path):
+    """Target without a Related section gains `## Related concepts` + bullet."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/new.md", {"type": "Note", "title": "New Thing"}, "new body\n")
+    backend.create_concept("/rel.md", {"type": "Note", "title": "Related"}, "rel body\n")
+
+    result = backend.add_backlink("/new.md", "/rel.md")
+
+    assert result == {"id": "/rel", "title": "Related", "action": "updated"}
+    doc = backend.read_document("/rel.md")
+    assert doc["body"] == "rel body\n\n## Related concepts\n\n- [New Thing](/new.md)\n"
+    # frontmatter untouched by the backlink edit
+    assert doc["frontmatter"]["title"] == "Related"
+    assert "custom_key" not in doc["frontmatter"]
+
+
+def test_add_backlink_appends_into_existing_section(tmp_path):
+    """The bullet lands at the end of the section, before the next `## ` heading."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/new.md", {"type": "Note", "title": "New"}, "new\n")
+    backend.create_concept(
+        "/rel.md",
+        {"type": "Note", "title": "Rel"},
+        "body\n\n## Related concepts\n\n- [X](/x.md)\n\n## Other\n\nzzz\n",
+    )
+
+    backend.add_backlink("/new.md", "/rel.md")
+
+    assert backend.read_document("/rel.md")["body"] == (
+        "body\n\n## Related concepts\n\n- [X](/x.md)\n- [New](/new.md)\n\n## Other\n\nzzz\n"
+    )
+
+
+def test_add_backlink_dedupes_existing_links(tmp_path):
+    """Absolute and relative links resolving to the source both dedupe to None."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/new.md", {"type": "Note", "title": "New"}, "new\n")
+    backend.create_concept(
+        "/abs.md", {"type": "Note", "title": "Abs"}, "see [New](/new.md) already\n"
+    )
+    backend.create_concept(
+        "/sub/rel.md", {"type": "Note", "title": "Rel"}, "see [New](../new.md) already\n"
+    )
+
+    assert backend.add_backlink("/new.md", "/abs.md") is None
+    assert backend.add_backlink("/new.md", "/sub/rel.md") is None
+    assert backend.read_document("/abs.md")["body"] == "see [New](/new.md) already\n"
+    assert backend.read_document("/sub/rel.md")["body"] == "see [New](../new.md) already\n"
+
+
+def test_add_backlink_normalizes_loose_ids(tmp_path):
+    """Bare ids, missing leading slash, and missing `.md` all resolve equally."""
+    backend = make_backend(tmp_path)
+    backend.create_concept(
+        "/athenaeum/versions/v0.23.0.md", {"type": "Concept", "title": "v0.23.0"}, "# v\n"
+    )
+    for i, hint in enumerate(
+        ["v0.23.0", "athenaeum/versions/v0.23.0", "/athenaeum/versions/v0.23.0"]
+    ):
+        backend.create_concept(f"/n{i}.md", {"type": "Note", "title": f"N{i}"}, "n\n")
+        result = backend.add_backlink(f"/n{i}.md", hint)
+        assert result["id"] == "/athenaeum/versions/v0.23.0"
+    body = backend.read_document("/athenaeum/versions/v0.23.0.md")["body"]
+    assert "- [N0](/n0.md)" in body
+    assert "- [N1](/n1.md)" in body
+    assert "- [N2](/n2.md)" in body
+
+
+def test_add_backlink_missing_source_or_target_raises(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/new.md", {"type": "Note", "title": "New"}, "new\n")
+    with pytest.raises(FileNotFoundError):
+        backend.add_backlink("/new.md", "/missing.md")
+    with pytest.raises(FileNotFoundError):
+        backend.add_backlink("/missing.md", "/new.md")
+
+
+def test_add_backlink_self_link_is_noop(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Note", "title": "A"}, "about a\n")
+
+    assert backend.add_backlink("/a.md", "/a.md") is None
+    assert backend.read_document("/a.md")["body"] == "about a\n"
+
+
+def test_add_backlink_title_falls_back_to_basename(tmp_path):
+    """Source without a frontmatter title links under its basename."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/notitle.md", {"type": "Note"}, "body\n")
+    backend.create_concept("/rel.md", {"type": "Note", "title": "Rel"}, "rel\n")
+
+    result = backend.add_backlink("/notitle.md", "/rel.md")
+
+    assert "- [notitle](/notitle.md)" in backend.read_document("/rel.md")["body"]
+    # target without a title falls back to its id in the result entry
+    assert backend.add_backlink("/rel.md", "/notitle.md") == {
+        "id": "/notitle",
+        "title": "/notitle",
+        "action": "updated",
+    }
+    assert result["title"] == "Rel"
+
+
+def test_add_backlink_preserves_code_span_escapes(tmp_path):
+    """Literal \\uXXXX inside fenced code stays byte-identical outside the
+    appended lines (allow_literal_escapes, hygiene-sweep precedent)."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/new.md", {"type": "Note", "title": "New"}, "new\n")
+    fenced = "prose\n\n```python\ns = '\\u2011'\n```\n"
+    backend.create_concept("/rel.md", {"type": "Note", "title": "Rel"}, fenced)
+
+    backend.add_backlink("/new.md", "/rel.md")
+
+    assert backend.read_document("/rel.md")["body"] == (
+        fenced + "\n## Related concepts\n\n- [New](/new.md)\n"
+    )

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum.librarian.tracing import (
+    MAX_ANSWER,
     MAX_ERR,
     MAX_ITEMS,
     MAX_STR,
@@ -193,6 +194,29 @@ def test_session_writes_trace_file(tmp_path):
     assert event["result"] == {"path": "/", "entries": ["concepts"], "count": 1}
     assert event["error"] is None
     assert event["duration_ms"] == 0.4
+
+
+def test_session_answer_recorded_truncated(tmp_path):
+    """The final answer lands in the trace, truncated to MAX_ANSWER (F21 A3)."""
+    session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "request_knowledge", "agent-x")
+    session.set_answer("x" * 5000)
+    session.record("list_dir", {"path": "/"}, [], None, 0.1)
+    session.finish("ok")
+    trace_id = session.close()
+
+    data = read_trace(tmp_path, trace_id)
+    assert data["answer"] == "x" * MAX_ANSWER + "…[truncated]"
+
+
+def test_session_answer_absent_when_unset(tmp_path):
+    """Without set_answer the trace carries a top-level answer of None."""
+    session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "request_knowledge", "agent-x")
+    session.record("list_dir", {"path": "/"}, [], None, 0.1)
+    session.finish("ok")
+    trace_id = session.close()
+
+    data = read_trace(tmp_path, trace_id)
+    assert data["answer"] is None
 
 
 def test_session_records_pending_llm_ms(tmp_path):

@@ -41,7 +41,7 @@ from athenaeum.librarian.base import (
     LibrarianNotConfiguredError as LibrarianNotConfiguredError,
 )
 from athenaeum.librarian.gate import KIND_LIBRARIAN, AgentRunBusyError
-from athenaeum.librarian.tracing import mint_request_id, telemetry_or_mint
+from athenaeum.librarian.tracing import current_trace, mint_request_id, telemetry_or_mint
 from athenaeum.library.payloads import PayloadStore
 from athenaeum.okf import is_stale, trust_tier
 
@@ -178,7 +178,11 @@ class Librarian(BaseAgent):
                 "If useful, end with a '## Follow-ups' section of up to 3 suggested "
                 "follow-up questions as markdown bullets."
             )
-            result = await self._run(task, agent_label)
+            result = await self._run(task, agent_label, answer_guard=True)
+            session = current_trace()
+            if session is not None:
+                # F21 A3: the post-guard answer text lands in the trace.
+                session.set_answer(result.text)
             answer: dict[str, Any] = {
                 "answer": result.text,
                 "concepts": await self._concept_entries(result.tracker),
@@ -340,9 +344,10 @@ class Librarian(BaseAgent):
                     "This is NEW knowledge to add. Apply your write discipline: search "
                     "first, enrich in place when the knowledge is an attribute or "
                     "detail of an existing concept, create only for genuinely new "
-                    "subjects, and back-link every new concept from a related one. "
-                    "Caller-suggested related concepts and similarity-ranked "
-                    "candidates are back-link candidates, NOT placement hints — "
+                    "subjects. Caller-suggested related concepts are back-linked by "
+                    "the server automatically after the run — do not write or claim "
+                    "those links yourself. Caller-suggested related concepts and "
+                    "similarity-ranked candidates are NOT placement hints — "
                     "placement follows the subject, per your taxonomy rules. "
                     "State the subject of this knowledge and its target topic area "
                     "before your first write call. "
@@ -356,7 +361,17 @@ class Librarian(BaseAgent):
                     "When done, summarize what you stored and where."
                 )
                 result = await self._run_write_task(task, agent_label, requested_by, via)
-                response = await self._write_result(result, report_contradictions=True)
+                # F22: relates_to back-linking is deterministic server-side;
+                # it runs only after the no-write guard succeeded, so a
+                # zero-write store still raises LibrarianNoWriteError above.
+                backlinked = await self._ensure_relates_to_backlinks(
+                    await self._stored_entries(result.tracker),
+                    relates_to,
+                    agent_label=agent_label,
+                )
+                response = await self._write_result(
+                    result, report_contradictions=True, extra_stored=backlinked
+                )
                 record["outcome"] = "partial" if response.get("partial") else "ok"
                 record["stored"] = response["stored"]
                 record["finished_at"] = datetime.now(UTC).isoformat()
@@ -378,6 +393,7 @@ class Librarian(BaseAgent):
     async def handle_update(
         self,
         instruction: str,
+        relates_to: list[str] | None = None,
         *,
         agent_label: str | None = None,
         requested_by: str | None = None,
@@ -390,7 +406,14 @@ class Librarian(BaseAgent):
                 "UPDATE TASK. An external agent requests a change to existing "
                 "knowledge in the library.\n"
                 f"Instruction:\n{instruction}\n\n"
-                f"{related}"
+                + (
+                    f"Related concept IDs suggested by the caller: {', '.join(relates_to)} "
+                    "— back-linking these is automatic server-side; do not write or "
+                    "claim those links yourself.\n\n"
+                    if relates_to
+                    else ""
+                )
+                + f"{related}"
                 "Locate the target concept(s) yourself: use search_semantic, "
                 "search_metadata, list_dir, and read_document to find what the "
                 "instruction refers "
@@ -404,24 +427,102 @@ class Librarian(BaseAgent):
                 "When done, summarize what you changed and where."
             )
             result = await self._run_write_task(task, agent_label, requested_by, via)
-            return await self._write_result(result)
+            # F22: same deterministic relates_to back-linking as handle_store.
+            backlinked = await self._ensure_relates_to_backlinks(
+                await self._stored_entries(result.tracker),
+                relates_to,
+                agent_label=agent_label,
+            )
+            return await self._write_result(result, extra_stored=backlinked)
+
+    async def _ensure_relates_to_backlinks(
+        self,
+        stored: list[dict],
+        relates_to: list[str] | None,
+        *,
+        agent_label: str | None,
+    ) -> list[dict]:
+        """Deterministic relates_to back-linking after a write run (F22).
+
+        For each stored (non-deleted) concept x each relates_to hint the
+        server writes the back-link itself — the model's claim is no longer
+        trusted to produce the edit. Path normalization, dedupe against
+        already-linked targets, and self-link guards live in
+        ``LibraryBackend.add_backlink``; a per-target failure (missing or
+        ambiguous hint) is logged and skipped, never fails the run. The
+        tracker is deliberately bypassed (hygiene-sweep precedent): the edits
+        surface here as ``updated`` entries instead.
+
+        Returns the ``{"id", "title", "action": "updated"}`` entries for the
+        edited targets, skipping ids already present in ``stored`` (the
+        model's own edit on the target already drives embedding sync).
+        """
+        if not relates_to or not stored:
+            return []
+        seen_ids = {entry["id"] for entry in stored}
+        backlinked: list[dict] = []
+        for entry in stored:
+            if entry["action"] == "deleted":
+                continue
+            for raw in relates_to:
+                try:
+                    edited = await asyncio.to_thread(
+                        self.backend.add_backlink,
+                        f"{entry['id']}.md",
+                        raw,
+                        agent_label=agent_label,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "relates_to backlink %s -> %s failed; skipping (%s)",
+                        entry["id"],
+                        raw,
+                        exc,
+                    )
+                    continue
+                if edited is None or edited["id"] in seen_ids:
+                    continue
+                seen_ids.add(edited["id"])
+                backlinked.append(edited)
+        return backlinked
 
     async def _write_result(
-        self, result: _RunResult, *, report_contradictions: bool = False
+        self,
+        result: _RunResult,
+        *,
+        report_contradictions: bool = False,
+        extra_stored: list[dict] | None = None,
     ) -> dict:
         """store/update result dict; a partial run is marked explicitly (L2).
 
         ``report_contradictions`` (store only, D1.2): LLM-reported resolved
         contradictions land in the result — cross-checked against the tracked
         writes (D1.1), present only when the verified list is non-empty (D1.3).
+        ``extra_stored`` (F22): deterministic relates_to back-link edits,
+        appended to ``stored`` (embedding sync coverage) and surfaced in the
+        additive ``backlinked`` field; the deterministic note lands before the
+        links verdict, which therefore scans the post-backlink state.
         """
         response: dict[str, Any] = {
             "stored": await self._stored_entries(result.tracker),
             "summary": result.text,
         }
+        if extra_stored:
+            response["stored"] += extra_stored
+            response["backlinked"] = [
+                {"id": entry["id"], "title": entry["title"]} for entry in extra_stored
+            ]
         if result.partial:
             response["partial"] = True
             response["summary"] = PARTIAL_SUMMARY
+        if extra_stored:
+            ids = ", ".join(entry["id"] for entry in extra_stored)
+            response["summary"] += _post_run_note(
+                True,
+                f"relates_to back-links ensured from {len(extra_stored)} existing "
+                f"concept(s): {ids}.",
+                "",
+            )
         links_after = await self._links_after(response["stored"])
         if links_after is not None:
             response["links_after"] = links_after

@@ -409,6 +409,36 @@
   Zusaetzlich: der erste Store-Versuch (langer, mehrteiliger Content) endete
   im F13-Muster (No-Write → ToolError); die gekuerzte Version ging sofort
   durch — lange Stores weiterhin in kleinen Happen fahren.
+- **F22 RESOLVED (2026-08-19, Fix nach sechs Bestaetigungen):**\r
+  relates_to-Backlinking ist jetzt deterministisch serverseitig:\r
+  `LibraryBackend.add_backlink` (Dedupe gegen modellgeschriebene Links,\r
+  Normalisierung loser IDs wie `v0.23.0`, Self-Link-Guard, fehlende/\r
+  mehrdeutige Ziele werden geloggt und uebersprungen — nie ein\r
+  Run-Fehler) plus `Librarian._ensure_relates_to_backlinks` in\r
+  `handle_store` UND `handle_update` (`update_knowledge` hat jetzt einen\r
+  optionalen relates_to-Parameter). Die Backlink-Pflicht wandert vom\r
+  Modell zum Server: Write-Disziplin-Regel 2 und der STORE-TASK-Text\r
+  fordern keine relates_to-Backlinks mehr vom Modell (MUST NOT claim);\r
+  das Ergebnis traegt ein additives `backlinked: [{id, title}]`-Feld\r
+  (nur wenn nicht-leer), die Edits erscheinen als `updated`-Eintraege in\r
+  `stored` (Embedding-Sync inklusive), und `links_after` verifiziert den\r
+  Post-Backlink-Zustand. Die F19/F20-Detektion bleibt als Beweis\r
+  bestehen; die Claim-vs-Reality-Luecke ist geschlossen.\r
+- **F21 RESOLVED (2026-08-19, Fix im lokalen Tree):** Drei deterministische
+  Massnahmen schliessen die F21-Luecken. (a) Answer-Hygiene-Guard in
+  `BaseAgent._run` (`_dirty_answer_signals`: ganze Zeile = Tool-Call-JSON
+  oder Argument-Blob, Prozess-Narration-Phrasen EN+DE, fenced Codeblocks
+  ausgenommen) mit genau EINEM no-tools Re-ask ausserhalb des
+  Iterations-Budgets, nur auf dem request_knowledge-Pfad (`answer_guard=True`
+  in `handle_request`; Write-Task-Summaries duerfen JSON zitieren und
+  bleiben unbewacht). Bleibt auch die zweite Antwort dirty, wird sie mit
+  deterministischem Post-Run-Note-Marker zurueckgegeben, nie verworfen.
+  (b) `read_document` probiert bei suffix-losem Pfad einmal `<pfad>.md` und
+  meldet Verzeichnisse als "is a directory, use list_dir" statt
+  "no such document" (Wrong-Tool statt Coverage-Gap). (c) Die finale
+  Antwort landet (auf 2 KB gekuerzt) als Top-Level-`answer` im Trace —
+  F21(a) ist damit nachtraeglich beweisbar und die Trefferquote des Guards
+  per `.traces/*.json` messbar. Keine Prompt-Aenderung.
 - **Deployment-Kontext (2026-08-04):** Die Kimi-MCP-Config
   (`~/.kimi-code/mcp.json`) zeigt auf `https://athenaeum.mzrsvr.net/mcp`
   (REMOTE, lief 0.20.0) — die Dogfooding-Library lebt dort, nicht im

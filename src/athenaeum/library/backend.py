@@ -33,7 +33,7 @@ from pathlib import Path
 
 from athenaeum import __version__
 
-from ..isolation import resolve_under
+from ..isolation import PathEscapeError, resolve_under
 from . import escape_guard as escape_guard_mod
 from . import frontmatter as fm_mod
 from . import gittool as gittool_mod
@@ -171,6 +171,19 @@ class LibraryBackend:
 
     def read_document(self, path: str) -> dict:
         abs_path = self._resolve(path)
+        if not abs_path.is_file() and not posixpath.basename(str(path).replace("\\", "/")).endswith(
+            ".md"
+        ):
+            # A bare concept id / suffix-less path retries once as <path>.md
+            # before failing.
+            candidate = self._normalize_concept_path(path)
+            candidate_abs = self._resolve(candidate)
+            if candidate_abs.is_file():
+                abs_path = candidate_abs
+                path = candidate
+        if abs_path.is_dir():
+            # A directory is a wrong-tool error, not a coverage gap.
+            raise FileNotFoundError(f"is a directory, use list_dir: {path!r}")
         if not abs_path.is_file():
             raise FileNotFoundError(
                 f"no such document: {path!r}{self._did_you_mean(path, directories=False)}"
@@ -598,6 +611,57 @@ class LibraryBackend:
                 result["warnings"] = warnings
             return result
 
+    def add_backlink(
+        self,
+        source_path: str,
+        target_path: str,
+        *,
+        agent_label: str | None = None,
+        requested_by: str | None = None,
+        via: str | None = None,
+    ) -> dict | None:
+        """Deterministically link ``target_path`` to ``source_path`` (F22).
+
+        ``source_path`` is the newly written concept being linked TO;
+        ``target_path`` is the related concept receiving the backlink. Both
+        accept loose ids (``v0.23.0``, ``athenaeum/versions/v0.23.0``): they
+        are normalized to bundle paths (leading ``/``, ``.md`` suffix).
+        A missing source or target raises ``FileNotFoundError`` — the caller
+        skips and logs; a bad hint never fails the surrounding write run.
+
+        Returns ``{"id", "title", "action": "updated"}`` for the edited
+        target, or ``None`` when no edit was needed (self-link, or the target
+        already links to the source — the dedupe check makes the step
+        idempotent against a model that wrote the link itself).
+        """
+        source_bundle = self._resolve_concept_hint(source_path)
+        target_bundle = self._resolve_concept_hint(target_path)
+        if source_bundle == target_bundle:
+            return None
+        target_doc = self.read_document(target_bundle)
+        source_doc = self.read_document(source_bundle)
+        target_body = target_doc["body"]
+        for raw in links_mod.extract_body_links(target_body):
+            if links_mod.resolve_target(target_bundle, raw) == source_bundle:
+                return None
+        source_title = (source_doc.get("frontmatter") or {}).get("title") or posixpath.basename(
+            source_bundle
+        )[:-3]
+        line = f"- [{source_title}]({source_bundle})"
+        new_body = self._append_related_concept_link(target_body, line)
+        self.edit_concept(
+            target_bundle,
+            new_body=new_body,
+            agent_label=agent_label,
+            requested_by=requested_by,
+            via=via,
+            # The appended line touches no code spans, so the code-span
+            # warning would be pure noise (hygiene-sweep precedent).
+            allow_literal_escapes=True,
+        )
+        target_title = (target_doc.get("frontmatter") or {}).get("title") or target_bundle[:-3]
+        return {"id": target_bundle[:-3], "title": target_title, "action": "updated"}
+
     def verify_concept(
         self, path: str, *, by: str, at: str | None = None, agent_label: str | None = None
     ) -> dict:
@@ -937,6 +1001,68 @@ class LibraryBackend:
     def _bundle_path(path: str) -> str:
         normalized = str(path).replace("\\", "/")
         return normalized if normalized.startswith("/") else "/" + normalized
+
+    @classmethod
+    def _normalize_concept_path(cls, path: str) -> str:
+        """Loose concept id -> bundle path: leading ``/`` plus ``.md`` suffix."""
+        bundle = cls._bundle_path(path)
+        if not posixpath.basename(bundle).endswith(".md"):
+            bundle += ".md"
+        return bundle
+
+    def _resolve_concept_hint(self, path: str) -> str:
+        """Resolve a loose concept id to an existing concept's bundle path.
+
+        Normalized ids that point at a real file win; a bare id (``v0.23.0``)
+        falls back to a unique path-suffix match against existing concepts.
+        ``FileNotFoundError`` when nothing matches, ``ValueError`` when the
+        suffix match is ambiguous.
+        """
+        bundle = self._normalize_concept_path(path)
+        try:
+            if self._resolve(bundle).is_file():
+                return bundle
+        except PathEscapeError:
+            pass  # escapes the root: no fallback match possible either
+        hint = bundle[:-3].lstrip("/")
+        matches = [
+            concept_path
+            for concept_path, _ in links_mod.iter_concept_files(self.root)
+            if (stripped := concept_path[:-3].lstrip("/")) == hint or stripped.endswith("/" + hint)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ValueError(f"ambiguous concept id: {path!r} matches: {', '.join(matches)}")
+        raise FileNotFoundError(f"no such concept: {path!r}")
+
+    @staticmethod
+    def _append_related_concept_link(body: str, line: str) -> str:
+        """Insert a link bullet into the body's ``## Related concepts`` section.
+
+        The bullet lands at the end of the existing section (before the next
+        ``## `` heading or EOF); without the section a new one is appended at
+        the end of the body. Frontmatter is untouched (the caller edits the
+        body only).
+        """
+        lines = body.split("\n")
+        start = next(
+            (i for i, text in enumerate(lines) if text.rstrip() == "## Related concepts"),
+            None,
+        )
+        if start is None:
+            base = body if not body or body.endswith("\n") else body + "\n"
+            return f"{base}\n## Related concepts\n\n{line}\n"
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if lines[j].startswith("## "):
+                end = j
+                break
+        insert_at = end
+        while insert_at > start + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines.insert(insert_at, line)
+        return "\n".join(lines)
 
     def _did_you_mean(self, path: str, *, directories: bool) -> str:
         """Close-match suffix for a missing-path FileNotFoundError; "" when no match.

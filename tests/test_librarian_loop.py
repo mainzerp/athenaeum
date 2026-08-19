@@ -26,6 +26,10 @@ from athenaeum.librarian.agent import (
     is_stale,
     trust_tier,
 )
+from athenaeum.librarian.base import (
+    ANSWER_HYGIENE_MARKER,
+    _dirty_answer_signals,
+)
 from athenaeum.librarian.gate import AgentRunBusyError
 from athenaeum.librarian.llm import LLMConfig, LLMResponse, ToolCall
 from athenaeum.librarian.prompts import DEFAULT_SYSTEM_PROMPT
@@ -156,6 +160,66 @@ class FakeBackend:
         entries = self.docs[path]["frontmatter"].setdefault("verified", [])
         entries.append({"by": by, "at": at or "2026-08-04T00:00:00+00:00"})
         return {"id": path[: -len(".md")], "action": "verified"}
+
+    def add_backlink(
+        self, source_path, target_path, *, agent_label=None, requested_by=None, via=None
+    ) -> dict | None:
+        """Faithful mini of LibraryBackend.add_backlink (F22) over self.docs."""
+        self.calls.append(("add_backlink", source_path, target_path, agent_label))
+
+        def _resolve(path):
+            bundle = path.replace("\\", "/")
+            if not bundle.startswith("/"):
+                bundle = "/" + bundle
+            if not bundle.endswith(".md"):
+                bundle += ".md"
+            if bundle in self.docs:
+                return bundle
+            hint = bundle[: -len(".md")].lstrip("/")
+            matches = [
+                key
+                for key in self.docs
+                if (stripped := key[: -len(".md")].lstrip("/")) == hint
+                or stripped.endswith("/" + hint)
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            raise FileNotFoundError(path)
+
+        target = _resolve(target_path)
+        source = _resolve(source_path)
+        if source == target:
+            return None
+        body = self.docs[target]["body"]
+        link_re = re.compile(r"\]\((/[^)\s]+)\)")  # same shape as link_health below
+        if source in set(link_re.findall(body)):
+            return None
+        title = (
+            self.docs[source]["frontmatter"].get("title")
+            or source[: -len(".md")].rsplit("/", 1)[-1]
+        )
+        line = f"- [{title}]({source})"
+        lines = body.split("\n")
+        start = next(
+            (i for i, text in enumerate(lines) if text.rstrip() == "## Related concepts"), None
+        )
+        if start is None:
+            base = body if not body or body.endswith("\n") else body + "\n"
+            new_body = f"{base}\n## Related concepts\n\n{line}\n"
+        else:
+            end = len(lines)
+            for j in range(start + 1, len(lines)):
+                if lines[j].startswith("## "):
+                    end = j
+                    break
+            insert_at = end
+            while insert_at > start + 1 and not lines[insert_at - 1].strip():
+                insert_at -= 1
+            lines.insert(insert_at, line)
+            new_body = "\n".join(lines)
+        self.docs[target]["body"] = new_body
+        target_title = self.docs[target]["frontmatter"].get("title") or target[: -len(".md")]
+        return {"id": target[: -len(".md")], "title": target_title, "action": "updated"}
 
     def link_check(self, path=None) -> list[dict]:
         self.calls.append(("link_check", path))
@@ -877,6 +941,242 @@ async def test_links_after_skips_deleted_concepts():
         "orphans": [],
         "healthy": True,
     }
+
+
+# --- deterministic relates_to back-linking (F22) ------------------------------
+#
+# The server writes relates_to back-links itself after a successful write run;
+# the model's claim is no longer trusted to produce the edit.
+
+
+async def test_store_backlinks_relates_to_server_side():
+    """F22: the model does NOT backlink -> the server does, deterministically."""
+    backend = FakeBackend(
+        docs={"/rel.md": {"frontmatter": {"title": "Rel", "type": "Note"}, "body": "rel\n"}}
+    )
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "new knowledge; see [Rel](/rel.md).\n",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored /new.md, linked from /rel.md."),  # claim only
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_store("knowledge", relates_to=["/rel"])
+
+    # the server wrote the back-link the model only claimed
+    assert "- [New](/new.md)" in backend.docs["/rel.md"]["body"]
+    assert {"id": "/rel", "title": "Rel", "action": "updated"} in result["stored"]
+    assert result["backlinked"] == [{"id": "/rel", "title": "Rel"}]
+    assert result["links_after"]["healthy"] is True
+    assert result["links_after"]["unbacklinked"] == []
+    assert "relates_to back-links ensured from 1 existing concept(s): /rel." in result["summary"]
+    # the back-link note lands before the links verdict
+    assert result["summary"].index("back-links ensured") < result["summary"].index(
+        "all written concepts have inbound links."
+    )
+
+
+async def test_store_backlink_dedupes_model_written_link():
+    """A model that DID write the link: no duplicate edit, no backlinked field."""
+    backend = FakeBackend(
+        docs={"/rel.md": {"frontmatter": {"title": "Rel", "type": "Note"}, "body": "rel\n"}}
+    )
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "new knowledge\n",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c2",
+                        "edit_concept",
+                        {"path": "/rel.md", "new_body": "rel\n\nSee [New](/new.md).\n"},
+                    )
+                ]
+            ),
+            LLMResponse(text="Stored /new.md, back-linked from /rel.md."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_store("knowledge", relates_to=["/rel"])
+
+    assert "backlinked" not in result
+    # the model's own edit is the single /rel entry; the server added none
+    assert [entry["id"] for entry in result["stored"]].count("/rel") == 1
+    assert backend.docs["/rel.md"]["body"] == "rel\n\nSee [New](/new.md).\n"
+
+
+async def test_store_backlink_normalizes_bare_relates_to_id():
+    """A bare relates_to id (no slash, no .md) resolves by path suffix."""
+    backend = FakeBackend(
+        docs={
+            "/athenaeum/versions/v0.23.0.md": {
+                "frontmatter": {"title": "v0.23.0", "type": "Concept"},
+                "body": "release notes\n",
+            }
+        }
+    )
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "n; see [v](/athenaeum/versions/v0.23.0.md).\n",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="stored"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_store("knowledge", relates_to=["v0.23.0"])
+
+    assert "- [New](/new.md)" in backend.docs["/athenaeum/versions/v0.23.0.md"]["body"]
+    assert result["backlinked"] == [{"id": "/athenaeum/versions/v0.23.0", "title": "v0.23.0"}]
+
+
+async def test_store_backlink_missing_target_is_skipped(caplog):
+    """A bad relates_to hint never fails the store: warn, skip, no entry."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "new knowledge\n",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="stored"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    with caplog.at_level(logging.WARNING):
+        result = await librarian.handle_store("knowledge", relates_to=["/missing"])
+
+    assert "backlinked" not in result
+    assert [entry["id"] for entry in result["stored"]] == ["/new"]
+    assert "relates_to backlink /new -> /missing failed" in caplog.text
+
+
+async def test_store_with_zero_writes_never_backlinks():
+    """The F11/F13 guard fires first: zero writes -> raise, add_backlink uncalled."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(text="Already covered."),
+            LLMResponse(text="Already covered."),  # nudge retry
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    with pytest.raises(LibrarianNoWriteError):
+        await librarian.handle_store("knowledge", relates_to=["/rel"])
+
+    assert not [call for call in backend.calls if call[0] == "add_backlink"]
+
+
+async def test_partial_store_still_backlinks_relates_to():
+    """L2/F16: a partial result (provider failure after a landed write) backlinks."""
+    backend = FakeBackend(
+        docs={"/rel.md": {"frontmatter": {"title": "Rel", "type": "Note"}, "body": "rel\n"}}
+    )
+    provider = FailAfterProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/n.md",
+                            "frontmatter": {"title": "N", "type": "Note"},
+                            "body": "b; see [Rel](/rel.md).",
+                        },
+                    )
+                ]
+            ),
+            # second complete() raises RuntimeError -> partial result
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_store("knowledge", relates_to=["/rel"])
+
+    assert result["partial"] is True
+    assert "- [N](/n.md)" in backend.docs["/rel.md"]["body"]
+    assert result["backlinked"] == [{"id": "/rel", "title": "Rel"}]
+    assert result["links_after"]["healthy"] is True
+
+
+async def test_update_backlinks_relates_to_server_side():
+    """handle_update runs the same deterministic step for its relates_to."""
+    backend = FakeBackend(
+        docs={
+            "/a.md": {"frontmatter": {"title": "A", "type": "Note"}, "body": "about a\n"},
+            "/rel.md": {"frontmatter": {"title": "Rel", "type": "Note"}, "body": "rel\n"},
+        }
+    )
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "edit_concept",
+                        {"path": "/a.md", "new_body": "about a; see [Rel](/rel.md).\n"},
+                    )
+                ]
+            ),
+            LLMResponse(text="updated /a.md"),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_update("fix the a note", relates_to=["/rel"])
+
+    assert "- [A](/a.md)" in backend.docs["/rel.md"]["body"]
+    assert result["backlinked"] == [{"id": "/rel", "title": "Rel"}]
+    assert result["links_after"]["healthy"] is True
 
 
 # --- payload archive (D3.2, 0.20.0) --------------------------------------------
@@ -2059,3 +2359,168 @@ async def test_related_section_read_failure_logs_warning(caplog):
         section = await librarian._related_section("text")
     assert section == ""
     assert "related-concepts: read failed for /gone" in caplog.text
+
+
+# --- F21: deterministic answer-hygiene guard ----------------------------------
+
+
+def test_dirty_answer_detector_flags_bare_path_blob():
+    # F21 verbatim: a bare bundle-path argument blob on its own line (J2).
+    text = 'Some lead-in.\n{"path": "/athenaeum/versions/v0.4.2.md"}\n'
+    assert "J2" in _dirty_answer_signals(text)
+
+
+def test_dirty_answer_detector_flags_process_narration():
+    # F21 verbatim: first-person process narration (P1).
+    text = "We have not read /ha-agenthub/ha-agenthub-architecture-lessons.md. Let's read it."
+    assert "P1" in _dirty_answer_signals(text)
+
+
+def test_dirty_answer_detector_flags_tool_call_envelope():
+    text = '{"name": "read_document", "arguments": {"path": "/x.md"}}'
+    assert "J1" in _dirty_answer_signals(text)
+
+
+def test_dirty_answer_detector_ignores_fenced_json_config():
+    text = 'Config example:\n```json\n{"path": "/etc/app/config.json"}\n```\nDone.'
+    assert _dirty_answer_signals(text) == []
+
+
+def test_dirty_answer_detector_ignores_fenced_multi_key_object():
+    text = 'Query shape:\n```json\n{"query": "auth flow", "limit": 8}\n```'
+    assert _dirty_answer_signals(text) == []
+
+
+def test_dirty_answer_detector_ignores_clean_german_answer():
+    text = (
+        "Die Architektur ist in [/ha-agenthub/ha-agenthub-architecture-lessons.md] "
+        "beschrieben. Der Orchestrator delegiert die Umsetzung an Subagents."
+    )
+    assert _dirty_answer_signals(text) == []
+
+
+def test_dirty_answer_detector_ignores_clean_citation_answer():
+    text = "Alpha is a note [/alpha.md]. See also [/beta.md]."
+    assert _dirty_answer_signals(text) == []
+
+
+async def test_answer_guard_reasks_once_on_dirty_answer():
+    backend = FakeBackend()
+    dirty = 'We have not read /x.md. Let\'s read it.\n{"path": "/x.md"}'
+    provider = ScriptedProvider(
+        [
+            LLMResponse(text=dirty),
+            LLMResponse(text="Alpha is a note [/alpha.md]."),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_request("what is alpha?")
+
+    assert result["answer"] == "Alpha is a note [/alpha.md]."
+    assert len(provider.calls) == 2
+    retry_messages, retry_tools, _ = provider.calls[1]
+    assert retry_tools == []  # the re-ask is a no-tools completion
+    assert retry_messages[-1]["role"] == "user"
+    assert "Restate your final answer" in retry_messages[-1]["content"]
+
+
+async def test_answer_guard_second_dirty_answer_returns_with_marker():
+    backend = FakeBackend()
+    dirty_first = "We have not read /x.md. Let's read it."
+    dirty_retry = 'I will now read it.\n{"path": "/x.md"}'
+    provider = ScriptedProvider([LLMResponse(text=dirty_first), LLMResponse(text=dirty_retry)])
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_request("q")
+
+    assert len(provider.calls) == 2  # exactly one re-ask, never a loop
+    assert ANSWER_HYGIENE_MARKER in result["answer"]
+    assert dirty_retry in result["answer"]  # model text is kept, not discarded
+
+
+async def test_answer_guard_fires_after_cap_exit():
+    """A dirty cap-exit answer (the model imitating the transcript) is also
+    caught: order per request is loop -> cap exit -> guard re-ask."""
+    backend = FakeBackend()
+    provider = ScriptedProvider(
+        [
+            LLMResponse(tool_calls=[tc("c1", "list_dir", {"path": "/"})]),
+            LLMResponse(text="We have not read /x.md. Let's read it."),
+            LLMResponse(text="Alpha is a note [/alpha.md]."),
+        ]
+    )
+    librarian = make_librarian(backend, provider, max_iterations=0)
+
+    result = await librarian.handle_request("q")
+
+    assert len(provider.calls) == 3  # initial + cap exit + one re-ask
+    cap_messages, cap_tools, _ = provider.calls[1]
+    assert cap_tools == []
+    assert FINAL_ANSWER_REQUEST in cap_messages[-1]["content"]
+    assert result["answer"] == "Alpha is a note [/alpha.md]."
+
+
+async def test_answer_guard_passes_clean_answer_through():
+    backend = FakeBackend()
+    answer = 'The config path:\n```json\n{"path": "/etc/app/config.json"}\n```'
+    provider = ScriptedProvider([LLMResponse(text=answer)])
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_request("q")
+
+    assert result["answer"] == answer
+    assert len(provider.calls) == 1
+
+
+async def test_answer_guard_records_answer_in_trace(tmp_path):
+    backend = FakeBackend()
+    provider = ScriptedProvider([LLMResponse(text="Alpha is a note [/alpha.md].")])
+    librarian = make_librarian(backend, provider)
+    session = TraceSession(tmp_path, "20260819T000000Z-f21trace1", "request_knowledge", None)
+    telemetry = RequestTelemetry(trace_id="20260819T000000Z-f21trace1")
+    session_token = _trace_var.set(session)
+    telemetry_token = _telemetry_var.set(telemetry)
+    try:
+        result = await librarian.handle_request("q")
+        # Production closes the session while the request context (and its
+        # telemetry) is still active; without events or llm data no file is
+        # written at all.
+        session.finish("ok")
+        trace_id = session.close()
+    finally:
+        _trace_var.reset(session_token)
+        _telemetry_var.reset(telemetry_token)
+
+    data = read_trace(tmp_path, trace_id)
+    assert data["answer"] == result["answer"] == "Alpha is a note [/alpha.md]."
+
+
+async def test_write_task_path_unguarded():
+    """Store summaries may legitimately quote JSON: no re-ask on write tasks."""
+    backend = FakeBackend()
+    summary = 'Stored the config note.\n```json\n{"path": "/etc/app/config.json"}\n```'
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    tc(
+                        "c1",
+                        "write_concept",
+                        {
+                            "path": "/new.md",
+                            "frontmatter": {"title": "New", "type": "Note"},
+                            "body": "fresh knowledge",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text=summary),
+        ]
+    )
+    librarian = make_librarian(backend, provider)
+
+    result = await librarian.handle_store("knowledge")
+
+    assert len(provider.calls) == 2  # no answer-hygiene re-ask on write tasks
+    assert "```json" in result["summary"]

@@ -56,6 +56,12 @@ def test_default_prompt_pins_markdown_link_syntax():
     assert "invisible to the link graph" in DEFAULT_SYSTEM_PROMPT
 
 
+def test_default_prompt_pins_server_side_backlinking():
+    """F22: relates_to back-linking is the server's job; the model never claims it."""
+    assert "back-linked deterministically by the server" in DEFAULT_SYSTEM_PROMPT
+    assert "MUST NOT claim them in your summary" in DEFAULT_SYSTEM_PROMPT
+
+
 def test_default_prompt_pins_trust_vocabulary():
     """verified is written ONLY by the automatic post-curation verification."""
     assert "appended only by the automatic post-curation" in DEFAULT_SYSTEM_PROMPT

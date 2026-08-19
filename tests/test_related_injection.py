@@ -229,5 +229,37 @@ async def test_handle_store_task_clarifies_backlinks_not_placement():
     await librarian.handle_store("knowledge", relates_to=["/a"])
 
     task = provider.calls[0][0][1]["content"]
-    assert "back-link candidates, NOT placement hints" in task
+    # F22: relates_to back-linking is automatic server-side, not a model duty
+    assert "back-linked by the server automatically" in task
+    assert "do not write or claim those links yourself" in task
+    assert "NOT placement hints" in task
     assert "target topic area" in task
+
+
+async def test_handle_update_task_relates_to_line_only_when_provided():
+    backend = FakeBackend(docs={"/a.md": DOC_ALPHA})
+    with_provider = ScriptedProvider([WRITE, LLMResponse(text="updated")])
+    with_librarian = make_librarian(backend, with_provider)
+
+    await with_librarian.handle_update("fix the alpha note", relates_to=["/a"])
+
+    task = with_provider.calls[0][0][1]["content"]
+    assert (
+        "Related concept IDs suggested by the caller: /a — back-linking these is "
+        "automatic server-side; do not write or claim those links yourself." in task
+    )
+    # the relates_to line sits directly after the Instruction block
+    assert task.index("Instruction:\nfix the alpha note") < task.index(
+        "Related concept IDs suggested by the caller: /a"
+    )
+
+    without_provider = ScriptedProvider([WRITE, LLMResponse(text="updated")])
+    without_librarian = make_librarian(backend, without_provider)
+
+    await without_librarian.handle_update("fix the alpha note")
+
+    task = without_provider.calls[0][0][1]["content"]
+    assert "Related concept IDs suggested by the caller" not in task
+    # byte shape without relates_to: the instruction line leads straight into
+    # the locate guidance (no related service configured here)
+    assert "Instruction:\nfix the alpha note\n\nLocate the target concept(s)" in task

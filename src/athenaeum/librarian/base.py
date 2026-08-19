@@ -184,6 +184,121 @@ def _post_run_note(converged: bool, done: str, remaining: str) -> str:
     return f"\n\nPost-run check: {done if converged else remaining}"
 
 
+ANSWER_HYGIENE_RETRY = (
+    "Your answer contained raw tool-call JSON or process narration "
+    "(signals: {signals}). Restate your final answer now: results and "
+    "citations only — no tool calls, no tool-call JSON, no narration of "
+    "your process or what you have not read."
+)
+
+ANSWER_HYGIENE_MARKER = (
+    "answer-hygiene check: the automatic clean-up retry did not remove all "
+    "raw tool-call/process fragments — treat embedded JSON blobs or process "
+    "narration as artifacts, not content."
+)
+
+# Internal tool-call surface: a whole-line JSON envelope naming one of these is
+# a leaked tool call (F21), never answer content.
+_INTERNAL_TOOL_NAMES = frozenset(schema["name"] for schema in TOOL_SCHEMAS)
+
+# Known tool-argument keys: a whole-line JSON blob restricted to these is a
+# leaked argument fragment.
+_TOOL_ARG_KEYS = frozenset(
+    {
+        "path",
+        "query",
+        "content",
+        "instruction",
+        "old_path",
+        "new_path",
+        "field",
+        "value",
+        "connection_id",
+        "kind_hint",
+        "topic_hint",
+    }
+)
+
+_BUNDLE_PATH_RE = re.compile(r"^/\S+\.md$")
+
+# Process-narration fragments (case-insensitive substring per line). English is
+# primary — prompts, tool results and the observed F21 fragments are English.
+# German stays small and high-precision: the library content is largely German,
+# so only unambiguous first-person process narration is pinned here.
+_PROCESS_PHRASES = (
+    "let's read",
+    "let me read",
+    "let me search",
+    "we have not read",
+    "we haven't read",
+    "i will now",
+    "i'll read",
+    "i'll search",
+    "i need to read",
+    "lass uns lesen",
+    "wir haben nicht gelesen",
+    "ich werde jetzt lesen",
+    "ich lese jetzt",
+)
+
+
+def _dirty_answer_signals(text: str) -> list[str]:
+    """Signal ids for F21-style leakage in a final answer; ``[]`` = clean.
+
+    Pure string work, never raises. JSON rules (J1/J2/J3) only fire when the
+    blob is the WHOLE stripped line; the process-fragment rule (P1) is a
+    case-insensitive substring match. All rules skip fenced code blocks, so
+    quoted lesson/config content cannot false-positive.
+    """
+    signals: list[str] = []
+    weak_blobs = 0
+    fenced = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or not stripped:
+            continue
+        if any(phrase in stripped.lower() for phrase in _PROCESS_PHRASES):
+            if "P1" not in signals:
+                signals.append("P1")
+        try:
+            blob = json.loads(stripped)
+        except ValueError:
+            continue
+        if not isinstance(blob, dict):
+            continue
+        if (
+            isinstance(blob.get("name"), str)
+            and blob["name"] in _INTERNAL_TOOL_NAMES
+            and ("arguments" in blob or "parameters" in blob)
+        ):
+            # J1: tool-call envelope — always dirty.
+            if "J1" not in signals:
+                signals.append("J1")
+            continue
+        if (
+            len(blob) == 1
+            and isinstance(blob.get("path"), str)
+            and _BUNDLE_PATH_RE.match(blob["path"])
+        ):
+            # J2: bare bundle-path argument blob — dirty on its own.
+            if "J2" not in signals:
+                signals.append("J2")
+            continue
+        if (
+            1 <= len(blob) <= 2
+            and blob.keys() <= _TOOL_ARG_KEYS
+            and all(isinstance(value, str) for value in blob.values())
+        ):
+            # J3: weak argument blob — dirty only with a second signal.
+            weak_blobs += 1
+    if weak_blobs >= 2 or (weak_blobs == 1 and "P1" in signals):
+        signals.append("J3")
+    return signals
+
+
 class BaseAgent:
     """One agent bound to one library root and one user config."""
 
@@ -368,6 +483,7 @@ class BaseAgent:
         requested_by: str | None = None,
         via: str | None = None,
         write_task: bool = False,
+        answer_guard: bool = False,
     ) -> _RunResult:
         """Hand-rolled tool-calling loop (plan section 3.4)."""
         llm_config = llm_config or self.config.llm
@@ -473,6 +589,31 @@ class BaseAgent:
                 response = await complete_timed(messages, [])
             except Exception as exc:
                 raise self._provider_failure(exc, tracker, iterations) from exc
+        if answer_guard:
+            # F21: deterministic answer-hygiene check with ONE bounded re-ask
+            # (no tools, outside the iteration budget). A second dirty answer
+            # is returned with a deterministic marker, never dropped.
+            signals = _dirty_answer_signals(response.text or "")
+            if signals:
+                logger.warning("answer-hygiene guard fired (%s); re-asking once", signals)
+                messages.append({"role": "assistant", "content": response.text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": ANSWER_HYGIENE_RETRY.format(signals=", ".join(signals)),
+                    }
+                )
+                try:
+                    retry = await complete_timed(messages, [])
+                except Exception as exc:
+                    raise self._provider_failure(exc, tracker, iterations) from exc
+                if not _dirty_answer_signals(retry.text or ""):
+                    response = retry
+                else:
+                    response = LLMResponse(
+                        text=(retry.text or "") + _post_run_note(False, "", ANSWER_HYGIENE_MARKER),
+                        usage=retry.usage,
+                    )
         if telemetry is not None:
             # Accumulate, never overwrite: the F11 nudge retry runs _run twice
             # in one request, and the retry's numbers must ADD to the first

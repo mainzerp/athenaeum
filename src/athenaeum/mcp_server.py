@@ -532,15 +532,23 @@ linked into the stored concepts."""
         return result
 
     @mcp.tool
-    async def update_knowledge(instruction: str, ctx: Context = None) -> dict:
-        """Change or correct existing knowledge; the librarian locates the target concepts."""
+    async def update_knowledge(
+        instruction: str, relates_to: list[str] | None = None, ctx: Context = None
+    ) -> dict:
+        """Change or correct existing knowledge; the librarian locates the \
+target concepts. Optional `relates_to` concept ids are back-linked \
+deterministically server-side after the run."""
         user_id, label = _identity()
         requested_by = await asyncio.to_thread(_requested_by, manager.db_path, user_id)
         async with _agent_run(
             manager, user_id, label, "update_knowledge", for_client=True
         ) as librarian:
             result = await librarian.handle_update(
-                instruction, agent_label=label, requested_by=requested_by, via="mcp_chat"
+                instruction,
+                relates_to=relates_to,
+                agent_label=label,
+                requested_by=requested_by,
+                via="mcp_chat",
             )
         await _refresh_seed(user_id, ctx)
         try:
