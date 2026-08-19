@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.25.5**
+Current version: **0.26.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,23 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.26.0
+
+Deterministic relates_to back-linking + answer hygiene guard (`f9d76da`):
+store_knowledge/update_knowledge summaries could claim relates_to backlinks
+that were never written (F22, six live confirmations) — back-linking is now
+done deterministically server-side (`LibraryBackend.add_backlink`, with path
+normalization, dedupe, and a Related-concepts append) before `links_after`
+scans, and `update_knowledge` gains an optional `relates_to` parameter.
+Results carry an additive `backlinked` field; the model is told the server
+does the relates_to linking and must not claim it. Also fixes F21: a
+deterministic dirty-answer detector (raw tool-call JSON, path blobs, EN/DE
+process phrases; fenced code excluded) triggers one bounded no-tools re-ask
+for request_knowledge answers, a second dirty answer is returned with a
+marker instead of being dropped, and traces now record the final answer
+(2 KB cap). `read_document` gains a `.md` fallback and a directory-aware
+error. No breaking changes.
 
 ### 0.25.5
 
