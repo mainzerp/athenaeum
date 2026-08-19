@@ -4,7 +4,7 @@ One in-process asyncio task (started in the app lifespan) wakes once per
 minute and, for every user whose ``curate_schedule_enabled`` flag is set and
 whose UTC ``curate_schedule_time`` fell inside the window since the previous
 tick, runs ``library_maintain`` followed by ``library_curate`` through the
-same librarian handlers the MCP tools use.
+same curator agent handlers the MCP tools use.
 
 Design notes (SCHEDULED_CURATION plan D5-D12, D16, D19):
 
@@ -12,7 +12,7 @@ Design notes (SCHEDULED_CURATION plan D5-D12, D16, D19):
   minute, and a user fires at most once per day even after a multi-day stall.
 - One activity row per tool (``token_label``/``agent_label`` = "scheduler"),
   one ``RequestTelemetry`` + one ``TraceSession`` per tool through the same
-  ``mcp_server._agent_run`` / ``activity.journal_activity`` wiring the MCP
+  ``mcp_server._curator_run`` / ``activity.journal_activity`` wiring the MCP
   tools use (A8); no-op runs journal a row but write no trace file. A busy
   gate after the pre-check journals an error row, matching the MCP tools.
 - A completed curate run (success or no-op) re-baselines
@@ -42,18 +42,17 @@ from typing import TYPE_CHECKING
 
 from athenaeum import db
 from athenaeum.activity import journal_activity
-from athenaeum.librarian.agent import KIND_CURATOR
-from athenaeum.librarian.gate import AgentRunBusyError
+from athenaeum.librarian.gate import KIND_CURATOR, AgentRunBusyError
 from athenaeum.librarian.tracing import (
     RequestTelemetry,
     _telemetry_var,
     mint_request_id,
 )
-from athenaeum.mcp_server import _agent_run
+from athenaeum.mcp_server import _curator_run
 
 if TYPE_CHECKING:
     from athenaeum.activity import ActivityRegistry
-    from athenaeum.librarian.agent import Librarian
+    from athenaeum.curator.agent import Curator
     from athenaeum.librarian.manager import LibrarianManager
     from athenaeum.mcp_server import SeedCache
 
@@ -168,13 +167,14 @@ class CurateScheduler:
         if not librarian.configured:
             logger.info("scheduler: skipping unconfigured user %s", user_id)
             return
+        curator = await asyncio.to_thread(self._manager.get_curator, user_id)
         mutated = False
         dirty: list[dict] = []
         for tool, handler in (
-            ("library_maintain", librarian.handle_maintain),
-            ("library_curate", librarian.handle_curate),
+            ("library_maintain", curator.handle_maintain),
+            ("library_curate", curator.handle_curate),
         ):
-            result = await self._run_tool(user_id, librarian, tool, handler)
+            result = await self._run_tool(user_id, curator, tool, handler)
             if result is not None:
                 mutated = mutated or bool(result.get("actions"))
                 dirty += result.get("actions") or []
@@ -184,7 +184,7 @@ class CurateScheduler:
                     await asyncio.to_thread(self._manager.set_curate_last_run, user_id, db.utcnow())
         try:
             # A failed embedding run must never block curate (maintain precedent).
-            await librarian.sync_embeddings(dirty)
+            await curator.sync_embeddings(dirty)
         except Exception:
             logger.exception("scheduler: embedding sync failed for user %s", user_id)
         if mutated and self._seed_cache is not None:
@@ -208,10 +208,11 @@ class CurateScheduler:
         if not librarian.configured:
             logger.info("run_now: skipping unconfigured user %s", user_id)
             return
+        curator = await asyncio.to_thread(self._manager.get_curator, user_id)
         try:
             result = await asyncio.wait_for(
                 self._run_tool(
-                    user_id, librarian, "library_curate", librarian.handle_curate, label=token_label
+                    user_id, curator, "library_curate", curator.handle_curate, label=token_label
                 ),
                 timeout=self._run_timeout,
             )
@@ -227,7 +228,7 @@ class CurateScheduler:
         await asyncio.to_thread(self._manager.set_curate_last_run, user_id, db.utcnow())
         try:
             # A failed embedding run must never fail the curate run (maintain precedent).
-            await librarian.sync_embeddings(dirty)
+            await curator.sync_embeddings(dirty)
         except Exception:
             logger.exception("run_now: embedding sync failed for user %s", user_id)
         if dirty and self._seed_cache is not None:
@@ -236,7 +237,7 @@ class CurateScheduler:
     async def _run_tool(
         self,
         user_id: str,
-        librarian: Librarian,
+        agent: Curator,
         tool: str,
         handler,
         *,
@@ -265,7 +266,7 @@ class CurateScheduler:
         outcome, error_text, result = "ok", None, None
         journal = True
         try:
-            async with _agent_run(self._manager, user_id, label, tool, for_client=False):
+            async with _curator_run(self._manager, user_id, label, tool, for_client=False):
                 result = await handler(None, agent_label=label)
         except AgentRunBusyError as exc:
             # Gate contention after the pre-check: journaled as an error row,

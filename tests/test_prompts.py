@@ -5,13 +5,15 @@ consumer side of the status() orphan-dict contract in
 build_maintain_preamble, independently of the agent loop.
 """
 
-from athenaeum.librarian.prompts import (
-    DEFAULT_SYSTEM_PROMPT,
+from athenaeum.curator.prompts import (
+    CURATE_TASK_TEMPLATE,
+    MAINTAIN_TASK_TEMPLATE,
     build_curate_preamble,
+    build_curator_system_prompt,
     build_maintain_preamble,
-    build_system_prompt,
     render_curate_prompt_display,
 )
+from athenaeum.librarian.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 
 
 def test_default_prompt_has_write_discipline_markers():
@@ -63,8 +65,6 @@ def test_default_prompt_pins_trust_vocabulary():
 
 def test_curator_templates_pin_automatic_verification():
     """MAINTAIN/CURATE: repairs are machine-confirmed; never claim manual verification."""
-    from athenaeum.librarian.prompts import CURATE_TASK_TEMPLATE, MAINTAIN_TASK_TEMPLATE
-
     for template in (MAINTAIN_TASK_TEMPLATE, CURATE_TASK_TEMPLATE):
         assert "machine-confirmed automatically" in template
         assert "must not write `verified` yourself" in template
@@ -301,4 +301,23 @@ def test_build_system_prompt_with_addendum():
     assert "Standing rules from the library owner:" in prompt
     assert prompt.rstrip().endswith("Answer in German.")
     braced = build_system_prompt("keep {braces} intact")
+    assert "keep {braces} intact" in braced
+
+
+def test_build_curator_system_prompt_default_only():
+    from athenaeum.curator.prompts import CURATOR_SYSTEM_PROMPT
+
+    assert build_curator_system_prompt() == CURATOR_SYSTEM_PROMPT
+    assert build_curator_system_prompt(None) == CURATOR_SYSTEM_PROMPT
+    assert "Standing rules from the library owner:" not in build_curator_system_prompt("")
+
+
+def test_build_curator_system_prompt_with_addendum():
+    from athenaeum.curator.prompts import CURATOR_SYSTEM_PROMPT
+
+    prompt = build_curator_system_prompt("Answer in German.")
+    assert prompt.startswith(CURATOR_SYSTEM_PROMPT)
+    assert "Standing rules from the library owner:" in prompt
+    assert prompt.rstrip().endswith("Answer in German.")
+    braced = build_curator_system_prompt("keep {braces} intact")
     assert "keep {braces} intact" in braced

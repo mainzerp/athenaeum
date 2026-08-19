@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from athenaeum.librarian.agent import KIND_LIBRARIAN
+from athenaeum.librarian.gate import KIND_LIBRARIAN
 from athenaeum.library import gittool, transfer
 from athenaeum.library.backend import LibraryBackend
 

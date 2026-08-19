@@ -1,30 +1,26 @@
 # Athenaeum — Roadmap
 
-> Forward-looking phase plan. A future session should be able to pick up work
-> from this document alone. Companion to `project-definition.md` (what and
-> why), `architecture.md` (decisions), and
-> `prime-directives.md` (non-negotiable rules). Deferred items live in this
-> document (phase sections and "Later / exploratory"); they originate from
-> the deferred-items section (§7) of the MVP-phase plan (a working file
-> deleted before the initial push) and the understory comparison.
+> Forward-looking phase plan; lists only work that is still open. A future
+> session should be able to pick up work from this document alone. Companion
+> to `project-definition.md` (what and why), `architecture.md` (decisions),
+> and `prime-directives.md` (non-negotiable rules).
 
 ## Phase 6 — LLM fallback provider
 
 **Goal:** A secondary LLM provider takes over when the primary fails,
 configured per user.
 
-> **Structural prerequisite shipped in 0.8.0**: named provider connections
-> with stable ids (`provider_configs`), one default per user, and per-agent
-> references (`librarian_connection_id` / `curator_connection_id`) already
-> exist. What remains is the failure semantics and switching logic below.
+The structural seam already exists: named provider connections with stable
+ids (`provider_configs`), one default per user, per-agent references
+(`librarian_connection_id` / `curator_connection_id`), and the `LLMProvider`
+protocol + provider factory.
 
-Items:
+Open items:
 
 - **Per-user fallback configuration** (deferred from understory as
   `LLM_FALLBACK_*`): designate a secondary connection as the fallback.
   **PD-1 applies**: configuration lives in the Admin WebUI + database, not
-  in environment variables. The `LLMProvider` protocol and provider factory
-  are the seam.
+  in environment variables.
 - **Failure semantics**: define what triggers fallback (transport errors,
   rate limits, timeouts) and what does not (model refusals, malformed tool
   calls), plus surfacing fallback events in the WebUI activity view.
@@ -78,27 +74,17 @@ Items:
 - **Dormancy semantics**: per-user configs stay dormant and re-activate when
   the mode is switched off, vs. hard-overridden.
 
-## Multi-worker foundation
+## Multi-worker deployment
 
-The concurrency foundation for running several Athenaeum workers against one
-data volume is implemented (details in `architecture.md` §7); single-worker
-remains the deployment default.
+The concurrency foundation is implemented (details in `architecture.md` §7);
+single-worker remains the deployment default. Still deferred, each needing an
+explicit go decision:
 
-- `RunGate` keyed `(user_id, agent_kind)`: at most one librarian and one
-  curator run per user; MCP calls get a retryable busy error, the scheduler
-  skips due runs.
-- Per-root write lock serializes compound writes across backend instances;
-  SQLite runs WAL + `busy_timeout=5000`; the embed reconcile is claimed in
-  the DB.
-- Seeds are composed per request by middleware (the registry is never
-  mutated) and self-validate via the log.md mtime; the `mcp_stateless_http`
-  admin setting selects the stateless MCP transport (takes effect on
-  restart).
-
-Still deferred (each needs an explicit go decision): multi-worker deployment
-itself, the cross-process DB-mutex write lock, an external MCP event store
-(or sticky sessions as the alternative), and sharing the per-worker
-ActivityRegistry / EmbedStatusRegistry in-flight state.
+- Multi-worker deployment itself.
+- Cross-process DB-mutex write lock.
+- External MCP event store (or sticky sessions as the alternative).
+- Sharing the per-worker ActivityRegistry / EmbedStatusRegistry in-flight
+  state.
 
 ## Later / exploratory
 
@@ -109,10 +95,13 @@ its own Research -> Planning cycle before any work starts.
   the per-user librarian from the browser, with tool calls rendered inline so
   the owner can watch it work. Useful for testing prompt/config changes.
 - **`sqlite-vec` ANN index for embeddings** (conditional upgrade path): the
-  embedding subsystem (0.12.0) uses stdlib cosine top-k over float32 BLOBs —
-  correct at the <1000-concept scale. If libraries grow past ~10k concepts,
-  move to `sqlite-vec` behind the same `EmbeddingService` seam; the table
-  layout already carries model/dims per row for a mixed-state migration.
+  embedding subsystem uses stdlib cosine top-k over float32 BLOBs (`top_k`
+  loads all vectors into RAM) — correct at the <1000-concept scale. If
+  libraries grow past ~10k concepts, move to `sqlite-vec` behind the same
+  `EmbeddingService` seam: an HNSW or flat index queried in SQL
+  (`ORDER BY vec_distance_cosine(...) LIMIT k`) keeps RAM flat and scaling
+  linear. The table layout already carries model/dims per row for a
+  mixed-state migration.
 - **Per-user subprocess isolation** (deferred). One shared process with
   in-process per-user librarians today; `LibrarianManager` is the swap seam.
   Motivation would be blast-radius containment of a misbehaving librarian or
@@ -120,16 +109,35 @@ its own Research -> Planning cycle before any work starts.
 - **Streaming LLM responses** (deferred). Not needed for intent-based
   request/response tools; the `LLMProvider` protocol can grow a streaming
   variant if a future tool wants progressive output.
-- **Tool-description refresh via `tools/list_changed`** after writes in a long-lived MCP session, push a refreshed seed
-  so the client session sees its own writes without reconnecting.
-- **Verification workflow for trust tiers** (gap found 2026-07-30): trust
-  tiers are derived from the `verified` frontmatter list, but nothing in the
-  product ever sets it — `edit_concept` explicitly refuses to touch
-  `verified` (backend.py), and neither `library_curate` nor
-  `library_maintain` perform content verification. Every concept stays
-  `unverified` unless someone hand-edits the markdown. Open design
-  questions: a dedicated verify path (tool or WebUI action) for humans; a
-  machine verifier actor (e.g. `process:nightly-validator`) with defined
-  checks; whether the nightly curate run should gain an opt-in verification
-  step; and what verification actually asserts (link validity, source
-  freshness, owner sign-off).
+- **Tool-description refresh via `tools/list_changed`** after writes in a
+  long-lived MCP session, push a refreshed seed so the client session sees
+  its own writes without reconnecting.
+- **Ingest / Inbox with batched curation**: today every input immediately
+  triggers a librarian LLM run — costly and latent for quick captures made
+  outside the chat (reading, meetings, ideas on the go). Proposal: a
+  token-protected capture endpoint (and/or WebUI quick-capture) writes raw
+  items into a structured inbox with no LLM involved; the curator processes
+  the backlog in one batched run, triggered by a threshold (X pending items)
+  in addition to the nightly schedule. An e-mail adapter (e.g.
+  `save@athenaeum.local`) is a later optional channel on top of the same
+  ingest seam, not the entry point. Open design question: inbox as a DB
+  table vs. a markdown folder inside the library (visibility in the WebUI,
+  git versioning, backup).
+- **Human verification path for trust tiers**: machine verification exists —
+  `verify_concept` (backend.py) is the sole writer of `verified`, and each
+  curator run machine-verifies the concepts it repaired (verifier label
+  `athenaeum-curator/<version>`). Open: a dedicated verify path (tool or
+  WebUI action) for humans; whether the nightly curate run should gain an
+  opt-in verification step; and what verification actually asserts (link
+  validity, source freshness, owner sign-off).
+- **TOTP second factor for WebUI login**: login is currently password-only
+  (signed-cookie session with password marker). Add per-user TOTP: secret in
+  the database, enrollment flow with an otpauth QR code, a second login
+  step, and a decision on recovery codes. TOTP itself is stdlib-feasible
+  (`hmac`/`hashlib`); QR rendering is the only new dependency question.
+- **Configurable reasoning effort**: `LLMConfig` today carries only
+  `temperature` / `max_tokens`; the three providers map them per API. Add a
+  per-agent reasoning-effort setting (PD-1: Admin WebUI + database) and map
+  it per provider (OpenAI `reasoning_effort`, Anthropic
+  `thinking.budget_tokens`, Gemini `thinkingBudget`). Open design question:
+  unified levels (low/medium/high) vs. provider-native token budgets.

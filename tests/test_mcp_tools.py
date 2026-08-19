@@ -786,7 +786,11 @@ async def test_cancelled_handler_traces_outcome_cancelled(
 ):
     """A handler raising CancelledError traces outcome 'cancelled', never 'ok'."""
     server, manager, *_ = make_stack(tmp_path)
-    librarian = manager.get("user-a")
+    # the MCP tools dispatch maintain/curate to the pair's curator half
+    if handler_name in ("handle_maintain", "handle_curate"):
+        agent = manager.get_curator("user-a")
+    else:
+        agent = manager.get("user-a")
 
     async def cancelled(*args, **kwargs):
         session = current_trace()
@@ -794,7 +798,7 @@ async def test_cancelled_handler_traces_outcome_cancelled(
         session.record("list_dir", {"path": "/"}, [], None, 1.0)
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(librarian, handler_name, cancelled)
+    monkeypatch.setattr(agent, handler_name, cancelled)
     set_identity(monkeypatch, "user-a", "agent-a")
     tool = await server.get_tool(tool_name)
     with pytest.raises(asyncio.CancelledError):

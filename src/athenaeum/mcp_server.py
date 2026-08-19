@@ -201,29 +201,48 @@ async def _configured_librarian(manager: LibrarianManager, user_id: str):
     return librarian
 
 
+async def _configured_curator(manager: LibrarianManager, user_id: str):
+    # Mirrors _configured_librarian (same configured check and error text —
+    # the curator inherits the librarian binding per A21) for the pair's
+    # curator half (manager.get_curator).
+    curator = await asyncio.to_thread(manager.get_curator, user_id)
+    if not curator.configured:
+        raise ToolError(
+            "Librarian is not configured for this user: set an LLM provider, "
+            "model, and API key in the librarian settings."
+        )
+    return curator
+
+
 @asynccontextmanager
-async def _agent_run(
-    manager: LibrarianManager, user_id: str, label: str, tool: str, *, for_client: bool
+async def _agent_run_impl(
+    manager: LibrarianManager,
+    user_id: str,
+    label: str,
+    tool: str,
+    *,
+    for_client: bool,
+    get_agent,
 ) -> AsyncIterator[Any]:
     """Shared trace/exception wiring for one agent-backed run (A8).
 
-    Opens the librarian and a TraceSession, finishes the session by exception
+    Opens the agent and a TraceSession, finishes the session by exception
     type (ok / error / cancelled), and closes it. With ``for_client`` (the
     MCP tools) failures translate to client-facing ToolErrors — sanitized for
     unexpected exceptions (CS-5); without it (the scheduler) the original
     exception propagates so the caller can journal the raw error text.
     """
-    librarian = await _configured_librarian(manager, user_id)
+    agent = await get_agent(manager, user_id)
     session = TraceSession(
         manager.library_root(user_id),
         telemetry_or_mint().trace_id,
         tool=tool,
         agent_label=label,
-        keep=librarian.config.trace_keep,
+        keep=agent.config.trace_keep,
     )
     trace_token = _trace_var.set(session)
     try:
-        yield librarian
+        yield agent
         session.finish(outcome="ok")
     except LibrarianNoWriteError as exc:
         session.finish(outcome="error", error=str(exc))
@@ -248,6 +267,24 @@ async def _agent_run(
         # Trace persistence is filesystem I/O — keep it off the loop (A1);
         # failure containment lives inside close() itself.
         await asyncio.to_thread(session.close)
+
+
+def _agent_run(
+    manager: LibrarianManager, user_id: str, label: str, tool: str, *, for_client: bool
+) -> AsyncIterator[Any]:
+    """Agent-run wiring over the user's Librarian (request/store/update)."""
+    return _agent_run_impl(
+        manager, user_id, label, tool, for_client=for_client, get_agent=_configured_librarian
+    )
+
+
+def _curator_run(
+    manager: LibrarianManager, user_id: str, label: str, tool: str, *, for_client: bool
+) -> AsyncIterator[Any]:
+    """Agent-run wiring over the user's Curator (maintain/curate)."""
+    return _agent_run_impl(
+        manager, user_id, label, tool, for_client=for_client, get_agent=_configured_curator
+    )
 
 
 class BearerAuthMiddleware(Middleware):
@@ -528,16 +565,16 @@ linked into the stored concepts."""
 
     @mcp.tool
     async def library_maintain(instructions: str | None = None, ctx: Context = None) -> dict:
-        """Drive the librarian to repair graph health; no-op when healthy."""
+        """Drive the curator to repair graph health; no-op when healthy."""
         user_id, label = _identity()
-        async with _agent_run(
+        async with _curator_run(
             manager, user_id, label, "library_maintain", for_client=True
-        ) as librarian:
-            result = await librarian.handle_maintain(instructions, agent_label=label)
+        ) as curator:
+            result = await curator.handle_maintain(instructions, agent_label=label)
         if result.get("actions"):
             await _refresh_seed(user_id, ctx)
         try:
-            await librarian.sync_embeddings(result.get("stored") or result.get("actions") or [])
+            await curator.sync_embeddings(result.get("stored") or result.get("actions") or [])
         except Exception:
             logger.exception("embedding sync failed for user %s", user_id)
         return result
@@ -547,17 +584,17 @@ linked into the stored concepts."""
         """Curate library organization: fix taxonomy, move misplaced concepts, and \
 consolidate duplicates; no-op when well-organized."""
         user_id, label = _identity()
-        async with _agent_run(
+        async with _curator_run(
             manager, user_id, label, "library_curate", for_client=True
-        ) as librarian:
-            result = await librarian.handle_curate(instructions, agent_label=label)
+        ) as curator:
+            result = await curator.handle_curate(instructions, agent_label=label)
         # Run-end timestamp on every completed run (no-op and mutating); the
         # exception path above skips it, so failed runs don't re-baseline.
         await asyncio.to_thread(manager.set_curate_last_run, user_id, db.utcnow())
         if result.get("actions"):
             await _refresh_seed(user_id, ctx)
         try:
-            await librarian.sync_embeddings(result.get("stored") or result.get("actions") or [])
+            await curator.sync_embeddings(result.get("stored") or result.get("actions") or [])
         except Exception:
             logger.exception("embedding sync failed for user %s", user_id)
         return result

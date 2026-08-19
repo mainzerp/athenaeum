@@ -1,7 +1,7 @@
 """Deterministic organization findings: structural lints over a bundle root.
 
 Mirrors ``validate.py``'s shape (pure functions, no backend state, no LLM).
-Consumed by ``Librarian.handle_curate`` the same way ``status()`` consumes
+Consumed by ``Curator.handle_curate`` the same way ``status()`` consumes
 ``validate()``. Kept out of the validator on purpose: ``healthy`` drives the
 maintain no-op and is contract-pinned; organization smells are lints, not
 OKF conformance issues.
@@ -22,7 +22,7 @@ duplicate pair only when at least one member changed.
 
 The module stays pure functions / no backend state / no LLM. The fifth
 finding key, ``semantic_duplicate_candidates``, is an empty placeholder the
-caller (``Librarian.handle_curate``) fills from the embedding store. The
+caller (``Curator.handle_curate``) fills from the embedding store. The
 sixth, ``deprecated_cleanup``, is computed here: deprecated concepts with no
 inbound links from non-deprecated concepts are pending deletion. The
 seventh, ``store_payload_reviews``, is another caller-filled placeholder:

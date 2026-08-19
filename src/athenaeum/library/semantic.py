@@ -1,7 +1,7 @@
 """Semantic duplicate candidates: embedding-similarity concept pairs (F2).
 
 Pure over cached vectors: no embedding calls at scan time — the caller
-(``Librarian.handle_curate``) passes the embedding store's ``load()`` output,
+(``Curator.handle_curate``) passes the embedding store's ``load()`` output,
 so the zero-cost converged-night property survives. Gates mirror
 ``organize.organization_findings``' near-duplicate pass (same-type,
 changed-set, series guard) plus a Jaccard dedup so a pair already reported by

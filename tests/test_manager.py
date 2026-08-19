@@ -77,7 +77,7 @@ def test_config_row_loaded(tmp_path):
     # unbound curator fully inherits: curate_llm stays None (explicit
     # "inherit" marker, A21); the effective curate config is the librarian's
     assert librarian.config.curate_llm is None
-    assert librarian._curate_llm() is librarian.config.llm
+    assert manager.get_curator("user-1")._curate_llm() is librarian.config.llm
     assert librarian.config.curate_last_run_at is None
     assert librarian.config.curate_prompt_addendum is None
     assert librarian.configured
@@ -415,3 +415,64 @@ def test_undecryptable_embedding_key_surfaces_targeted_config_error(tmp_path, ca
         with pytest.raises(LibrarianNotConfiguredError, match="undecryptable"):
             manager.get("user-1")
     assert "undecryptable api key for user user-1 connection conn-a" in caplog.text
+
+
+# --- (Librarian, Curator) pair caching (curator split) -------------------------
+
+
+def test_get_curator_returns_cached_pair_half(tmp_path):
+    manager = make_manager(make_db(tmp_path), tmp_path)
+    curator = manager.get_curator("user-1")
+    # same cache path as get(): the pair is built exactly once
+    assert manager.get_curator("user-1") is curator
+    assert manager.cached_user_ids() == ["user-1"]
+    librarian = manager.get("user-1")
+    assert curator is not librarian
+    # one backend, one provider instance, the manager's shared run gate (D7)
+    assert curator.backend is librarian.backend
+    assert curator._provider is librarian._provider
+    assert curator._run_gate is manager.run_gate
+    assert librarian._run_gate is manager.run_gate
+    assert curator._computation_runner is manager.computation_runner
+
+
+def test_evict_shuts_down_both_agents(tmp_path):
+    manager = make_manager(make_db(tmp_path), tmp_path)
+    librarian = manager.get("user-1")
+    curator = manager.get_curator("user-1")
+    stopped = []
+
+    def stop_librarian():
+        stopped.append("librarian")
+
+    def stop_curator():
+        stopped.append("curator")
+
+    librarian.shutdown = stop_librarian
+    curator.shutdown = stop_curator
+
+    manager.evict("user-1")
+
+    assert sorted(stopped) == ["curator", "librarian"]
+    assert manager.cached_user_ids() == []
+
+
+def test_close_shuts_down_both_agents(tmp_path):
+    manager = make_manager(make_db(tmp_path), tmp_path)
+    librarian = manager.get("user-1")
+    curator = manager.get_curator("user-1")
+    stopped = []
+
+    def stop_librarian():
+        stopped.append("librarian")
+
+    def stop_curator():
+        stopped.append("curator")
+
+    librarian.shutdown = stop_librarian
+    curator.shutdown = stop_curator
+
+    manager.close()
+
+    assert sorted(stopped) == ["curator", "librarian"]
+    assert manager.cached_user_ids() == []

@@ -1,4 +1,4 @@
-"""LibrarianManager: per-user Librarian registry.
+"""LibrarianManager: per-user Librarian/Curator pair registry.
 
 Contract: plan section 2 (stream B checklist). Lazy init from the
 ``librarian_configs`` DB row (schema: plan section 3.5), dict cache,
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from athenaeum import db, isolation
 from athenaeum.computation import ComputationRunner
+from athenaeum.curator.agent import Curator
 from athenaeum.embeddings import EmbeddingService, EmbedStatusRegistry
 from athenaeum.fts import FtsIndex
 from athenaeum.librarian.agent import Librarian, LibrarianConfig, LibrarianNotConfiguredError
@@ -44,7 +45,7 @@ _CONFIG_COLUMNS = (
 
 
 class LibrarianManager:
-    """Maps user_id -> Librarian, lazily created, cached, idle-evicted."""
+    """Maps user_id -> (Librarian, Curator) pair, lazily created, cached, idle-evicted."""
 
     def __init__(
         self,
@@ -74,9 +75,9 @@ class LibrarianManager:
         self._provider_factory = provider_factory
         self._embedding_provider_factory = embedding_provider_factory
         self._embed_status = EmbedStatusRegistry()
-        self._cache: dict[str, tuple[Librarian, float]] = {}
-        # Shared run gate: every built Librarian serializes same-kind runs
-        # with the MCP tools and the scheduler (see librarian/gate.py).
+        self._cache: dict[str, tuple[Librarian, Curator, float]] = {}
+        # Shared run gate: every built Librarian/Curator serializes same-kind
+        # runs with the MCP tools and the scheduler (see librarian/gate.py).
         self.run_gate = RunGate()
         # Guards ALL _cache reads/mutations (A4): callers run on the event
         # loop AND the WebUI threadpool, so an unguarded evict between the
@@ -239,7 +240,7 @@ class LibrarianManager:
             hybrid_rerank=hybrid_rerank,
         )
 
-    def _build(self, user_id: str) -> Librarian:
+    def _build(self, user_id: str) -> tuple[Librarian, Curator]:
         config = self._load_config(user_id)
         root = self.library_root(user_id)
         backend = (
@@ -283,7 +284,7 @@ class LibrarianManager:
                     "embedding service construction failed for user %s: %s", user_id, exc
                 )
                 embedding_service = None
-        return Librarian(
+        librarian = Librarian(
             root,
             config,
             backend=backend,
@@ -293,18 +294,43 @@ class LibrarianManager:
             reranker=reranker,
             computation_runner=self.computation_runner,
         )
+        # One backend, one provider pair per user (D7): the Librarian built
+        # the backend (and owns its reconcile pass); the Curator shares it —
+        # two backends would double-run reconcile(). The embed-reconcile flag
+        # is copied (D8) so a curator-only run (nightly scheduler) also fires
+        # it; double-fire is harmless per the EmbeddingService DB claim.
+        curator = Curator(
+            root,
+            config,
+            backend=librarian.backend,
+            provider=provider,
+            embedding_service=embedding_service,
+            run_gate=self.run_gate,
+            reranker=reranker,
+            computation_runner=self.computation_runner,
+        )
+        curator._embed_reconcile_pending = librarian._embed_reconcile_pending
+        return librarian, curator
 
-    def get(self, user_id: str) -> Librarian:
-        """Return the user's librarian, creating and caching it on first use."""
+    def _get(self, user_id: str) -> tuple[Librarian, Curator]:
+        """Return the user's cached (Librarian, Curator) pair, building it on first use."""
         self.evict_idle()
         with self._get_lock:
             if user_id in self._cache:
-                librarian, _ = self._cache[user_id]
-                self._cache[user_id] = (librarian, self._clock())
-                return librarian
-            librarian = self._build(user_id)
-            self._cache[user_id] = (librarian, self._clock())
-            return librarian
+                librarian, curator, _ = self._cache[user_id]
+                self._cache[user_id] = (librarian, curator, self._clock())
+                return librarian, curator
+            librarian, curator = self._build(user_id)
+            self._cache[user_id] = (librarian, curator, self._clock())
+            return librarian, curator
+
+    def get(self, user_id: str) -> Librarian:
+        """Return the user's librarian, creating and caching it on first use."""
+        return self._get(user_id)[0]
+
+    def get_curator(self, user_id: str) -> Curator:
+        """Return the user's curator (same cache path/touch semantics as ``get``)."""
+        return self._get(user_id)[1]
 
     def curate_last_run_at(self, user_id: str) -> str | None:
         """Fresh curate baseline from the DB row (bypasses the cached config)."""
@@ -321,33 +347,36 @@ class LibrarianManager:
             db.set_curate_last_run(conn, user_id, ts)
 
     def evict(self, user_id: str) -> None:
-        """Drop a user's cached librarian (e.g. after a config change)."""
+        """Drop a user's cached agent pair (e.g. after a config change)."""
         with self._get_lock:
             entry = self._cache.pop(user_id, None)
         if entry is not None:
-            entry[0].shutdown()  # cancel its pending embed reconcile (A5)
+            for agent in entry[:2]:
+                agent.shutdown()  # cancel its pending embed reconcile (A5)
 
     def evict_idle(self) -> int:
-        """Evict librarians idle longer than idle_timeout. Returns evicted count."""
+        """Evict agent pairs idle longer than idle_timeout. Returns evicted count."""
         now = self._clock()
         with self._get_lock:
             idle = [
                 user_id
-                for user_id, (_, last_used) in self._cache.items()
+                for user_id, (_, _, last_used) in self._cache.items()
                 if now - last_used > self.idle_timeout
             ]
-            evicted = [self._cache.pop(user_id)[0] for user_id in idle]
-        for librarian in evicted:
+            evicted = [self._cache.pop(user_id) for user_id in idle]
+        for librarian, curator, _ in evicted:
             librarian.shutdown()  # cancel pending embed reconciles (A5)
+            curator.shutdown()
         return len(evicted)
 
     def close(self) -> None:
-        """Evict every cached librarian and cancel its background work."""
+        """Evict every cached agent pair and cancel its background work."""
         with self._get_lock:
-            evicted = [librarian for librarian, _ in self._cache.values()]
+            evicted = [entry[:2] for entry in self._cache.values()]
             self._cache.clear()
-        for librarian in evicted:
+        for librarian, curator in evicted:
             librarian.shutdown()
+            curator.shutdown()
 
     def cached_user_ids(self) -> list[str]:
         with self._get_lock:

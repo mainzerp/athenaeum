@@ -13,6 +13,9 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+KIND_LIBRARIAN = "librarian"  # handle_request/handle_store/handle_update
+KIND_CURATOR = "curator"  # handle_maintain/handle_curate
+
 
 class AgentRunBusyError(RuntimeError):
     """Another run of the same agent kind is in progress for this user."""

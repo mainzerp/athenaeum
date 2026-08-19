@@ -33,7 +33,7 @@ def test_findings_empty_predicate(tmp_path):
 
 
 def test_store_payload_reviews_is_caller_filled_placeholder(tmp_path):
-    """The 7th key ships as an empty placeholder; handle_curate fills it
+    """The 7th key ships as an empty placeholder; Curator.handle_curate fills it
     from the payload archive (one-shot events, not structural state)."""
     report = organization_findings(tmp_path)
     assert "store_payload_reviews" in FINDING_KEYS

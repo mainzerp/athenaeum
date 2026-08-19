@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 import pytest
 
 from athenaeum import db as db_module
-from athenaeum.librarian.agent import CURATOR_VERIFIER, KIND_CURATOR
-from athenaeum.librarian.gate import AgentRunBusyError
+from athenaeum.curator.agent import CURATOR_VERIFIER
+from athenaeum.librarian.gate import KIND_CURATOR, AgentRunBusyError
 from athenaeum.librarian.llm import LLMResponse, ToolCall
 from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.scheduler import SCHEDULER_LABEL, CurateScheduler
@@ -255,14 +255,14 @@ async def test_mcp_curator_run_rejected_while_scheduler_holds_gate(tmp_path):
             return LLMResponse(text="done")
 
     scheduler, manager, _, _, db_path = make_stack(tmp_path, healthy=False)
-    librarian = manager.get("user-a")  # pre-cache: the scheduler uses this instance
-    librarian._provider = BlockingProvider()
+    curator = manager.get_curator("user-a")  # pre-cache: the scheduler uses this instance
+    curator._provider = BlockingProvider()
     await scheduler.tick(at(DAY1, "02:59"))
     run = asyncio.create_task(scheduler.tick(at(DAY1, "03:00")))
     await asyncio.wait_for(entered.wait(), timeout=5)
     assert manager.run_gate.locked("user-a", "curator")
     with pytest.raises(AgentRunBusyError, match="another curator run is in progress"):
-        await librarian.handle_curate()
+        await curator.handle_curate()
     release.set()
     await run
     assert len(activity_rows(db_path)) == 2

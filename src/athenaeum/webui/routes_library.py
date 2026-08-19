@@ -36,8 +36,7 @@ from starlette.background import BackgroundTask
 from athenaeum import db
 from athenaeum.activity import journal_activity
 from athenaeum.config import Settings
-from athenaeum.librarian.agent import KIND_CURATOR, KIND_LIBRARIAN
-from athenaeum.librarian.gate import AgentRunBusyError
+from athenaeum.librarian.gate import KIND_CURATOR, KIND_LIBRARIAN, AgentRunBusyError
 from athenaeum.librarian.manager import LibrarianManager
 from athenaeum.librarian.tracing import RequestTelemetry, mint_request_id
 from athenaeum.library import transfer

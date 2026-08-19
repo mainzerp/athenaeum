@@ -11,7 +11,8 @@ import math
 
 import pytest
 
-from athenaeum.librarian.agent import Librarian, LibrarianConfig
+from athenaeum.curator.agent import Curator
+from athenaeum.librarian.agent import LibrarianConfig
 from athenaeum.librarian.embed import EmbeddingConfig
 from athenaeum.librarian.llm import LLMConfig, LLMResponse
 from athenaeum.library import frontmatter as fm_mod
@@ -253,12 +254,12 @@ class ScriptedProvider:
         return self.responses.pop(0)
 
 
-def make_curate_librarian(root, provider, embedding_service=None) -> Librarian:
+def make_curate_librarian(root, provider, embedding_service=None) -> Curator:
     config = LibrarianConfig(
         user_id="user-1",
         llm=LLMConfig(provider="openai", model="m", api_key="k"),
     )
-    return Librarian(
+    return Curator(
         root,
         config,
         backend=FakeBackend(root),
@@ -267,9 +268,9 @@ def make_curate_librarian(root, provider, embedding_service=None) -> Librarian:
     )
 
 
-def make_threshold_librarian(root, embedding_service, config) -> Librarian:
-    """Curate-seam Librarian with an explicit config (threshold resolution)."""
-    return Librarian(
+def make_threshold_librarian(root, embedding_service, config) -> Curator:
+    """Curate-seam Curator with an explicit config (threshold resolution)."""
+    return Curator(
         root,
         config,
         backend=FakeBackend(root),
@@ -330,11 +331,11 @@ async def test_handle_curate_merges_semantic_findings(tmp_path):
     write_concept(root, "/a.md", {"type": "Note", "title": "Alpha"})
     write_concept(root, "/b.md", {"type": "Note", "title": "Beta"})
     provider = ScriptedProvider([LLMResponse(text="curated")])
-    librarian = make_curate_librarian(
+    curator = make_curate_librarian(
         root, provider, FakeDupEmbedService({"a.md": [1.0, 0.0], "b.md": [1.0, 0.0]})
     )
 
-    result = await librarian.handle_curate()
+    result = await curator.handle_curate()
 
     # a semantic-only finding triggers the curate run
     assert provider.calls
@@ -352,9 +353,9 @@ async def test_handle_curate_noop_zero_llm_when_all_five_empty(tmp_path):
     root = tmp_path / "lib"
     root.mkdir()
     provider = ScriptedProvider([LLMResponse(text="should not be used")])
-    librarian = make_curate_librarian(root, provider, FakeDupEmbedService({}))
+    curator = make_curate_librarian(root, provider, FakeDupEmbedService({}))
 
-    result = await librarian.handle_curate()
+    result = await curator.handle_curate()
 
     assert provider.calls == []  # no LLM call on the no-op path
     assert result["findings"]["semantic_duplicate_candidates"] == []
@@ -366,9 +367,9 @@ async def test_handle_curate_without_embeddings_keeps_empty_semantic_key(tmp_pat
     root = tmp_path / "lib"
     root.mkdir()
     provider = ScriptedProvider([LLMResponse(text="should not be used")])
-    librarian = make_curate_librarian(root, provider, embedding_service=None)
+    curator = make_curate_librarian(root, provider, embedding_service=None)
 
-    result = await librarian.handle_curate()
+    result = await curator.handle_curate()
 
     assert result["findings"]["semantic_duplicate_candidates"] == []
     assert provider.calls == []
@@ -383,9 +384,9 @@ async def test_handle_curate_semantic_failure_continues_without_it(tmp_path):
     root.mkdir()
     write_concept(root, "/thin.md", {"type": "Note", "title": "Thin"}, body="x")
     provider = ScriptedProvider([LLMResponse(text="curated")])
-    librarian = make_curate_librarian(root, provider, BrokenEmbedService())
+    curator = make_curate_librarian(root, provider, BrokenEmbedService())
 
-    result = await librarian.handle_curate()
+    result = await curator.handle_curate()
 
     # the thin-concept finding still drives the run; the semantic key degrades to []
     assert result["findings"]["semantic_duplicate_candidates"] == []

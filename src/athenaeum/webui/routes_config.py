@@ -22,10 +22,11 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 
 from athenaeum import db, security
 from athenaeum.config import Settings
+from athenaeum.curator.prompts import render_curate_prompt_display
 from athenaeum.librarian.embed import EmbeddingConfig
 from athenaeum.librarian.embed.local import LOCAL_MODEL_SHORTLIST
 from athenaeum.librarian.manager import LibrarianManager
-from athenaeum.librarian.prompts import build_system_prompt, render_curate_prompt_display
+from athenaeum.librarian.prompts import build_system_prompt
 from athenaeum.library import semantic as semantic_mod
 from athenaeum.scheduler import CurateScheduler
 from athenaeum.webui import deps
