@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.25.4**
+Current version: **0.25.5**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,21 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.25.5
+
+Librarian/curator split (`09eed84`): the curator is no longer a mode inside
+the single `Librarian` class but a standalone `Curator` agent
+(`src/athenaeum/curator/`) subclassing the shared `BaseAgent`
+(`librarian/base.py`), with its own system prompt (`curator/prompts.py`) and
+a narrowed 10-tool surface (`CURATOR_TOOL_SCHEMAS`, no `run_computation`).
+The manager caches (Librarian, Curator) pairs sharing one backend/gate;
+`library_curate`/`library_maintain` and the nightly scheduler drive the
+curator via `get_curator()`. Pure refactor with no user-facing change: MCP
+tool names and result shapes, config keys (`curator_connection_id` /
+`curator_model`), RunGate kind strings, `CURATOR_VERIFIER`, and re-baseline
+semantics are unchanged; the librarian `DEFAULT_SYSTEM_PROMPT` is
+byte-identical.
 
 ### 0.25.4
 
