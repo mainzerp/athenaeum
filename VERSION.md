@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.26.1**
+Current version: **0.26.2**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,23 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.26.2
+
+F27 fix (`88f2665`): body-link extraction (`extract_body_links`) and the
+`move_concept` rewrite path (`_rewrite_body`) now skip markdown links inside
+inline code spans and fenced code blocks. Example markup in code (e.g. a
+lessons doc demonstrating `[text](url)`) no longer counts as a concept link,
+eliminating false-positive broken links that kept libraries permanently
+unhealthy and forced a paid curator LLM run on every maintain schedule.
+Extraction and rewrite stay symmetric (strip_link_targets pattern), so
+move-driven link rewrites no longer corrupt example markup either. The
+fence/span segmentation helpers moved from `escape_guard.py` into a new
+shared module `library/md_spans.py` (with a new `iter_code_segments`
+generator), breaking the escape_guard → links circular import structurally;
+`escape_guard` re-exports the private names so existing consumers keep
+working unchanged. Ten new contract tests pin extraction, rewrite symmetry,
+warning suppression, and orphan semantics. Docs: lessons.md F27 resolved.
 
 ### 0.26.1
 
