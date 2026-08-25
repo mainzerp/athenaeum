@@ -29,6 +29,7 @@ from pathlib import Path
 
 from . import frontmatter as fm_mod
 from . import links as links_mod
+from .md_spans import _iter_code_spans, _split_fence_segments
 
 ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _U_TAIL_RE = re.compile(r"u([0-9a-fA-F]{4})")
@@ -36,59 +37,6 @@ _U_TAIL_RE = re.compile(r"u([0-9a-fA-F]{4})")
 MAX_CODE_SPAN_OCCURRENCES_PER_FILE = 10
 MAX_CODE_SPAN_CANDIDATE_FILES = 20
 MAX_CODE_SPAN_SNIPPET = 120
-
-_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-
-
-def _split_fence_segments(body: str) -> list[tuple[bool, str]]:
-    """Split *body* into (is_fenced, text) segments, preserving newlines.
-
-    Line-based state machine: an opening fence is a line with up to 3 leading
-    spaces followed by a run of >= 3 backticks or tildes (info string
-    ignored). A closing fence is a line whose first non-space content
-    (<= 3 leading spaces) is a run of the SAME fence character with a length
-    >= the opening run length. Fence lines and everything between are fenced.
-    An unclosed fence swallows the rest of the body.
-    """
-    segments: list[tuple[bool, str]] = []
-    current: list[str] = []
-    current_fenced = False
-    fence_char: str | None = None
-    fence_len = 0
-
-    def flush() -> None:
-        if current:
-            segments.append((current_fenced, "".join(current)))
-            current.clear()
-
-    for line in body.splitlines(keepends=True):
-        if fence_char is None:
-            m = _FENCE_OPEN_RE.match(line)
-            if m:
-                run = m.group(1)
-                flush()
-                current_fenced = True
-                fence_char = run[0]
-                fence_len = len(run)
-                current.append(line)
-            else:
-                current.append(line)
-        else:
-            current.append(line)
-            stripped = line.lstrip(" ")
-            if len(line) - len(stripped) <= 3 and stripped.startswith(fence_char):
-                run = 0
-                for ch in stripped:
-                    if ch == fence_char:
-                        run += 1
-                    else:
-                        break
-                if run >= fence_len:
-                    fence_char = None
-                    flush()
-                    current_fenced = False
-    flush()
-    return segments
 
 
 def _decode_plain(text: str, stats: Counter) -> str:
@@ -138,45 +86,6 @@ def _decode_plain(text: str, stats: Counter) -> str:
             out.append(decode(int(tail.group(1), 16), literal))
         pos = tail.end()
     return "".join(out)
-
-
-def _iter_code_spans(segment: str) -> Iterator[tuple[int, int]]:
-    """Yield ``(start, end)`` of matched inline code spans in a non-fenced segment.
-
-    Character scanner over backtick runs: an opening run of length N closes
-    at the NEXT run of EXACTLY length N; the span includes both runs. An
-    unmatched run is literal/prose text — NOT a span.
-    """
-    pos = 0
-    length = len(segment)
-    while pos < length:
-        if segment[pos] != "`":
-            tick = segment.find("`", pos)
-            pos = length if tick == -1 else tick
-            continue
-        run_end = pos
-        while run_end < length and segment[run_end] == "`":
-            run_end += 1
-        run_len = run_end - pos
-        close = pos + run_len
-        while True:
-            tick = segment.find("`", close)
-            if tick == -1:
-                close = -1
-                break
-            close_end = tick
-            while close_end < length and segment[close_end] == "`":
-                close_end += 1
-            if close_end - tick == run_len:
-                close = close_end
-                break
-            close = close_end
-        if close == -1:
-            # Unmatched run: literal text, not a span.
-            pos = run_end
-        else:
-            yield pos, close
-            pos = close
 
 
 def _decode_outside_code_spans(segment: str, stats: Counter) -> str:

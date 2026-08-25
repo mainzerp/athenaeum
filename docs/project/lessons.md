@@ -538,3 +538,38 @@
   einen RuntimeError mit gechainter Ursache statt `[]` zurueckzuliefern.
   Learning: kuratierte Modell-Listen gegen die tatsaechlich installierte
   Runtime-Registry pruefen, nicht gegen Doku-Annahmen.
+- **F27 — LINK_RE zaehlt Beispiel-Links in Inline-Code/Fences als broken
+  (2026-08-25, Beobachtung, REMOTE-Instanz, RESOLVED 2026-08-25,
+  Code-Span-/Fence-Guard im Link-Pfad).** `library_status`
+  meldete einen broken link `strip-link-targets-0.25.2-lessons.md` → `url`.
+  Byte-Check ueber den Librarian: die Zeile ist „Inline markdown links
+  `[text](url)` are transformed to `text` before …“ — Beispiel-Markup in
+  Inline-Code-Backticks, in genau dem Lessons-Doc ueber das Link-Stripping
+  (0.25.2). Ursache: `LINK_RE` in `library/links.py` (Zeile 24) matcht per
+  `finditer` roh ueber den gesamten Body, ohne Inline-Code-Spans oder
+  Fences auszulassen; die Fence/Span-Awareness existiert bereits in
+  `library/escape_guard.py` (`_split_fence_segments`, `_iter_code_spans`),
+  wird aber im Link-Pfad nicht genutzt. Folge: ein einziger False Positive
+  haelt die Library permanent `healthy: false`, und da `handle_maintain`
+  (L16) bei unhealthy immer einen vollen LLM-Run faehrt, zahlt jeder
+  Scheduled-Maintain-Lauf LLM-Kosten fuer ein nicht reparierbares Finding;
+  der Curator kann das Beispiel-Markup nicht "reparieren", ohne das
+  Dokument zu beschaedigen. Fix-Kandidat: Body-Link-Extraktion in
+  `links.py` um die escape_guard-Segmentierung ergaenzen (Links in
+  Code-Spans/Fences nicht als Konzept-Links werten) + Vertrags-Test in
+  `test_links.py`. Bis dahin: solche Findings als False Positive
+  klassifizieren statt Maintain dagegen laufen zu lassen.
+  Aufloesung (2026-08-25): Segmentierungs-Helper in neues Shared-Modul
+  `library/md_spans.py` extrahiert (inkl. neuem `iter_code_segments`;
+  `escape_guard.py` re-exportiert die privaten Namen, embeddings.py laeuft
+  unveraendert) — bricht den Zirkularimport strukturell. `extract_body_links`
+  UND der `move_concept`-Rewrite-Pfad (`_rewrite_body`) werten Links in
+  Inline-Code-Spans und Fences jetzt symmetrisch nicht mehr als
+  Konzept-Links (Extraction-Rewrite-Symmetrie, Muster: `strip_link_targets`).
+  Vertragstests: 6 in `test_links.py`, 3 in `test_validate.py` (inkl.
+  code-span-only-inbound → weiterhin orphan), 1 F22-Dedupe-Pin in
+  `test_backend_writes.py`. Suite: 1018 passed, ruff clean. Folge-Effekt:
+  der Strip-Link-Targets-False-Positive verschwindet erst, sobald die
+  REMOTE-Instanz den Fix deployed bekommt. Offenes Follow-up (nicht Teil
+  des Fixes): `webui/graph.py` hat einen eigenen Display-only-Regex mit
+  derselben False-Positive-Klasse.

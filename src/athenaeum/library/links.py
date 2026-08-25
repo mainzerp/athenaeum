@@ -7,6 +7,9 @@ path-valued frontmatter fields (``resource``, ``sources[].resource``,
 ``computation``, ``executor.resource``, ``attester.resource``).
 Markdown image syntax (``![alt](src)``) is NOT a concept link: it is excluded
 from extraction and rewriting, so image assets never become graph citizens.
+F27: links inside inline code spans or fenced code blocks are example markup,
+not concept links — extraction and rewriting skip them symmetrically via
+``md_spans.iter_code_segments``.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from pathlib import Path
 from ..isolation import PathEscapeError, resolve_under
 from . import frontmatter as fm_mod
 from .frontmatter import write_text_atomic
+from .md_spans import iter_code_segments
 
 LINK_RE = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
@@ -32,8 +36,20 @@ def is_bundle_target(target: str) -> bool:
 
 
 def extract_body_links(body: str) -> list[str]:
-    """Return raw link targets from markdown ``[text](target)`` syntax."""
-    return [m.group(2) for m in LINK_RE.finditer(body)]
+    """Return raw link targets from markdown ``[text](target)`` syntax.
+
+    F27: links inside inline code spans or fenced code blocks are skipped —
+    they are example markup, not concept links (see ``_rewrite_body`` for the
+    symmetric write side).
+    """
+    if not LINK_RE.search(body):
+        return []
+    targets: list[str] = []
+    for is_code, text in iter_code_segments(body):
+        if is_code:
+            continue
+        targets.extend(m.group(2) for m in LINK_RE.finditer(text))
+    return targets
 
 
 def extract_frontmatter_links(fm: dict) -> list[str]:
@@ -185,7 +201,14 @@ def _rewrite_body(body: str, old: str, new: str) -> tuple[str, int]:
             return f"[{match.group(1)}]({new}{anchor})"
         return match.group(0)
 
-    return LINK_RE.sub(repl, body), count
+    if not LINK_RE.search(body):
+        return body, 0
+    # F27: symmetric with extract_body_links — links inside inline code spans
+    # or fenced code blocks are example markup and pass through byte-untouched.
+    parts: list[str] = []
+    for is_code, text in iter_code_segments(body):
+        parts.append(text if is_code else LINK_RE.sub(repl, text))
+    return "".join(parts), count
 
 
 def _rewrite_frontmatter(fm: dict, old: str, new: str) -> int:

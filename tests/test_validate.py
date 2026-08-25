@@ -101,6 +101,37 @@ def test_image_links_produce_no_broken_link_warnings(tmp_path):
     assert "broken-link" not in codes(report, "warnings")
 
 
+def test_code_span_link_produces_no_broken_link_warning(tmp_path):
+    """F27: a link inside an inline code span is example markup, not a
+    concept link — a missing target there is never a broken-link warning."""
+    write(tmp_path, "/a.md", "---\ntype: Concept\n---\n`[text](/missing.md)`\n")
+    report = validate_bundle(tmp_path)
+    assert "broken-link" not in codes(report, "warnings")
+
+
+def test_fenced_link_produces_no_broken_link_warning(tmp_path):
+    """F27: a link inside a fenced code block is example markup, not a
+    concept link — a missing target there is never a broken-link warning."""
+    write(tmp_path, "/a.md", "---\ntype: Concept\n---\n```\n[text](/missing.md)\n```\n")
+    report = validate_bundle(tmp_path)
+    assert "broken-link" not in codes(report, "warnings")
+
+
+def test_code_span_only_inbound_still_orphan(tmp_path):
+    """F27: a mention inside an inline code span is not an inbound edge —
+    a concept whose only 'inbound' link sits in a code span is still
+    orphan-reported; the mentioning doc is not (its prose outbound edge
+    counts)."""
+    write(tmp_path, "/a.md", "---\ntype: Concept\n---\n`[b](/b.md)`\n[c](/c.md)\n")
+    write(tmp_path, "/b.md", "---\ntype: Concept\n---\nalone\n")
+    write(tmp_path, "/c.md", "---\ntype: Concept\n---\n[a](/a.md)\n")
+    report = validate_bundle(tmp_path)
+    orphans = {w["path"] for w in report["warnings"] if w["code"] == "orphan"}
+    assert "/b.md" in orphans
+    assert "/a.md" not in orphans
+    assert "/c.md" not in orphans
+
+
 def test_symlink_escape_link_is_broken_warning_no_crash(tmp_path):
     """A link escaping the root via a symlinked directory is a broken-link
     warning — the probe is confined by resolve_under and never crashes

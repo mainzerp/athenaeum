@@ -1236,6 +1236,23 @@ def test_add_backlink_dedupes_existing_links(tmp_path):
     assert backend.read_document("/sub/rel.md")["body"] == "see [New](../new.md) already\n"
 
 
+def test_add_backlink_code_span_mention_does_not_dedupe(tmp_path):
+    """F27/F22: a mention of the source inside an inline code span is example
+    markup, not a link — the dedupe must NOT suppress the real backlink."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/new.md", {"type": "Note", "title": "New"}, "new\n")
+    backend.create_concept(
+        "/rel.md", {"type": "Note", "title": "Rel"}, "example: `[New](/new.md)`\n"
+    )
+
+    result = backend.add_backlink("/new.md", "/rel.md")
+
+    assert result == {"id": "/rel", "title": "Rel", "action": "updated"}
+    body = backend.read_document("/rel.md")["body"]
+    assert "`[New](/new.md)`" in body  # example markup untouched
+    assert "- [New](/new.md)" in body  # real backlink appended
+
+
 def test_add_backlink_normalizes_loose_ids(tmp_path):
     """Bare ids, missing leading slash, and missing `.md` all resolve equally."""
     backend = make_backend(tmp_path)

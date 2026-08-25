@@ -213,3 +213,61 @@ def test_iter_concept_files_symlink_cycle_does_not_raise(tmp_path):
         pytest.skip("symlink creation not permitted on this host")
     write(tmp_path, "/sub/a.md", FM + "a\n")
     assert [bundle for bundle, _ in iter_concept_files(tmp_path)] == ["/sub/a.md"]
+
+
+# --- F27: links in inline code spans / fenced blocks are not concept links ---
+
+
+def test_extract_body_links_skips_inline_code_spans():
+    """F27: a link inside an inline code span is example markup; prose links
+    around it are still extracted."""
+    body = "see [A](/a.md) and `[B](/b.md)` and [C](/c.md).\n"
+    assert extract_body_links(body) == ["/a.md", "/c.md"]
+
+
+def test_extract_body_links_skips_fenced_blocks():
+    """F27: a link inside a backtick-fenced block is example markup."""
+    body = "prose [A](/a.md)\n```\n[B](/b.md)\n```\nmore [C](/c.md)\n"
+    assert extract_body_links(body) == ["/a.md", "/c.md"]
+
+
+def test_extract_body_links_skips_tilde_fences():
+    """F27: tilde fences are code blocks too."""
+    body = "~~~python\nx = '[B](/b.md)'\n~~~\n[A](/a.md)\n"
+    assert extract_body_links(body) == ["/a.md"]
+
+
+def test_extract_body_links_unclosed_fence_swallows_rest():
+    """F27: an unclosed fence swallows the rest of the body — links after it
+    are code, matching the fence state machine contract."""
+    body = "[A](/a.md)\n```\n[B](/b.md)\n[C](/c.md)\n"
+    assert extract_body_links(body) == ["/a.md"]
+
+
+def test_extract_body_links_multi_backtick_spans():
+    """F27: a code span opened by a run of length N closes only at the next
+    run of EXACTLY length N; single backticks inside are span content."""
+    body = "`` `[B](/b.md)` `` and [A](/a.md)\n"
+    assert extract_body_links(body) == ["/a.md"]
+
+
+def test_rewrite_skips_code_spans_and_fences_round_trip(tmp_path):
+    """F27 symmetry pin: move rewrites prose links but leaves code-span and
+    fenced example markup byte-untouched; a body without matching links
+    round-trips byte-identical."""
+    write(
+        tmp_path,
+        "/a.md",
+        FM + "see [B](/b.md)\n`[B](/b.md)`\n```\n[B](/b.md)\n```\n",
+    )
+    write(tmp_path, "/b.md", FM + "b\n")
+    count = rewrite_links(tmp_path, "/b.md", "/moved/b.md")
+    assert count == 1
+    body = (tmp_path / "a.md").read_text(encoding="utf-8")
+    assert "see [B](/moved/b.md)" in body
+    assert body.count("`[B](/b.md)`") == 1
+    assert "```\n[B](/b.md)\n```" in body
+    # no match anywhere: byte-identical round-trip, no rewrite reported
+    count = rewrite_links(tmp_path, "/unrelated.md", "/x.md")
+    assert count == 0
+    assert (tmp_path / "a.md").read_text(encoding="utf-8") == body
