@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.26.2**
+Current version: **0.27.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,19 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.27.0
+
+F28 (`d4db9b1`): `library_status` now exposes validation warning details.
+The `health` dict gains two additive keys: `warnings_by_code` (complete
+{code: count} breakdown over all warning classes) and `warning_items`
+(itemized validate entries {path, code, message}, capped at
+`MAX_STATUS_WARNINGS = 50` — counts always complete, only the list
+truncates; both keys always present, `{}`/`[]` when empty). Previously
+every non-graph warning collapsed into a bare count, so MCP callers could
+not diagnose what the warnings were without WebUI or DB access. Four new
+contract tests; docs: architecture.md result shape, lessons.md F28
+resolved. Backward-compatible additive MCP contract extension.
 
 ### 0.26.2
 
