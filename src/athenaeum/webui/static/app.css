@@ -866,6 +866,15 @@ tbody tr:hover { background: var(--clr-panel-hover); }
 }
 .tree .expander svg { width: 12px; height: 12px; }
 .tree .expander:hover { color: var(--clr-accent-hover); }
+/* Loading feedback: htmx adds .htmx-request to the expander while the lazy
+   folder fetch is in flight; .doc-loading marks the document card during
+   in-page selection/diff-preview fetches (document_view.js). */
+@keyframes doc-loading-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.tree .expander.htmx-request svg { animation: doc-loading-pulse 0.8s ease-in-out infinite; }
+.doc-loading { animation: doc-loading-pulse 0.8s ease-in-out infinite; }
 .tree .expander:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--clr-bg), 0 0 0 4px var(--clr-accent);
@@ -1330,10 +1339,14 @@ pre.diff, pre.log {
 /* Display-only sunburst: no click/hover interaction. */
 .sunburst-inert { pointer-events: none; }
 
-/* Tree pane selection highlights (applied by document_view.js). */
+/* Tree pane selection highlights (applied by document_view.js): the current
+   note gets a pill background, linked notes stay color-only. */
 .tree a.tree-current {
   color: var(--clr-accent);
   font-weight: 600;
+  background: var(--clr-accent-subtle);
+  border-radius: 4px;
+  padding: 0 4px;
 }
 .tree a.tree-linked { color: var(--clr-accent); }
 

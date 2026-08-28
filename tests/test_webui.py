@@ -1435,6 +1435,41 @@ def test_tree_document_log_pages(env):
     assert "Initialization" in response.text
 
 
+def test_tree_children_empty_folder_placeholder(env):
+    """An empty directory renders a muted placeholder instead of nothing."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backend = FakeBackend(make_docs("alice"))
+    backends[user["id"]] = backend
+    original_list_dir = backend.list_dir
+
+    def list_dir_with_empty(path: str = "/"):
+        if path == "/emptydir":
+            return []
+        return original_list_dir(path)
+
+    backend.list_dir = list_dir_with_empty
+
+    response = client.get("/library/tree/children", params={"path": "/emptydir"})
+    assert response.status_code == 200
+    assert '<li class="muted">(empty)</li>' in response.text
+
+
+def test_document_data_viewed_index_empty_timeline(env):
+    """A document without history reports viewed_index 0, not -1 (F29)."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"))  # no commits
+
+    response = client.get("/library/document/data", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["timeline"] == []
+    assert payload["viewed_index"] == 0
+
+
 def test_sidebar_shows_app_version(env):
     """The sidebar footer pins the running version above the user card."""
     client, _, data_root = env

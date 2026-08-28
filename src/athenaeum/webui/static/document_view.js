@@ -16,6 +16,12 @@
     linked: {}, // nodeId -> true (outgoing + backlinks of the selection)
     pendingFlight: false, // a selection was made while the minimap was still mounting
     debounceTimer: null,
+    dataCache: new Map(), // path -> /document/data JSON (page-load lifetime)
+    diffCache: new Map(), // path + "@" + sha -> diff_html (page-load lifetime)
+    selectAbort: null, // AbortController of the in-flight selection fetch
+    diffAbort: null, // AbortController of the in-flight diff-preview fetch
+    dirtySource: null, // textarea value when the editor was opened (edit guard)
+    editDirty: null, // set in boot: () -> bool, unsaved editor changes pending
   };
 
   function nodeId(path) {
@@ -244,18 +250,14 @@
     var top = document.getElementById("docview-top");
     var root = document.getElementById("docview-doc");
     if (!top || !root) return;
-    // Top cell (grid row 1, beside the minimap): header, history, banner.
-    // Clearing it also drops the empty-state card.
+    document.title = (p.title || p.path) + " - Athenaeum";
+    // Top cell (grid row 1, beside the minimap): header and history. Clearing
+    // it wholesale also drops the empty-state card AND the server-rendered
+    // historical banner on ?sha= pages: in-page selections always land on the
+    // live view, so the banner is a deep-link-only feature (F22/F26).
     top.textContent = "";
     top.appendChild(renderHeader(p));
     top.appendChild(renderHistory(p));
-    // The banner is a server-rendered deep-link feature; in-page selections
-    // always land on the live view, so it stays hidden here.
-    var banner = el("div", "card");
-    banner.id = "docview-banner";
-    banner.hidden = true;
-    banner.appendChild(el("div", "card-body"));
-    top.appendChild(banner);
     // Document cell (grid row 2, beside the tree): the markdown area.
     root.textContent = "";
     var card = el("div", "card");
@@ -272,23 +274,41 @@
     initSlider(p.timeline || [], p.path, true);
   }
 
-  /* ----- edit toggle ----- */
+  /* ----- edit toggle + unsaved-edit guard ----- */
+
+  function editDirty() {
+    var form = document.getElementById("edit-form");
+    var textarea = document.getElementById("edit-body");
+    if (!form || !textarea || form.hidden) return false;
+    return textarea.value !== state.dirtySource;
+  }
+
+  function confirmDiscardEdits() {
+    if (!editDirty()) return true;
+    return global.confirm("Discard unsaved edits?");
+  }
 
   function wireEditToggle() {
     var toggle = document.getElementById("docview-edit-toggle");
     var form = document.getElementById("edit-form");
     var cancel = document.getElementById("edit-cancel");
     var body = document.getElementById("md-rendered");
-    if (!toggle || !form || !cancel || !body) return;
+    var textarea = document.getElementById("edit-body");
+    if (!toggle || !form || !cancel || !body || !textarea) return;
     toggle.addEventListener("click", function () {
+      state.dirtySource = textarea.value; // baseline for the edit guard
       form.hidden = false;
       body.hidden = true;
       toggle.disabled = true;
     });
     cancel.addEventListener("click", function () {
-      form.hidden = true;
+      form.hidden = true; // discarding clears the guard (form hidden)
       body.hidden = false;
       toggle.disabled = false;
+    });
+    form.addEventListener("submit", function () {
+      // Saving must not trip the beforeunload guard during the POST.
+      state.dirtySource = textarea.value;
     });
   }
 
@@ -323,34 +343,59 @@
     function showLive() {
       if (!landedLive) {
         /* Deep-linked historical view: the live body was never rendered, so
-           the live stop navigates to the plain live URL instead. */
-        global.location = "/library/tree?path=" + encodeURIComponent(docPath);
+           the live stop loads the live document in-page. renderDoc rebuilds
+           #docview-top wholesale, which also drops the server-rendered
+           historical banner and the restore form state (F22). */
+        api.select(docPath);
         return;
       }
       body.innerHTML = liveBodyHtml;
       restoreForm.hidden = true;
       previewNote.hidden = true;
     }
+    function applyPreview(sha, diffHtml) {
+      var c = commits[Number(slider.value)];
+      if (c.sha !== sha) return; /* stale response, slider moved on */
+      body.innerHTML = diffHtml || '<p class="muted">No changes vs current version.</p>';
+      previewNote.textContent = "Preview of " + c.short + " vs current version.";
+      previewNote.hidden = false;
+      restoreSha.value = sha;
+      restoreForm.hidden = false;
+    }
     function showPreview(sha) {
+      var cacheKey = docPath + "@" + sha;
+      if (state.diffCache.has(cacheKey)) {
+        applyPreview(sha, state.diffCache.get(cacheKey));
+        return;
+      }
+      if (state.diffAbort) state.diffAbort.abort(); // superseded request
+      var controller = (state.diffAbort = new AbortController());
+      var docRoot = document.getElementById("docview-doc");
+      if (docRoot) docRoot.classList.add("doc-loading");
       fetch(
         "/library/document/diff?path=" +
           encodeURIComponent(docPath) +
           "&sha=" +
           encodeURIComponent(sha) +
-          "&mode=inline"
+          "&mode=inline",
+        { signal: controller.signal }
       )
         .then(function (r) {
-          return r.ok ? r.json() : null;
+          if (!r.ok) throw new Error("diff preview failed: HTTP " + r.status);
+          return r.json();
         })
         .then(function (data) {
-          if (!data) return;
-          var c = commits[Number(slider.value)];
-          if (c.sha !== sha) return; /* stale response, slider moved on */
-          body.innerHTML = data.diff_html || '<p class="muted">No changes vs current version.</p>';
-          previewNote.textContent = "Preview of " + c.short + " vs current version.";
-          previewNote.hidden = false;
-          restoreSha.value = sha;
-          restoreForm.hidden = false;
+          state.diffCache.set(cacheKey, data.diff_html || "");
+          applyPreview(sha, data.diff_html);
+        })
+        .catch(function (err) {
+          if (err && err.name === "AbortError") return; // superseded, not an error
+          window.showToast("Could not load diff preview.", "danger");
+        })
+        .finally(function () {
+          if (docRoot && state.diffAbort === controller) {
+            docRoot.classList.remove("doc-loading");
+          }
         });
     }
     slider.addEventListener("input", function () {
@@ -376,7 +421,11 @@
 
   /* ----- selection ----- */
 
-  function select(path) {
+  /* opts.push === false re-selects without touching history (popstate). The
+     public signature stays select(path); only internal callers pass opts. */
+  function select(path, opts) {
+    var push = !opts || opts.push !== false;
+    if (!confirmDiscardEdits()) return; // unsaved-edit guard (F5)
     state.path = path;
     var id = nodeId(path);
     computeLinked(id);
@@ -390,16 +439,44 @@
       // picks up state.path on arrival and must animate, not snap.
       state.pendingFlight = true;
     }
-    fetch("/library/document/data?path=" + encodeURIComponent(path))
+    function applyPayload(p) {
+      renderDoc(p);
+      // The URL changes only after a successful load (F34): a failed
+      // selection keeps the previous document and URL.
+      if (push) {
+        global.history.pushState(null, "", "/library/tree?path=" + encodeURIComponent(path));
+      }
+    }
+    var cached = state.dataCache.get(path);
+    if (cached) {
+      applyPayload(cached);
+      return;
+    }
+    if (state.selectAbort) state.selectAbort.abort(); // superseded request
+    var controller = (state.selectAbort = new AbortController());
+    var docRoot = document.getElementById("docview-doc");
+    if (docRoot) docRoot.classList.add("doc-loading");
+    fetch("/library/document/data?path=" + encodeURIComponent(path), {
+      signal: controller.signal,
+    })
       .then(function (r) {
-        return r.ok ? r.json() : null;
+        if (!r.ok) throw new Error("document fetch failed: HTTP " + r.status);
+        return r.json();
       })
       .then(function (p) {
         if (!p || p.path !== state.path) return; // stale response, moved on
-        renderDoc(p);
+        state.dataCache.set(path, p);
+        applyPayload(p);
       })
-      .catch(function () {});
-    global.history.replaceState(null, "", "/library/tree?path=" + encodeURIComponent(path));
+      .catch(function (err) {
+        if (err && err.name === "AbortError") return; // superseded, not an error
+        window.showToast("Could not load document.", "danger");
+      })
+      .finally(function () {
+        if (docRoot && state.selectAbort === controller) {
+          docRoot.classList.remove("doc-loading");
+        }
+      });
   }
 
   /* ----- boot ----- */
@@ -407,6 +484,7 @@
   function boot(cfg) {
     state.cfg = cfg || {};
     state.path = state.cfg.path || null;
+    state.editDirty = editDirty;
     if (state.path) {
       wireEditToggle();
       initSlider(state.cfg.timeline || [], state.path, state.cfg.landedLive !== false);
@@ -442,11 +520,32 @@
           state.pendingFlight = false;
         }
       })
-      .catch(function () {});
+      .catch(function () {
+        window.showToast("Could not load the graph overview.", "danger");
+      });
+
+    /* Back/forward: re-select the URL's document in-page without pushing a
+       new history entry (the entry already exists). */
+    global.addEventListener("popstate", function () {
+      var path = new URLSearchParams(global.location.search).get("path");
+      if (path && path !== state.path) {
+        select(path, { push: false });
+      }
+    });
+
+    /* Unsaved-edit guard on page leave (selections are guarded in select). */
+    global.addEventListener("beforeunload", function (event) {
+      if (editDirty()) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    });
 
     /* Delegated clicks: tree entries select in-page (htmx swaps survive);
-       in-document links to absolute .md bundle paths select too. */
+       in-document links to absolute .md bundle paths select too. Modifier
+       clicks (new tab/window) keep their native behavior. */
     document.addEventListener("click", function (event) {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) return;
       var target = event.target;
       if (!target || !target.closest) return;
       var entry = target.closest("#docview-tree-pane [data-doc-path]");
@@ -462,6 +561,20 @@
           event.preventDefault();
           select(href);
         }
+      }
+    });
+
+    /* Failed lazy folder expansion: toast + re-arm the expander (htmx
+       consumed the "click once" trigger, so swap in a fresh clone and let
+       htmx re-process it — the retry then works without a reload). */
+    document.addEventListener("htmx:responseError", function (event) {
+      var target = event.detail && event.detail.target;
+      if (!target || !target.closest || !target.closest("#docview-tree-pane")) return;
+      window.showToast("Could not load folder.", "danger");
+      if (target.parentNode && global.htmx) {
+        var clone = target.cloneNode(true);
+        target.parentNode.replaceChild(clone, target);
+        global.htmx.process(clone);
       }
     });
 

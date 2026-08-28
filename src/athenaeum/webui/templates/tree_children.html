@@ -2,12 +2,14 @@
   {% for e in entries %}
   <li>
     {% if e["is_directory"] %}
+    {# outerHTML: the response <ul class="tree"> REPLACES the empty placeholder
+       <ul> targeted by "next ul", keeping list nesting valid (li > ul > li). #}
     <button type="button" class="expander"
             aria-label="Expand {{ e['name'] }}"
             hx-get="/library/tree/children?path={{ e['path'] | urlencode }}"
             hx-trigger="click once"
             hx-target="next ul"
-            hx-swap="innerHTML">
+            hx-swap="outerHTML">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M9 18l6-6-6-6"/>
       </svg>
@@ -30,5 +32,8 @@
     {% if e.get("type") %}<span class="badge badge-neutral">{{ e["type"] }}</span>{% endif %}
     {% endif %}
   </li>
+  {% else %}
+  {# Empty directory: without a placeholder the expanded folder looks broken. #}
+  <li class="muted">(empty)</li>
   {% endfor %}
 </ul>

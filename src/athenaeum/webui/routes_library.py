@@ -134,7 +134,8 @@ def tree_page(
         # Slider model: oldest-LEFT / newest-RIGHT; the rightmost stop doubles
         # as the live view (the newest file commit IS the live content).
         timeline = file_commits[::-1]
-        viewed_index = len(timeline) - 1
+        # Empty timeline yields 0, not -1 (no valid stop exists then).
+        viewed_index = max(0, len(timeline) - 1)
         if sha and history_available:
             if head and (head == sha or head.startswith(sha)):
                 # The viewed commit IS the live state: plain live view, no banner.
@@ -270,7 +271,8 @@ def document_data(
         "body": doc["body"],
         "body_html": markdown_render.render_markdown(doc["body"]),
         "timeline": timeline,
-        "viewed_index": len(timeline) - 1,
+        # Empty timeline yields 0, not -1 (no valid stop exists then).
+        "viewed_index": max(0, len(timeline) - 1),
         "head": head,
         "history_available": history_available,
         "history_configured": backend.history_configured,
