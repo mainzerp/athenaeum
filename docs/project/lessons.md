@@ -573,3 +573,19 @@
   REMOTE-Instanz den Fix deployed bekommt. Offenes Follow-up (nicht Teil
   des Fixes): `webui/graph.py` hat einen eigenen Display-only-Regex mit
   derselben False-Positive-Klasse.
+- **F28 — `library_status` reduziert Nicht-Graph-Warnings auf einen nackten
+  Zaehler (2026-08-25, Beobachtung, REMOTE-Instanz 0.26.1, UNRESOLVED).**
+  Nach dem F27-Link-Fix zeigte `library_status` `warnings: 10` — aber
+  `backend.status()` (backend.py:404) listet nur `orphans` und
+  `broken_links` einzeln auf; alle uebrigen Warnings
+  (`missing-recommended`, `malformed-date`, `index-drift`,
+  `footnote-mismatch`, ...) kollabieren zu `"warnings": len(warnings)`.
+  Ueber die MCP-Oberflaeche ist damit nicht diagnostizierbar, WAS die
+  Warnings sind — nur ueber WebUI (`/library/validate`) oder DB-Zugriff.
+  F24-Muster (Observability-Luecke statt Defekt): "gesund minus bekannte
+  False Positives?" ist ohne internen Zugriff nicht beantwortbar, und der
+  Agent kann Warnings weder priorisieren noch dem Curator zielgerichtet
+  melden. Fix-Kandidat: `warnings_by_code: {code: count}` plus eine
+  itemisierte, geboundete Liste (analog orphans/broken_links, z. B.
+  first-N mit Pfad + Code) ins Status-Result; MCP-Vertrag additiv
+  erweitern, keine Prompt-Aenderung noetig.
