@@ -1,10 +1,46 @@
-<ul class="tree">
+{# Lazy tree partial, reused by document_view.html (root list) and by the htmx
+   /library/tree/children endpoint (which passes no `expanded`).
+
+   Deep-link reveal (contract V10): `expanded` maps ancestor directory paths
+   of the deep-linked document to their pre-listed entries. A directory on
+   that chain renders expanded WITHOUT htmx attributes and WITHOUT the empty
+   placeholder <ul>; its children are inlined by recursive include after
+   `entries` is re-set — 100% server-side (no programmatic expander clicks,
+   no htmx:load waiting, lesson L1). Non-ancestor directories keep the htmx
+   lazy path unchanged.
+
+   role="tree" scoping: only the pane's top-level list may carry it. The
+   include site in document_view.html sets `tree_role = true`; the partial
+   consumes and immediately resets the flag so nested lists (lazy htmx swaps
+   and recursive reveal includes) stay plain — nested role="tree" is invalid. #}
+{%- set expanded = expanded | default({}) -%}
+<ul class="tree"{% if tree_role | default(false) %} role="tree"{% endif %}>
+  {%- set tree_role = false -%}
   {% for e in entries %}
   <li>
     {% if e["is_directory"] %}
+    {% if e["path"] in expanded %}
+    {# Deep-link ancestor: pre-expanded server-side (contract V10). #}
+    <button type="button" class="expander"
+            aria-expanded="true"
+            aria-label="Collapse {{ e['name'] }}">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+    </button>
+    <span class="dirname">{{ e["name"] }}/</span>
+    <a class="graph-jump" href="/library/graph?folder={{ e['path'] | urlencode }}" title="Show in graph" aria-label="Show in graph">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/>
+      </svg>
+    </a>
+    {% set entries = expanded[e["path"]] %}
+    {% include "tree_children.html" with context %}
+    {% else %}
     {# outerHTML: the response <ul class="tree"> REPLACES the empty placeholder
        <ul> targeted by "next ul", keeping list nesting valid (li > ul > li). #}
     <button type="button" class="expander"
+            aria-expanded="false"
             aria-label="Expand {{ e['name'] }}"
             hx-get="/library/tree/children?path={{ e['path'] | urlencode }}"
             hx-trigger="click once"
@@ -21,6 +57,7 @@
       </svg>
     </a>
     <ul></ul>
+    {% endif %}
     {% else %}
     <a href="/library/tree?path={{ e['path'] | urlencode }}" data-doc-path="{{ e['path'] }}">{{ e["name"] }}</a>
     <a class="graph-jump" href="/library/graph?focus={{ e['path'][:-3] | urlencode }}" title="Show in graph" aria-label="Show in graph">

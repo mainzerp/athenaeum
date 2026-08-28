@@ -59,13 +59,13 @@
     <div class="card" id="docview-history">
       <div class="card-header">History</div>
       <div class="card-body">
-        <input type="range" id="history-slider" min="0" max="{{ timeline|length - 1 }}" value="{{ viewed_index }}" step="1">
+        <input type="range" id="history-slider" min="0" max="{{ timeline|length - 1 }}" value="{{ viewed_index }}" step="1" aria-label="Document history">
         <div class="history-ticks" id="history-ticks">
           {% for c in timeline %}
-          <button type="button" class="history-tick{% if loop.index0 == viewed_index %} active{% endif %}" data-index="{{ loop.index0 }}" title="{{ c['short'] }} · {{ c['timestamp'][:10] }}"></button>
+          <button type="button" class="history-tick{% if loop.index0 == viewed_index %} active{% endif %}" data-index="{{ loop.index0 }}" title="{{ c['short'] }} · {{ c['timestamp'][:10] }}" aria-label="{{ c['short'] }} · {{ c['timestamp'][:10] }}"></button>
           {% endfor %}
         </div>
-        <p class="range-label" id="history-label"></p>
+        <p class="range-label" id="history-label" aria-live="polite"></p>
         <p class="muted" id="preview-note" hidden></p>
         <form method="post" action="/library/document/restore" id="restore-form"
               data-confirm="Restore this document to the selected commit? The restore is recorded as a new commit."
@@ -122,6 +122,10 @@
   <div class="card docview-tree-card">
     <div class="card-header">Library tree</div>
     <div class="card-body" id="docview-tree-pane">
+      {# role="tree" belongs on the pane's top-level list only; nested lists
+         (lazy htmx loads and the server-side deep-link reveal) stay plain.
+         The partial consumes and resets this flag (see tree_children.html). #}
+      {% set tree_role = true %}
       {% include "tree_children.html" %}
     </div>
   </div>

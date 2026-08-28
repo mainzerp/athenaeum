@@ -1470,6 +1470,46 @@ def test_document_data_viewed_index_empty_timeline(env):
     assert payload["viewed_index"] == 0
 
 
+def test_tree_page_expands_ancestors(env):
+    """Deep link: the ancestor folders render expanded server-side (V10)."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    docs = make_docs("alice")
+    docs["/nested/deeper/leaf.md"] = {"frontmatter": {"title": "Leaf"}, "body": "Leaf body.\n"}
+    backends[user["id"]] = FakeBackend(docs)  # no commits
+
+    response = client.get("/library/tree", params={"path": "/nested/deeper/leaf.md"})
+    assert response.status_code == 200
+    # the nested file anchor is in the initial page HTML (no lazy load needed)
+    assert 'data-doc-path="/nested/deeper/leaf.md"' in response.text
+    # both ancestor folders (/nested, /nested/deeper) render expanded
+    assert response.text.count('aria-expanded="true"') == 2
+    # the reveal is server-side: ancestor expanders carry no htmx attributes
+    assert "/library/tree/children?path=%2Fnested%2Fdeeper" not in response.text
+    # off-chain folders keep the htmx lazy path
+    assert 'aria-label="Expand concepts"' in response.text
+
+
+def test_tree_page_no_selection_no_expansion(env):
+    """Without ?path the tree renders root entries only (regression guard)."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    docs = make_docs("alice")
+    docs["/nested/deeper/leaf.md"] = {"frontmatter": {"title": "Leaf"}, "body": "Leaf body.\n"}
+    backends[user["id"]] = FakeBackend(docs)
+
+    response = client.get("/library/tree")
+    assert response.status_code == 200
+    # root-only: nothing is pre-expanded and nested content is absent
+    assert 'aria-expanded="true"' not in response.text
+    assert 'data-doc-path="/nested/deeper/leaf.md"' not in response.text
+    assert 'data-doc-path="/concepts/alpha.md"' not in response.text
+    # the root entries themselves are listed
+    assert "nested/" in response.text
+
+
 def test_sidebar_shows_app_version(env):
     """The sidebar footer pins the running version above the user card."""
     client, _, data_root = env
@@ -1529,6 +1569,25 @@ def test_document_page_history_card(env):
     assert "not the current version" not in response.text
     assert 'id="restore-form"' in response.text
     assert "data-loading hidden>" in response.text
+
+
+def test_document_page_timeline_a11y_attributes(env):
+    """Timeline a11y: labeled slider, live-updating status, labeled ticks."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert 'id="history-slider"' in response.text
+    assert 'aria-label="Document history"' in response.text
+    assert '<p class="range-label" id="history-label" aria-live="polite"></p>' in response.text
+    # every tick carries an individual "<short sha> · <date>" label
+    assert response.text.count('data-index="') == 3
+    ticks = (("ccccccc", "2026-08-03"), ("bbbbbbb", "2026-08-02"), ("aaaaaaa", "2026-08-01"))
+    for short, date in ticks:
+        assert f'aria-label="{short} · {date}"' in response.text
 
 
 def test_document_page_historical_view(env):

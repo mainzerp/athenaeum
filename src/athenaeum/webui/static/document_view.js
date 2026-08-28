@@ -83,6 +83,17 @@
     }
   }
 
+  /* Collapsible folders (V11): collapse state lives as .collapsed on the
+     <li> (CSS hides li.collapsed > ul); aria-expanded on the expander is
+     "true" iff the <li> is loaded and not collapsed. */
+  function setExpanded(btn, expanded) {
+    btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+    var li = btn.closest("li");
+    var dirname = li && li.querySelector(":scope > .dirname");
+    var name = dirname ? dirname.textContent.replace(/\/+$/, "") : "";
+    btn.setAttribute("aria-label", (expanded ? "Collapse " : "Expand ") + name);
+  }
+
   /* ----- center pane rendering (mirrors document_view.html) ----- */
 
   function badge(cls, text) {
@@ -178,6 +189,7 @@
     slider.max = String(timeline.length - 1);
     slider.value = String(p.viewed_index);
     slider.step = "1";
+    slider.setAttribute("aria-label", "Document history");
     body.appendChild(slider);
     var ticks = el("div", "history-ticks");
     ticks.id = "history-ticks";
@@ -186,11 +198,13 @@
       tick.type = "button";
       tick.setAttribute("data-index", String(i));
       tick.title = c.short + " · " + String(c.timestamp || "").slice(0, 10);
+      tick.setAttribute("aria-label", tick.title);
       ticks.appendChild(tick);
     });
     body.appendChild(ticks);
     var label = el("p", "range-label");
     label.id = "history-label";
+    label.setAttribute("aria-live", "polite");
     body.appendChild(label);
     var note = el("p", "muted");
     note.id = "preview-note";
@@ -490,6 +504,15 @@
       initSlider(state.cfg.timeline || [], state.path, state.cfg.landedLive !== false);
       computeLinked(nodeId(state.path)); // empty until the universe arrives
       applyTreeHighlights();
+      /* Deep-link reveal: the server rendered the ancestor folders expanded
+         (contract V10); scroll the selected note into view in the tree pane. */
+      var paneLinks = document.querySelectorAll("#docview-tree-pane [data-doc-path]");
+      for (var i = 0; i < paneLinks.length; i++) {
+        if (paneLinks[i].getAttribute("data-doc-path") === state.path) {
+          paneLinks[i].scrollIntoView({ block: "nearest" });
+          break;
+        }
+      }
     }
     fetch("/api/graph/universe?metric=link_density")
       .then(function (r) {
@@ -564,6 +587,24 @@
       }
     });
 
+    /* Collapsible folders (V11): expander and dirname clicks toggle the
+       loaded folder. The first expansion stays on the htmx "click once"
+       path — this handler returns while no child ul.tree exists (no
+       preventDefault, so htmx still fires), and afterwards a collapse/
+       re-expand cycle only toggles .collapsed: zero network requests. */
+    document.addEventListener("click", function (event) {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) return;
+      var target = event.target;
+      if (!target || !target.closest) return;
+      var toggle = target.closest("#docview-tree-pane .expander, #docview-tree-pane .dirname");
+      if (!toggle) return;
+      var li = toggle.closest("li");
+      if (!li || !li.querySelector(":scope > ul.tree")) return; // not loaded: htmx path
+      li.classList.toggle("collapsed");
+      var btn = li.querySelector(":scope > .expander");
+      if (btn) setExpanded(btn, !li.classList.contains("collapsed"));
+    });
+
     /* Failed lazy folder expansion: toast + re-arm the expander (htmx
        consumed the "click once" trigger, so swap in a fresh clone and let
        htmx re-process it — the retry then works without a reload). */
@@ -578,11 +619,28 @@
       }
     });
 
-    /* Lazily expanded tree folders need the highlights re-applied. */
+    /* Lazily expanded tree folders need the highlights re-applied; the
+       freshly loaded folder is expanded by definition (.collapsed absent),
+       so mark its expander aria-expanded (V11). The requesting expander
+       survives the outerHTML swap of its next-sibling <ul>; fall back to
+       locating it from the swap target. */
     document.addEventListener("htmx:afterSwap", function (event) {
-      var target = event.detail && event.detail.target;
-      if (target && target.closest && target.closest("#docview-tree-pane")) {
-        applyTreeHighlights();
+      var detail = event.detail || {};
+      var target = detail.target;
+      var inPane = target && target.closest && target.closest("#docview-tree-pane");
+      var requester = detail.requestConfig && detail.requestConfig.elt;
+      if (!inPane && !(requester && requester.closest && requester.closest("#docview-tree-pane"))) {
+        return;
+      }
+      applyTreeHighlights();
+      if (requester && requester.matches && requester.matches(".expander")) {
+        setExpanded(requester, true);
+        return;
+      }
+      if (inPane) {
+        var li = target.closest("li");
+        var btn = li && li.querySelector(":scope > .expander");
+        if (btn && li.querySelector(":scope > ul.tree")) setExpanded(btn, true);
       }
     });
   }

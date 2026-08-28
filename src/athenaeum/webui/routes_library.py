@@ -114,6 +114,21 @@ def tree_page(
         return deps.login_redirect(conn)
     user, backend = ctx
     entries = backend.list_dir("/")
+    # V10 deep-link reveal: pre-list the ancestor directories of the selected
+    # document so the template renders them expanded server-side (contract:
+    # 100% server-side, no programmatic expander clicks). Root is already
+    # rendered; the filename segment is skipped. A missing level ends the
+    # expandable chain (deeper keys would be unreachable in the template
+    # recursion anyway).
+    expanded: dict[str, list[dict]] = {}
+    if path is not None:
+        current = ""
+        for segment in path.strip("/").split("/")[:-1]:
+            current += "/" + segment
+            try:
+                expanded[current] = backend.list_dir(current)
+            except (FileNotFoundError, ValueError):
+                break
     history_available = backend.history_available
     doc, fm = None, None
     tags: list = []
@@ -184,6 +199,7 @@ def tree_page(
         {
             "user": user,
             "entries": entries,
+            "expanded": expanded,
             "root": "/",
             "doc": doc,
             "fm": fm,
