@@ -8,7 +8,7 @@ staleness boundary semantics (CS-7).
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, time
 
 TRUST_UNVERIFIED = "unverified"
 TRUST_MACHINE = "machine-confirmed"
@@ -34,13 +34,32 @@ def trust_tier(frontmatter: dict) -> str:
     return TRUST_MACHINE
 
 
-def is_stale(frontmatter: dict, *, today: date | None = None) -> bool:
-    """OKF §5.5 staleness: stale ON or after ``stale_after`` (``stale_after <= today``)."""
-    stale_after = frontmatter.get("stale_after")
-    if not stale_after:
+def is_stale(frontmatter: dict, *, now: datetime | None = None) -> bool:
+    """OKF §5.5 staleness: stale ON or after ``stale_after`` (``now >= stale_after``).
+
+    Per the OKF 2026-08 timestamp change, ``stale_after`` is an ISO 8601
+    datetime with an explicit UTC offset. A naive datetime (no offset)
+    names a different instant in every timezone, so it is ignored rather
+    than guessed at — matching the OKF reference implementation. A legacy
+    date-only ``YYYY-MM-DD`` value (written by athenaeum before that spec
+    change) is read as midnight UTC so existing bundles keep working.
+    """
+    raw = str(frontmatter.get("stale_after") or "")
+    if not raw:
         return False
-    today = today or date.today()
-    try:
-        return date.fromisoformat(str(stale_after)) <= today
-    except ValueError:
-        return False
+    now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    if "T" not in raw:
+        try:
+            stale_after = datetime.combine(date.fromisoformat(raw[:10]), time.min, UTC)
+        except ValueError:
+            return False
+    else:
+        try:
+            stale_after = datetime.fromisoformat(raw)
+        except ValueError:
+            return False
+        if stale_after.tzinfo is None:
+            return False
+    return now >= stale_after

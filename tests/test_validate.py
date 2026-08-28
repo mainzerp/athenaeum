@@ -242,6 +242,44 @@ def test_malformed_date_warning(tmp_path):
     assert "malformed-date" in codes(report, "warnings")
 
 
+def test_timestamp_keys_require_datetime_with_offset(tmp_path):
+    """OKF 2026-08: every timestamp-valued key is an ISO 8601 datetime with
+    an explicit UTC offset — date-only or offset-less values warn."""
+    write(
+        tmp_path,
+        "/a.md",
+        "---\ntype: Concept\nstale_after: 2030-01-01\n---\nbody\n",
+    )
+    write(
+        tmp_path,
+        "/b.md",
+        "---\ntype: Concept\nstale_after: 2030-01-01T00:00:00\n---\nbody\n",
+    )
+    write(
+        tmp_path,
+        "/c.md",
+        "---\ntype: Concept\nstale_after: 2030-01-01T00:00:00Z\n"
+        "usage_window: { from: 2026-01-01, to: 2026-06-30T00:00:00Z }\n---\nbody\n",
+    )
+    report = validate_bundle(tmp_path)
+    by_path = [w["path"] for w in report["warnings"] if w["code"] == "malformed-date"]
+    assert "/a.md" in by_path  # date-only
+    assert "/b.md" in by_path  # datetime without offset
+    assert "/c.md" in by_path  # usage_window.from date-only
+    write(
+        tmp_path,
+        "/d.md",
+        "---\ntype: Concept\nstale_after: 2030-01-01T00:00:00Z\n---\nbody\n",
+    )
+    report = validate_bundle(tmp_path)
+    ok = [
+        w["path"]
+        for w in report["warnings"]
+        if w["code"] == "malformed-date" and w["path"] == "/d.md"
+    ]
+    assert ok == []
+
+
 def test_index_drift_warning(tmp_path):
     write(tmp_path, "/a.md", "---\ntype: Concept\ntitle: A\n---\nbody\n")
     write(tmp_path, "/index.md", "# Documents\n\n* [Stale](stale.md)\n")

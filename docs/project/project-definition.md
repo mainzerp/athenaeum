@@ -4,7 +4,7 @@
 
 ## What Athenaeum is
 
-Athenaeum is a long-term knowledge and memory container for AI agents, built on the [Open Knowledge Format (OKF) v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md). Knowledge lives in plain directories of markdown files with YAML frontmatter (an OKF *bundle*) — human-readable, diffable, portable, with no required tooling to inspect.
+Athenaeum is a long-term knowledge and memory container for AI agents, built on the [Open Knowledge Format (OKF) v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md). Knowledge lives in plain directories of markdown files with YAML frontmatter (an OKF *bundle*) — human-readable, diffable, portable, with no required tooling to inspect.
 
 The defining architectural idea: **external agents never touch the knowledge directly.** They express *intent* ("remember this", "what do you know about X", "what's in the library?") over the Model Context Protocol (MCP) to a **librarian agent** that lives inside the system. The librarian — an LLM agent that knows its own library best — does all the heavy lifting: retrieval, placement, frontmatter, linking, index and log maintenance, and OKF conformance enforcement. External agents need to know nothing about file layouts, frontmatter fields, or index mechanics.
 

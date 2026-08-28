@@ -207,7 +207,7 @@ def _check_concept(
             errors.append(_entry(rel, "required-within", "'generated' requires 'by'"))
         else:
             _check_actor(rel, generated["by"], warnings)
-            if generated.get("at") is not None and not _is_datetime(generated["at"]):
+            if generated.get("at") is not None and not _is_timestamp(generated["at"]):
                 warnings.append(
                     _entry(rel, "malformed-date", f"generated.at malformed: {generated['at']!r}")
                 )
@@ -244,23 +244,31 @@ def _check_concept(
             if (
                 isinstance(entry, dict)
                 and entry.get("at") is not None
-                and not _is_datetime(entry["at"])
+                and not _is_timestamp(entry["at"])
             ):
                 warnings.append(
                     _entry(rel, "malformed-date", f"verified[].at malformed: {entry['at']!r}")
                 )
 
-    if fm.get("stale_after") is not None and not _is_date(fm["stale_after"]):
+    if fm.get("stale_after") is not None and not _is_timestamp(fm["stale_after"]):
         warnings.append(
-            _entry(rel, "malformed-date", f"stale_after is not YYYY-MM-DD: {fm['stale_after']!r}")
+            _entry(
+                rel,
+                "malformed-date",
+                f"stale_after is not an ISO 8601 datetime with offset: {fm['stale_after']!r}",
+            )
         )
     usage_window = fm.get("usage_window")
     if isinstance(usage_window, dict):
         for key in ("from", "to"):
             value = usage_window.get(key)
-            if value is not None and not _is_date(value):
+            if value is not None and not _is_timestamp(value):
                 warnings.append(
-                    _entry(rel, "malformed-date", f"usage_window.{key} malformed: {value!r}")
+                    _entry(
+                        rel,
+                        "malformed-date",
+                        f"usage_window.{key} is not an ISO 8601 datetime with offset: {value!r}",
+                    )
                 )
 
     ids = {
@@ -282,25 +290,22 @@ def _check_actor(rel: str, actor: Any, warnings: list[dict]) -> None:
         warnings.append(_entry(rel, "non-conventional-actor", f"actor not conventional: {actor!r}"))
 
 
-def _is_date(value: Any) -> bool:
-    if isinstance(value, (date, datetime)):
-        return True
+def _is_timestamp(value: Any) -> bool:
+    """ISO 8601 datetime with an explicit UTC offset (OKF §5, 2026-08 change).
+
+    Every timestamp-valued key in OKF carries an offset; a date-only or
+    offset-less value names a different instant in every timezone and is
+    reported rather than guessed at.
+    """
+    if isinstance(value, datetime):
+        return value.tzinfo is not None
+    if isinstance(value, date):
+        return False
     if isinstance(value, str):
-        try:
-            date.fromisoformat(value)
-            return True
-        except ValueError:
+        if "T" not in value:
             return False
-    return False
-
-
-def _is_datetime(value: Any) -> bool:
-    if isinstance(value, (date, datetime)):
-        return True
-    if isinstance(value, str):
         try:
-            datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return True
+            return datetime.fromisoformat(value).tzinfo is not None
         except ValueError:
             return False
     return False

@@ -162,7 +162,7 @@ def make_docs(username: str) -> dict:
             "body": "See [Beta](/concepts/beta.md).\n",
         },
         "/concepts/beta.md": {
-            "frontmatter": {"title": "Beta", "type": "Note", "stale_after": "2000-01-01"},
+            "frontmatter": {"title": "Beta", "type": "Note", "stale_after": "2000-01-01T00:00:00Z"},
             "body": "Beta body.\n",
         },
     }

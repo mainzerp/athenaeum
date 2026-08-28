@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.27.1**
+Current version: **0.28.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,26 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.28.0
+
+OKF spec alignment (upstream 2026-08 change): every timestamp-valued key is
+now an ISO 8601 datetime with an explicit UTC offset, no longer a date.
+
+- `athenaeum/okf.py` `is_stale`: instant semantics (`now >= stale_after`);
+  offset-less datetimes are ignored (they name a different instant per
+  timezone); legacy date-only `stale_after` from pre-change bundles is read
+  as midnight UTC so existing libraries keep working.
+- `library/validate.py`: `stale_after`, `usage_window.{from,to}`,
+  `generated.at`, `verified[].at` all require datetime-with-offset
+  (`malformed-date` warning class, code name unchanged).
+- `library/frontmatter.py`: custom SafeLoader drops the YAML 1.1 timestamp
+  resolver — `2026-06-30T14:00:00Z` survives a parse/dump round-trip
+  verbatim instead of being rewritten to PyYAML's `+00:00` form (same fix
+  the OKF reference agent adopted).
+- Librarian prompt and demo seed write datetimes with offset; spec links
+  point at the new canonical repo `GoogleCloudPlatform/open-knowledge-format`
+  (the knowledge-catalog `okf/` copy is a frozen snapshot).
 
 ### 0.27.1
 

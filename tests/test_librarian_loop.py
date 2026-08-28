@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import tempfile
+from datetime import UTC
 
 import pytest
 
@@ -1794,7 +1795,7 @@ async def test_trust_tiers_and_staleness_in_concept_entries():
             "body": "",
         },
         "/stale.md": {
-            "frontmatter": {"title": "S", "type": "Note", "stale_after": "2020-01-01"},
+            "frontmatter": {"title": "S", "type": "Note", "stale_after": "2020-01-01T00:00:00Z"},
             "body": "",
         },
     }
@@ -1821,16 +1822,30 @@ async def test_trust_tiers_and_staleness_in_concept_entries():
     assert tiers["/stale"] == ("unverified", True)
 
 
-def test_is_stale_boundary_stale_on_the_day_itself():
-    """CS-7/OKF §5.5: single shared boundary semantics — stale when stale_after <= today."""
-    from datetime import date
+def test_is_stale_boundary_stale_at_the_instant():
+    """CS-7/OKF §5.5: single shared boundary semantics — stale when stale_after <= now."""
+    from datetime import datetime
 
-    today = date(2026, 7, 28)
-    assert is_stale({"stale_after": "2026-07-27"}, today=today) is True
-    assert is_stale({"stale_after": "2026-07-28"}, today=today) is True
-    assert is_stale({"stale_after": "2026-07-29"}, today=today) is False
-    assert is_stale({}, today=today) is False
-    assert is_stale({"stale_after": "not-a-date"}, today=today) is False
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+    assert is_stale({"stale_after": "2026-07-28T00:00:00Z"}, now=now) is True
+    assert is_stale({"stale_after": "2026-07-28T12:00:00Z"}, now=now) is True
+    assert is_stale({"stale_after": "2026-07-28T12:00:01Z"}, now=now) is False
+    assert is_stale({"stale_after": "2026-07-29T00:00:00Z"}, now=now) is False
+    assert is_stale({}, now=now) is False
+    assert is_stale({"stale_after": "not-a-date"}, now=now) is False
+
+
+def test_is_stale_offset_required_and_legacy_dates():
+    """OKF 2026-08 timestamp change: offset-less datetimes are ignored (a
+    naive datetime names a different instant per timezone); legacy date-only
+    values from pre-change athenaeum bundles read as midnight UTC."""
+    from datetime import datetime
+
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+    assert is_stale({"stale_after": "2020-01-01T00:00:00"}, now=now) is False  # no offset
+    assert is_stale({"stale_after": "2020-01-01"}, now=now) is True  # legacy date-only
+    assert is_stale({"stale_after": "2999-01-01"}, now=now) is False  # legacy, future
+    assert is_stale({"stale_after": "2020-01-01T00:00:00+00:00"}, now=now) is True
 
 
 def test_trust_tier_verified_without_dict_entries_is_unverified():

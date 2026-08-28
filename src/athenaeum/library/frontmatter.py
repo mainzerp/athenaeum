@@ -3,6 +3,8 @@
 Round-trip guarantees (OKF spec section 4.1 extension rule):
 - unknown frontmatter keys are preserved (plain dict round-trip, key order
   kept via ``sort_keys=False``),
+- timestamp-looking values stay strings verbatim (``_Loader`` drops the
+  YAML 1.1 timestamp resolver),
 - the body is preserved byte-for-byte (never parsed or re-emitted),
 - a ``verified`` bare mapping is normalized to a one-element list on read
   (spec section 5.2: consumers MUST accept both forms).
@@ -15,6 +17,24 @@ from pathlib import Path
 from uuid import uuid4
 
 import yaml
+
+
+class _Loader(yaml.SafeLoader):
+    """SafeLoader that leaves timestamps as the text the author wrote.
+
+    PyYAML implements YAML 1.1, whose implicit resolvers turn a value like
+    ``2026-06-30T14:00:00Z`` into a ``datetime``; dumping it back yields
+    ``2026-06-30 14:00:00+00:00``, so a parse/serialize round-trip would
+    silently rewrite the author's frontmatter. Dropping the timestamp
+    resolver keeps every value a string (YAML 1.2 core schema), matching
+    the OKF reference agent.
+    """
+
+
+_Loader.yaml_implicit_resolvers = {
+    ch: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:timestamp"]
+    for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
 
 
 class FrontmatterError(ValueError):
@@ -32,7 +52,7 @@ def split_document(text: str, *, normalize_verified: bool = True) -> tuple[dict,
     if fm_text is None:
         return {}, text
     try:
-        data = yaml.safe_load(fm_text)
+        data = yaml.load(fm_text, Loader=_Loader)
     except yaml.YAMLError as exc:
         raise FrontmatterError(f"frontmatter is not parseable YAML: {exc}") from exc
     if data is None:

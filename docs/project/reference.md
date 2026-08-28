@@ -1,6 +1,6 @@
 # Athenaeum — OKF v0.2 Reference
 
-> A practical reference for contributors working on athenaeum. **Authoritative source:** [OKF v0.2 SPEC.md](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — when this document and the spec disagree, the spec wins. Section numbers (§) below refer to the spec.
+> A practical reference for contributors working on athenaeum. **Authoritative source:** [OKF v0.2 SPEC.md](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md) — when this document and the spec disagree, the spec wins. Section numbers (§) below refer to the spec.
 
 ## 1. The format in one paragraph
 
@@ -69,14 +69,14 @@ A concept carrying just `type` is fully conformant.
 | Field | Notes |
 |---|---|
 | `status` | `draft` \| `stable` \| `deprecated`. Absent means `stable`. `deprecated` = kept for links and history, no longer current. |
-| `stale_after` | Absolute date `YYYY-MM-DD`; the concept is stale when `today >= stale_after` (stale on the day itself). |
+| `stale_after` | Absolute instant as ISO 8601 datetime with explicit UTC offset (e.g. `2026-09-23T00:00:00Z`); the concept is stale when `now >= stale_after`. Athenaeum reads legacy date-only values (pre-2026-08 bundles) as midnight UTC; new content MUST use the datetime form. |
 
 ### Provenance family (§5.1)
 
 | Field | Notes |
 |---|---|
-| `sources` | List of entries. `resource` is REQUIRED within each entry (URL, bundle-relative path, path into `references/`, or a scope descriptor). `id` is a stable key for per-claim attribution (SHOULD be present when the body cites the source). Optional credibility signals per entry: `author` (actor), `usage_count`, `last_modified` (`YYYY-MM-DD`). |
-| `usage_window` | `{ from, to }` date range, sibling of `sources`, framing every `usage_count`. A single entry may carry its own override. |
+| `sources` | List of entries. `resource` is REQUIRED within each entry (URL, bundle-relative path, path into `references/`, or a scope descriptor). `id` is a stable key for per-claim attribution (SHOULD be present when the body cites the source). Optional credibility signals per entry: `author` (actor), `usage_count`, `last_modified` (ISO 8601 datetime with offset). |
+| `usage_window` | `{ from, to }` datetime range (ISO 8601 with offset), sibling of `sources`, framing every `usage_count`. A single entry may carry its own override. |
 
 **Per-claim attribution:** a markdown footnote whose label is a `sources[].id`:
 
@@ -171,7 +171,7 @@ title: "Decision: git history for library versioning"
 description: Why athenaeum versions user libraries with a real git history instead of shadow-copy snapshots.
 tags: [athenaeum, versioning, architecture]
 status: stable
-stale_after: 2027-07-27
+stale_after: 2027-07-27T00:00:00Z
 generated: { by: athenaeum-librarian/0.1.0, at: 2026-07-27T20:54:42Z }
 sources:
   - id: mvp-plan

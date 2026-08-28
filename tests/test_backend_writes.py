@@ -186,10 +186,10 @@ def test_verify_concept_merges_bare_mapping(tmp_path):
     )
     backend.verify_concept("/a.md", by="athenaeum-curator/0.2.0", at="2026-02-02T00:00:00+00:00")
     verified = backend.read_document("/a.md")["frontmatter"]["verified"]
-    # YAML parses the ISO 'at' of the original entry into a datetime; the
-    # appended entry keeps the exact string passed in.
+    # The loader leaves timestamps as strings, so the original entry's ISO
+    # 'at' survives verbatim — matching the appended entry's string form.
     assert [entry["by"] for entry in verified] == ["human:alice", "athenaeum-curator/0.2.0"]
-    assert str(verified[0]["at"]) == "2026-01-01 00:00:00+00:00"
+    assert verified[0]["at"] == "2026-01-01T00:00:00Z"
     assert verified[1]["at"] == "2026-02-02T00:00:00+00:00"
 
 

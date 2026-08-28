@@ -46,7 +46,9 @@ verification (actor `athenaeum-curator/<version>` -> machine-confirmed); \
 human review happens outside the loop (a `human:` verifier -> \
 human-reviewed). \
 `status` is draft|stable|deprecated; \
-`stale_after` (YYYY-MM-DD) marks content that expires (stale on/after that day).
+`stale_after` (ISO 8601 datetime with UTC offset, e.g. \
+`2026-09-23T00:00:00Z`) marks content that expires (stale on/after that \
+instant).
 - Links between concepts are absolute bundle-relative paths, e.g. \
 `/tables/customers.md`. A concept's ID is its path minus the `.md` extension.
 - Each directory has an index.md listing its children; a single root log.md \
@@ -160,7 +162,7 @@ _ANSWERING_PRE_SECTION = """\
 - Always emit absolute bundle-relative links when referencing concepts.
 - Always surface trust and staleness: state whether cited concepts are \
 unverified, machine-confirmed, or human-reviewed, and warn when a concept is \
-stale (past its stale_after date).
+stale (past its stale_after instant).
 """
 
 # Librarian-only: the curator toolset (athenaeum.curator.tools) does not

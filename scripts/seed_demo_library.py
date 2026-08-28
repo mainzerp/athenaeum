@@ -27,7 +27,7 @@ import yaml
 
 HUMAN = {"by": "human:demo", "at": "2026-07-20T12:00:00+00:00"}
 MACHINE = {"by": "athenaeum-librarian/0.9.0", "at": "2026-07-21T12:00:00+00:00"}
-STALE_DATE = "2020-01-01"
+STALE_DATE = "2020-01-01T00:00:00Z"
 
 # Fixed anchor for the generated.at spread — deterministic, never wall-clock.
 ANCHOR = date(2026, 7, 25)

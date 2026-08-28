@@ -1,6 +1,5 @@
 """Tests for athenaeum.library.frontmatter."""
 
-import datetime
 import os
 import threading
 from pathlib import Path
@@ -48,7 +47,26 @@ def test_body_byte_identity():
 def test_verified_bare_mapping_normalized_to_list():
     text = "---\ntype: Concept\nverified:\n  by: human:alice\n  at: 2026-01-01\n---\nbody\n"
     fm, _ = split_document(text)
-    assert fm["verified"] == [{"by": "human:alice", "at": datetime.date(2026, 1, 1)}]
+    assert fm["verified"] == [{"by": "human:alice", "at": "2026-01-01"}]
+
+
+def test_timestamps_stay_strings_and_round_trip_verbatim():
+    """_Loader drops the YAML 1.1 timestamp resolver: ISO datetimes must not
+    be rewritten to PyYAML's 'YYYY-MM-DD HH:MM:SS+00:00' form on round-trip."""
+    text = (
+        "---\n"
+        "type: Concept\n"
+        "generated: { by: a/1, at: 2026-06-30T14:00:00Z }\n"
+        "stale_after: 2026-09-23T00:00:00Z\n"
+        "---\nbody\n"
+    )
+    fm, body = split_document(text)
+    assert fm["generated"] == {"by": "a/1", "at": "2026-06-30T14:00:00Z"}
+    assert fm["stale_after"] == "2026-09-23T00:00:00Z"
+    fm2, _ = split_document(dump_document(fm, body))
+    assert fm2 == fm
+    assert isinstance(fm2["generated"]["at"], str)
+    assert isinstance(fm2["stale_after"], str)
 
 
 def test_verified_normalization_can_be_disabled():
