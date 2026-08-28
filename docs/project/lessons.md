@@ -27,6 +27,12 @@
 - Kilo MCP clients see new/changed tools only after a session restart (tool
   catalog is read at session start); for ad-hoc tests use a raw JSON-RPC call
   (initialize → tools/call) against `/mcp`.
+- MCP sessions and redeploys (2026-08-28, REMOTE): stateful mode (default)
+  keeps sessions in server RAM — a container restart kills them, and the MCP
+  TypeScript SDK has no 404 re-initialize, so harness sessions stay dead
+  (F19 side finding, also observed under DeepSeek Harness). Durable fix:
+  `mcp_stateless_http` (Admin > Server, takes effect on restart) — stateless
+  mode survives redeploys with no client-side restart; verified live.
 
 ## Dogfooding findings
 
