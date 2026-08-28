@@ -29,6 +29,33 @@
     return path.endsWith(".md") ? path.slice(0, -3) : path;
   }
 
+  /* V18: resolve a relative in-document .md link against the directory of
+     currentPath into a bundle-absolute path (leading "/"), normalizing "./"
+     and "../" segments. Returns null for absolute paths, fragments, any
+     scheme (http:/https:/mailto:/...), non-.md hrefs, and paths that would
+     escape the bundle root — those fall through to default navigation. */
+  function resolveRelative(href, currentPath) {
+    if (typeof href !== "string" || !href) return null;
+    if (href.charAt(0) === "/" || href.charAt(0) === "#") return null;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) return null; // any scheme
+    if (!href.endsWith(".md")) return null;
+    if (!currentPath) return null;
+    var dir = currentPath.slice(0, currentPath.lastIndexOf("/") + 1);
+    var parts = (dir + href).split("/");
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var seg = parts[i];
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") {
+        if (!out.length) return null; // would escape the bundle root
+        out.pop();
+        continue;
+      }
+      out.push(seg);
+    }
+    return "/" + out.join("/");
+  }
+
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) node.className = className;
@@ -193,7 +220,12 @@
     body.appendChild(slider);
     var ticks = el("div", "history-ticks");
     ticks.id = "history-ticks";
+    /* Tick cap (V15): render only every k-th dot (k = ceil(n/60)) when the
+       timeline exceeds 60 entries; the slider still stops at every commit.
+       Same rule as the server-rendered ticks in document_view.html. */
+    var tickStep = Math.ceil(timeline.length / 60);
     timeline.forEach(function (c, i) {
+      if (i % tickStep !== 0) return;
       var tick = el("button", "history-tick" + (i === p.viewed_index ? " active" : ""));
       tick.type = "button";
       tick.setAttribute("data-index", String(i));
@@ -278,7 +310,11 @@
     var cardBody = el("div", "card-body");
     var rendered = el("div", "doc-body");
     rendered.id = "md-rendered";
-    rendered.innerHTML = p.body_html; // trusted: server-rendered markdown
+    /* Trusted sink (F31 invariant): every server producer of body_html /
+       diff_html HTML-escapes raw input — see the markdown_render.py module
+       docstring; new producers MUST escape or use textContent. The invariant
+       is pinned by test_all_renderers_escape_contract. */
+    rendered.innerHTML = p.body_html;
     cardBody.appendChild(rendered);
     cardBody.appendChild(renderEditForm(p));
     card.appendChild(cardBody);
@@ -370,6 +406,10 @@
     function applyPreview(sha, diffHtml) {
       var c = commits[Number(slider.value)];
       if (c.sha !== sha) return; /* stale response, slider moved on */
+      /* Trusted sink (F31 invariant): diffHtml is server-rendered by
+         render_inline_diff_html, which escapes every raw line — see the
+         markdown_render.py module docstring; new producers MUST escape or
+         use textContent. */
       body.innerHTML = diffHtml || '<p class="muted">No changes vs current version.</p>';
       previewNote.textContent = "Preview of " + c.short + " vs current version.";
       previewNote.hidden = false;
@@ -523,7 +563,14 @@
         var GraphSunburst = global.GraphSunburst;
         var container = document.getElementById("docview-minimap");
         if (!GraphSunburst || !container) return;
-        var ctrl = GraphSunburst.mount(container, data, { navigate: false });
+        var ctrl = GraphSunburst.mount(container, data, {
+          navigate: false, // second click on the selected dot must not navigate
+          // V17: clicking a different dot selects that document in-page
+          // (node ids are bundle-absolute paths WITHOUT the .md suffix).
+          onSelect: function (id) {
+            api.select(id + ".md");
+          },
+        });
         if (!ctrl) {
           // Empty library (mount returns null): the page stays functional.
           container.appendChild(el("p", "muted", "No documents in the library yet."));
@@ -565,8 +612,9 @@
     });
 
     /* Delegated clicks: tree entries select in-page (htmx swaps survive);
-       in-document links to absolute .md bundle paths select too. Modifier
-       clicks (new tab/window) keep their native behavior. */
+       in-document links to absolute .md bundle paths select too, and
+       relative .md hrefs resolve against the current document's directory
+       (V18). Modifier clicks (new tab/window) keep their native behavior. */
     document.addEventListener("click", function (event) {
       if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) return;
       var target = event.target;
@@ -583,6 +631,12 @@
         if (href && href.charAt(0) === "/" && href.endsWith(".md")) {
           event.preventDefault();
           select(href);
+          return;
+        }
+        var resolved = resolveRelative(href, state.path);
+        if (resolved) {
+          event.preventDefault();
+          select(resolved);
         }
       }
     });

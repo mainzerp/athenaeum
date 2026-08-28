@@ -70,6 +70,18 @@ _TREE_PAGE = "/library/tree"
 # with the accumulated changes vs HEAD marked inline — not just the hunks.
 _INLINE_DIFF_CONTEXT = 1_000_000
 
+# Timeline payload cap (V15): only the NEWEST 200 file commits are sent (the
+# slider still exposes every capped stop; ``timeline_truncated`` flags the
+# omission of older commits).
+_TIMELINE_LIMIT = 200
+
+
+def _cap_timeline(file_commits: list[dict]) -> tuple[list[dict], bool]:
+    """Oldest-first timeline of the newest ``_TIMELINE_LIMIT`` commits plus
+    the truncation flag (input is newest-first, as file_history returns)."""
+    truncated = len(file_commits) > _TIMELINE_LIMIT
+    return file_commits[:_TIMELINE_LIMIT][::-1], truncated
+
 
 def _backend(
     request: Request,
@@ -136,6 +148,7 @@ def tree_page(
     body_html, diff_html = "", None
     timeline, viewed = [], None
     viewed_index, head = 0, None
+    timeline_truncated = False
     if path is not None:
         file_commits = []
         if history_available:
@@ -148,7 +161,8 @@ def tree_page(
             head = backend.git_head()
         # Slider model: oldest-LEFT / newest-RIGHT; the rightmost stop doubles
         # as the live view (the newest file commit IS the live content).
-        timeline = file_commits[::-1]
+        # V15: capped to the newest _TIMELINE_LIMIT commits.
+        timeline, timeline_truncated = _cap_timeline(file_commits)
         # Empty timeline yields 0, not -1 (no valid stop exists then).
         viewed_index = max(0, len(timeline) - 1)
         if sha and history_available:
@@ -165,7 +179,9 @@ def tree_page(
                 for index, entry in enumerate(file_commits):
                     if entry["sha"] == sha or entry["sha"].startswith(sha):
                         viewed = entry
-                        viewed_index = len(file_commits) - 1 - index
+                        # viewed_index refers to the CAPPED timeline (V15); a
+                        # viewed commit older than the cap clamps to 0.
+                        viewed_index = max(0, len(timeline) - 1 - index)
                         break
                 if viewed is None:
                     # Commit outside the file's own log (hand-crafted URL); the
@@ -189,10 +205,15 @@ def tree_page(
         "landedLive": viewed is None,
         "head": head,
         "historyAvailable": history_available,
+        "timelineTruncated": timeline_truncated,
         # Forms rebuilt client-side after an in-page selection reuse the
         # session token (already rendered into the server-side forms).
         "csrf": deps.csrf_token(request),
     }
+    # Tick cap (V15, same rule client-side in renderHistory): when the
+    # timeline exceeds 60 entries, only every k-th tick dot is rendered
+    # (k = ceil(n/60)); the slider still stops at every commit.
+    tick_step = -(-len(timeline) // 60) if timeline else 1
     return deps.templates.TemplateResponse(
         request,
         "document_view.html",
@@ -210,6 +231,7 @@ def tree_page(
             "timeline": timeline,
             "viewed": viewed,
             "viewed_index": viewed_index,
+            "tick_step": tick_step,
             "diff_html": diff_html,
             "history_configured": backend.history_configured,
             "history_available": history_available,
@@ -267,11 +289,13 @@ def document_data(
     fm = doc.get("frontmatter") or {}
     history_available = backend.history_available
     timeline = []
+    timeline_truncated = False
     head = None
     if history_available:
         try:
             # Reserved paths (index.md/log.md) get no timeline.
-            timeline = backend.file_history(path)[::-1]
+            # V15: capped to the newest _TIMELINE_LIMIT commits.
+            timeline, timeline_truncated = _cap_timeline(backend.file_history(path))
         except (ValueError, GitError):
             timeline = []
         head = backend.git_head()
@@ -287,6 +311,7 @@ def document_data(
         "body": doc["body"],
         "body_html": markdown_render.render_markdown(doc["body"]),
         "timeline": timeline,
+        "timeline_truncated": timeline_truncated,
         # Empty timeline yields 0, not -1 (no valid stop exists then).
         "viewed_index": max(0, len(timeline) - 1),
         "head": head,
@@ -322,8 +347,17 @@ def document_diff(
         return {"diff_html": ""}
     try:
         if mode == "inline":
-            patch = backend.file_diff_to_head(sha, path, context=_INLINE_DIFF_CONTEXT)
-            return {"diff_html": markdown_render.render_inline_diff_html(patch)}
+            # V14: cached by (path, sha, head); head in the key invalidates on
+            # every commit, so repeats skip both the git call and the render.
+            diff_html = markdown_render.cached_inline_diff(
+                path,
+                sha,
+                head or "",
+                lambda: markdown_render.render_inline_diff_html(
+                    backend.file_diff_to_head(sha, path, context=_INLINE_DIFF_CONTEXT)
+                ),
+            )
+            return {"diff_html": diff_html}
         patch = backend.file_diff_to_head(sha, path)
         return {"diff_html": markdown_render.render_diff_html(patch)}
     except (FileNotFoundError, ValueError) as exc:
@@ -422,8 +456,12 @@ def document_restore(
         outcome, error_text = "error", str(exc)
         result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'path': path, 'error': str(exc)})}")
     except Exception as exc:
+        # F30: never a raw 500 — flash the exception TYPE name only (the
+        # message may contain filesystem paths); the full text stays in the
+        # journaled error_text.
         outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
-        raise
+        flash = f"Unexpected error ({type(exc).__name__}). Details were logged."
+        result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'path': path, 'error': flash})}")
     else:
         # Embedding/FTS reconcile on the next agent entry (import-route
         # precedent); the seed cache self-heals via log.md mtime anyway.
@@ -471,8 +509,12 @@ def document_edit(
         outcome, error_text = "error", str(exc)
         result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'path': path, 'error': str(exc)})}")
     except Exception as exc:
+        # F30: never a raw 500 — flash the exception TYPE name only (the
+        # message may contain filesystem paths); the full text stays in the
+        # journaled error_text.
         outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
-        raise
+        flash = f"Unexpected error ({type(exc).__name__}). Details were logged."
+        result = deps.redirect(f"{_TREE_PAGE}?{urlencode({'path': path, 'error': flash})}")
     else:
         # Same post-write hygiene as document_restore: evict the cached
         # librarian and invalidate the per-request seed cache.
@@ -517,8 +559,11 @@ def document_delete(
         outcome, error_text = "error", str(exc)
         result = _error_redirect(str(exc))
     except Exception as exc:
+        # F30: never a raw 500 — flash the exception TYPE name only (the
+        # message may contain filesystem paths); the full text stays in the
+        # journaled error_text. No path on the redirect (delete semantics).
         outcome, error_text = "error", f"{type(exc).__name__}: {exc}"
-        raise
+        result = _error_redirect(f"Unexpected error ({type(exc).__name__}). Details were logged.")
     else:
         if manager is not None:
             manager.evict(user["id"])

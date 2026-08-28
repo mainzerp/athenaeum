@@ -120,3 +120,44 @@ def test_render_inline_diff_html_escapes_html():
     html = markdown_render.render_inline_diff_html("+<script>alert(1)</script>\n")
     assert "&lt;script&gt;" in html
     assert "<script>" not in html
+
+
+def test_all_renderers_escape_contract():
+    """F31 invariant: every server producer of body_html / diff_html escapes
+    raw input (document_view.js assigns both to innerHTML)."""
+    payload = "<script>alert(1)</script>"
+    # body path (render_markdown)
+    body_html = markdown_render.render_markdown(f"before {payload} after")
+    assert "<script>" not in body_html
+    assert "&lt;script&gt;" in body_html
+    # per-line diff path (render_diff_html: add / del / ctx lines)
+    per_line = markdown_render.render_diff_html(f"+{payload}\n-{payload}\n {payload}\n")
+    assert "<script>" not in per_line
+    assert "&lt;script&gt;" in per_line
+    # grouped-block inline diff path (render_inline_diff_html: add / del / ctx)
+    inline = markdown_render.render_inline_diff_html(f"+{payload}\n-{payload}\n {payload}\n")
+    assert "<script>" not in inline
+    assert "&lt;script&gt;" in inline
+
+
+def test_cached_inline_diff_renders_once_on_repeat():
+    """V14: a repeated (path, sha, head_sha) lookup returns identical bytes
+    without a second git+render pass; a new head is a new cache entry."""
+    calls = []
+
+    def render():
+        calls.append(1)
+        return "<div>diff</div>"
+
+    key = ("/cache-test.md", "s" * 40, "h" * 40)
+    try:
+        first = markdown_render.cached_inline_diff(*key, render)
+        second = markdown_render.cached_inline_diff(*key, render)
+        assert first == second == "<div>diff</div>"
+        assert len(calls) == 1
+        # head_sha in the key: every commit invalidates automatically
+        markdown_render.cached_inline_diff("/cache-test.md", "s" * 40, "i" * 40, render)
+        assert len(calls) == 2
+    finally:
+        markdown_render._inline_diff_cache.pop(key, None)
+        markdown_render._inline_diff_cache.pop(("/cache-test.md", "s" * 40, "i" * 40), None)

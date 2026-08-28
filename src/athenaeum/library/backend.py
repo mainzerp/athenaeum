@@ -126,6 +126,12 @@ class LibraryBackend:
             logger.warning("git binary not found; library commit history disabled")
         # (log.md mtime_ns, seed); None forces regeneration (own writes below).
         self.seed_cache: tuple[int | None, str] | None = None
+        # list_dir frontmatter cache (V13): absolute file path ->
+        # ((mtime_ns, size), {"title"/"type"/"description"} subset). A write
+        # changes mtime+size, so stale entries never match — no explicit
+        # invalidation on writes needed. FIFO eviction at 1024 entries (dicts
+        # keep insertion order; the oldest inserted key is evicted first).
+        self._fm_listing_cache: dict[str, tuple[tuple[int, int], dict]] = {}
         self._embedding_service = embedding_service
         # Hybrid retrieval knobs (defaults preserve pre-0.19 behavior: the
         # hybrid branch additionally requires an FTS collaborator, which only
@@ -161,15 +167,37 @@ class LibraryBackend:
                 entries.append({"name": child.name, "path": rel, "is_directory": True})
             elif child.suffix == ".md" and child.name not in RESERVED_NAMES:
                 entry: dict = {"name": child.name, "path": rel, "is_directory": False}
-                try:
-                    fm, _ = fm_mod.split_document(child.read_text(encoding="utf-8"))
-                except (fm_mod.FrontmatterError, OSError, UnicodeDecodeError):
-                    fm = {}
-                for key in ("title", "type", "description"):
-                    if fm.get(key):
-                        entry[key] = fm[key]
+                for key, value in self._listing_fields(child).items():
+                    entry[key] = value
                 entries.append(entry)
         return entries
+
+    _FM_LISTING_CACHE_MAX = 1024
+
+    def _listing_fields(self, child: Path) -> dict:
+        """Frontmatter title/type/description for a listing entry, cached by
+        (mtime_ns, size) so an unchanged file is never re-read (V13)."""
+        try:
+            stat = child.stat()
+        except OSError:
+            stat = None
+        cache_key = str(child)
+        if stat is not None:
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            cached = self._fm_listing_cache.get(cache_key)
+            if cached is not None and cached[0] == stamp:
+                return dict(cached[1])
+        try:
+            fm, _ = fm_mod.split_document(child.read_text(encoding="utf-8"))
+        except (fm_mod.FrontmatterError, OSError, UnicodeDecodeError):
+            fm = {}
+        fields = {key: fm[key] for key in ("title", "type", "description") if fm.get(key)}
+        if stat is not None:
+            if len(self._fm_listing_cache) >= self._FM_LISTING_CACHE_MAX:
+                # FIFO: evict the oldest inserted entry (insertion-ordered dict).
+                self._fm_listing_cache.pop(next(iter(self._fm_listing_cache)))
+            self._fm_listing_cache[cache_key] = (stamp, fields)
+        return fields
 
     def read_document(self, path: str) -> dict:
         abs_path = self._resolve(path)

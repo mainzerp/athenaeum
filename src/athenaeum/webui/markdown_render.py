@@ -4,8 +4,10 @@ Document bodies are rendered with markdown-it-py (``default`` preset:
 CommonMark + tables + strikethrough, ``html=False`` so raw HTML in the
 source is escaped, not passed through) plus the tasklists plugin; fenced
 code blocks are highlighted with Pygments. Unified diffs are rendered as
-per-line colored spans. Both renderers escape all raw input, so their
-output is safe to emit with ``| safe`` in templates.
+per-line colored spans or as an in-flow document diff. All renderers escape
+all raw input, so their output is safe to emit with ``| safe`` in templates
+and to assign to ``innerHTML`` in document_view.js (the F31 escape
+invariant: new producers MUST escape or use textContent).
 """
 
 from __future__ import annotations
@@ -20,6 +22,29 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 _md_instance: MarkdownIt | None = None
+
+# Rendered inline-diff cache (V14): (path, sha, head_sha) -> rendered HTML.
+# head_sha in the key gives automatic invalidation on every commit — no
+# explicit invalidation needed. FIFO eviction at 128 entries (insertion-
+# ordered dict, oldest first). Consulted by routes_library.document_diff so a
+# repeated request skips BOTH the git call and the render pass.
+_inline_diff_cache: dict[tuple[str, str, str], str] = {}
+_INLINE_DIFF_CACHE_MAX = 128
+
+
+def cached_inline_diff(path: str, sha: str, head_sha: str, render) -> str:
+    """Return the cached inline-diff HTML for (path, sha, head_sha), calling
+    ``render()`` (git diff + render pass) only on a miss."""
+    key = (path, sha, head_sha)
+    cached = _inline_diff_cache.get(key)
+    if cached is not None:
+        return cached
+    rendered = render()
+    if len(_inline_diff_cache) >= _INLINE_DIFF_CACHE_MAX:
+        # FIFO: evict the oldest inserted entry (insertion-ordered dict).
+        _inline_diff_cache.pop(next(iter(_inline_diff_cache)))
+    _inline_diff_cache[key] = rendered
+    return rendered
 
 
 def _highlight(code: str, lang: str, attrs: str) -> str:

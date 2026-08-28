@@ -35,6 +35,9 @@
  * centered on it plus an info tooltip (label, folder path, link degree,
  * trust/stale); clicking the selected dot again navigates to the document
  * (disabled with opts.navigate === false, used by the trace replay page).
+ * opts.onSelect (function, optional; V17) is called with the node id
+ * (bundle-absolute path WITHOUT .md) whenever a DIFFERENT dot becomes
+ * selected — the document view uses it for in-page minimap selection.
  * Click a sector (or the center ring) to zoom to it; click empty space or
  * press Esc to return to the overview (the Fit view button does the same).
  * ?folder= / ?focus= deep links zoom straight to a sector / dot.
@@ -1056,6 +1059,11 @@
         select(best);
         syncTip();
         animateTo(dotTarget(best), true);
+        // V17: a different dot became selected — notify the host page
+        // (document view selects the document in-page; navigate stays off).
+        if (typeof opts.onSelect === "function") {
+          opts.onSelect(node.id);
+        }
         return;
       }
       var p = screenToScene(x, y);

@@ -1387,7 +1387,9 @@ pre.diff, pre.log {
   gap: 8px;
 }
 /* Pull the side column (minimap + tree) closer to the right viewport edge
-   than the default 24px page padding. */
+   than the default 24px page padding. F32: this :has() special case is a
+   deliberate cosmetic enhancement — browsers without :has() support simply
+   keep the default 24px padding (graceful fallback, no functional loss). */
 .page:has(.docview-grid) { padding-right: 8px; }
 /* The minimap card stretches across grid row 1: its bottom edge ends with
    the header/history cell. The canvas fills the remaining card height
@@ -1403,8 +1405,6 @@ pre.diff, pre.log {
   min-height: 200px;
 }
 .docview-minimap .muted { padding: 12px 16px; }
-/* Display-only sunburst: no click/hover interaction. */
-.sunburst-inert { pointer-events: none; }
 
 /* Tree pane selection highlights (applied by document_view.js): the current
    note gets a pill background, linked notes stay color-only. */

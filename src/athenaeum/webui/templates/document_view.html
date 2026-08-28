@@ -61,8 +61,14 @@
       <div class="card-body">
         <input type="range" id="history-slider" min="0" max="{{ timeline|length - 1 }}" value="{{ viewed_index }}" step="1" aria-label="Document history">
         <div class="history-ticks" id="history-ticks">
+          {# Tick cap (V15): render only every tick_step-th dot when the
+             timeline exceeds 60 entries; the slider above still stops at
+             every commit. renderHistory (document_view.js) uses the same
+             rule. #}
           {% for c in timeline %}
+          {% if loop.index0 % tick_step == 0 %}
           <button type="button" class="history-tick{% if loop.index0 == viewed_index %} active{% endif %}" data-index="{{ loop.index0 }}" title="{{ c['short'] }} · {{ c['timestamp'][:10] }}" aria-label="{{ c['short'] }} · {{ c['timestamp'][:10] }}"></button>
+          {% endif %}
           {% endfor %}
         </div>
         <p class="range-label" id="history-label" aria-live="polite"></p>
@@ -90,7 +96,9 @@
   </div>
   <div class="card docview-minimap-card">
     <div class="card-header">Minimap</div>
-    <div id="docview-minimap" class="graph-canvas sunburst-inert docview-minimap"></div>
+    {# Interactive minimap (V17): clicking a dot selects the document in-page
+       via GraphSunburst opts.onSelect (navigate stays disabled). #}
+    <div id="docview-minimap" class="graph-canvas docview-minimap"></div>
   </div>
   <div id="docview-doc"{% if not doc %} hidden{% endif %}>
     {% if doc %}

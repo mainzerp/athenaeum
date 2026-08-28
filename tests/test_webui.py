@@ -6,6 +6,8 @@ provider layer are replaced here by fakes honoring the pinned contracts
 """
 
 import asyncio
+import base64
+import hashlib
 import io
 import json
 import re
@@ -1470,6 +1472,59 @@ def test_document_data_viewed_index_empty_timeline(env):
     assert payload["viewed_index"] == 0
 
 
+def _many_commits(count: int) -> list[dict]:
+    """Newest-first fake file history with ``count`` commits."""
+    return [
+        {
+            "sha": f"{i:040d}",
+            "short": f"{i:07d}",
+            "timestamp": "2026-08-01T10:00:00+00:00",
+            "subject": f"commit {i}",
+            "is_root": False,
+            "path": "concepts/alpha.md",
+        }
+        for i in range(count)
+    ]
+
+
+def test_document_data_timeline_truncated(env):
+    """V15: timelines cap at the NEWEST 200 commits with a truncation flag;
+    the tree page applies the same cap to the bootstrap and the tick row."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    commits = _many_commits(250)
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=commits)
+
+    response = client.get("/library/document/data", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["timeline_truncated"] is True
+    assert len(payload["timeline"]) == 200
+    # still oldest-first, live stop (newest commit) last
+    assert payload["timeline"][-1]["sha"] == commits[0]["sha"]
+    assert payload["timeline"][0]["sha"] == commits[199]["sha"]
+    # viewed_index refers to the capped array (rightmost = live stop)
+    assert payload["viewed_index"] == 199
+
+    # the tree page bootstrap carries the same cap and flag
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
+    assert response.status_code == 200
+    assert '"timelineTruncated": true' in response.text
+    assert 'id="history-slider" min="0" max="199"' in response.text
+    # tick cap: 200 entries -> step ceil(200/60) = 4 -> 50 tick dots
+    assert response.text.count('data-index="') == 50
+
+    # short histories are neither capped nor flagged
+    backends[user["id"]] = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    payload = client.get("/library/document/data", params={"path": "/concepts/alpha.md"}).json()
+    assert payload["timeline_truncated"] is False
+    assert len(payload["timeline"]) == len(HISTORY_COMMITS)
+    response = client.get("/library/tree", params={"path": "/concepts/alpha.md"})
+    assert '"timelineTruncated": false' in response.text
+    assert response.text.count('data-index="') == len(HISTORY_COMMITS)
+
+
 def test_tree_page_expands_ancestors(env):
     """Deep link: the ancestor folders render expanded server-side (V10)."""
     client, backends, data_root = env
@@ -1702,6 +1757,56 @@ def test_document_restore_route_csrf_and_login(env):
     )
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
+
+
+def test_document_mutation_unexpected_error_redirects(env):
+    """F30: an unexpected exception type yields a 303 flash redirect with the
+    exception TYPE name only (no message text — may contain paths), plus a
+    journaled error outcome with the full text — never a raw 500."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backend = FakeBackend(make_docs("alice"), commits=HISTORY_COMMITS)
+    backends[user["id"]] = backend
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk at /secret/absolute/path exploded")
+
+    backend.restore_file_from_commit = boom
+    backend.edit_concept = boom
+    backend.delete_concept = boom
+
+    flash = "error=Unexpected+error+%28RuntimeError%29.+Details+were+logged."
+    sha = HISTORY_COMMITS[1]["sha"]
+    response = client.post(
+        "/library/document/restore", data={"path": "/concepts/alpha.md", "sha": sha}
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/library/tree?path=%2Fconcepts%2Falpha.md&{flash}"
+    assert "secret" not in response.headers["location"]  # no message text leaks
+
+    response = client.post(
+        "/library/document/edit", data={"path": "/concepts/alpha.md", "body": "x\n"}
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/library/tree?path=%2Fconcepts%2Falpha.md&{flash}"
+
+    response = client.post("/library/document/delete", data={"path": "/concepts/alpha.md"})
+    assert response.status_code == 303
+    # delete keeps the no-path redirect semantics even on unexpected errors
+    assert response.headers["location"] == f"/library/tree?{flash}"
+
+    # journaled: error outcome with the full exception text (incl. the path)
+    conn = db_module.connect(Path(data_root) / "app.db")
+    try:
+        rows = db_module.list_activity(conn, user["id"])
+    finally:
+        conn.close()
+    by_tool = {row["tool"]: row for row in rows}
+    for tool in ("document_restore", "document_edit", "document_delete"):
+        assert by_tool[tool]["outcome"] == "error"
+        assert "RuntimeError" in by_tool[tool]["error"]
+        assert "/secret/absolute/path" in by_tool[tool]["error"]
 
 
 INLINE_DIFF_PATCH = (
@@ -2063,6 +2168,51 @@ def test_graph_universe_endpoint(env):
     node_ids = set(nodes)
     assert data["edges"] == [{"source": "/atlas/one", "target": "/atlas/two"}]
     assert all(e["source"] in node_ids and e["target"] in node_ids for e in data["edges"])
+
+
+def test_graph_universe_etag_caching(env):
+    """F33: ETag (sha256 of the canonical JSON) + Cache-Control: no-cache;
+    a matching If-None-Match gets a bare 304; a library change -> new ETag."""
+    client, backends, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    login(client, "alice", "pw")
+    backends[user["id"]] = FakeBackend(_universe_docs())
+
+    response = client.get("/api/graph/universe")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    etag = response.headers["etag"]
+    # the canonical serialization IS the body, so the hash matches the bytes
+    assert etag == f'"{hashlib.sha256(response.content).hexdigest()}"'
+
+    # revalidation: bare 304 with the same caching headers and no body
+    revalidated = client.get("/api/graph/universe", headers={"If-None-Match": etag})
+    assert revalidated.status_code == 304
+    assert revalidated.headers["etag"] == etag
+    assert revalidated.headers["cache-control"] == "no-cache"
+    assert revalidated.content == b""
+
+    # metric validation runs BEFORE the ETag check (still a 400, never 304)
+    response = client.get(
+        "/api/graph/universe", params={"metric": "bogus"}, headers={"If-None-Match": etag}
+    )
+    assert response.status_code == 400
+
+    # a library write changes the payload -> 200 with a different ETag
+    backends[user["id"]].docs["/atlas/four.md"] = {
+        "frontmatter": {"title": "Four", "type": "Concept"},
+        "body": "Four body.\n",
+    }
+    changed = client.get("/api/graph/universe")
+    assert changed.status_code == 200
+    assert changed.headers["etag"] != etag
+    # ...and the new ETag revalidates again
+    assert (
+        client.get(
+            "/api/graph/universe", headers={"If-None-Match": changed.headers["etag"]}
+        ).status_code
+        == 304
+    )
 
 
 def test_graph_universe_link_density_sqrt_scale(env):
@@ -2750,16 +2900,19 @@ def test_login_unknown_user_still_verifies_password(env, monkeypatch):
 # --- template / MCP mount hardening (SERVER-11, SERVER-12) ----------------------
 
 
-def test_base_html_pins_htmx_with_sri(env):
-    """SERVER-11: the htmx CDN script carries a sha384 SRI pin."""
+def test_base_html_vendored_htmx_matches_pinned_sri(env):
+    """SERVER-11/V19: htmx is self-hosted (no CDN request); the vendored file
+    is byte-identical to the previously pinned unpkg htmx.org@2.0.4 asset."""
     client, _, data_root = env
     make_user(data_root, "alice", "pw")
     login(client, "alice", "pw")
     response = client.get("/tokens")
     assert response.status_code == 200
-    assert 'src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"' in response.text
-    assert 'integrity="sha384-' in response.text
-    assert 'crossorigin="anonymous"' in response.text
+    assert 'src="/static/htmx.min.js"' in response.text
+    assert "unpkg.com" not in response.text
+    vendored = Path(routes_library.__file__).resolve().parent / "static" / "htmx.min.js"
+    digest = base64.b64encode(hashlib.sha384(vendored.read_bytes()).digest()).decode()
+    assert digest == "HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
 
 
 def test_mcp_catch_all_matches_exact_path_only(client):

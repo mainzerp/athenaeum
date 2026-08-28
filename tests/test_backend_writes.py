@@ -650,6 +650,33 @@ def test_search_and_browse_reads(tmp_path):
     assert backend.link_check() == []
 
 
+def test_list_dir_frontmatter_cache_hit_and_refresh(tmp_path):
+    """V13: repeated list_dir serves frontmatter from the (mtime, size) cache;
+    an edit changes mtime+size and refreshes the entry automatically."""
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept", "title": "Alpha"}, "x\n")
+    backend.create_concept("/b.md", {"type": "Note", "title": "Beta"}, "y\n")
+
+    first = backend.list_dir("/")
+    titles = {e["path"]: e.get("title") for e in first if not e["is_directory"]}
+    assert titles == {"/a.md": "Alpha", "/b.md": "Beta"}
+    # first listing parsed both files into the cache
+    assert len(backend._fm_listing_cache) == 2
+
+    # second listing of the unchanged directory: all cache hits, no growth
+    second = backend.list_dir("/")
+    assert second == first
+    assert len(backend._fm_listing_cache) == 2
+
+    # editing through the backend changes mtime+size: the next listing shows
+    # the refreshed title without any explicit cache invalidation
+    backend.edit_concept("/a.md", frontmatter_patch={"title": "Alpha 2"})
+    third = backend.list_dir("/")
+    titles = {e["path"]: e.get("title") for e in third if not e["is_directory"]}
+    assert titles["/a.md"] == "Alpha 2"
+    assert len(backend._fm_listing_cache) == 2  # entry replaced, not duplicated
+
+
 # --- did-you-mean suggestions on missing paths (LOOP_GUARDS_2) ----------------------
 
 

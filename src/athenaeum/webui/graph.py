@@ -11,6 +11,8 @@ payload with its hop overlay.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import sqlite3
@@ -19,6 +21,7 @@ from typing import Annotated
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 
 from athenaeum.config import Settings
 from athenaeum.library import frontmatter as fm_mod
@@ -252,6 +255,7 @@ def graph_universe(
     settings: Annotated[Settings, Depends(deps.settings_dep)],
     metric: str = "link_density",
 ):
+    # F33: the login gate and metric validation run BEFORE the ETag check.
     user = deps.current_user(request, conn)
     if user is None:
         return deps.login_redirect(conn)
@@ -262,7 +266,22 @@ def graph_universe(
             detail=f"Unknown graph universe metric {metric!r} (allowed: {allowed})",
         )
     backend = deps.get_library_backend(settings, user, conn)
-    return build_universe(backend, metric)
+    payload = build_universe(backend, metric)
+    # F33: ETag = sha256 of the canonical JSON (sort_keys); the canonical
+    # serialization IS the response body, so the hash matches the bytes.
+    # Cache-Control: no-cache forces revalidation — repeat page loads with a
+    # matching If-None-Match get a bare 304 instead of the full payload. The
+    # universe build still runs per request (cheap client revalidation is the
+    # win; no server-side memoization).
+    body = json.dumps(payload, sort_keys=True).encode("utf-8")
+    etag = f'"{hashlib.sha256(body).hexdigest()}"'
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    candidates = [
+        tag.strip() for tag in request.headers.get("if-none-match", "").split(",") if tag.strip()
+    ]
+    if etag in candidates:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @router.get("/library/graph")
