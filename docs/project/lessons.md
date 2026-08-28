@@ -575,10 +575,12 @@
   Vertragstests: 6 in `test_links.py`, 3 in `test_validate.py` (inkl.
   code-span-only-inbound → weiterhin orphan), 1 F22-Dedupe-Pin in
   `test_backend_writes.py`. Suite: 1018 passed, ruff clean. Folge-Effekt:
-  der Strip-Link-Targets-False-Positive verschwindet erst, sobald die
-  REMOTE-Instanz den Fix deployed bekommt. Offenes Follow-up (nicht Teil
-  des Fixes): `webui/graph.py` hat einen eigenen Display-only-Regex mit
-  derselben False-Positive-Klasse.
+  der Strip-Link-Targets-False-Positive verschwand mit dem Deploy auf
+  0.26.2 (2026-08-27/28, live verifiziert: Maintain-No-op ohne LLM-Run).
+  Follow-up (2026-08-28 erledigt, 0.27.1): `webui/graph.py` hatte einen
+  eigenen Display-only-Regex mit derselben False-Positive-Klasse — die
+  Graph-Edges nutzen jetzt denselben `iter_code_segments`-Guard
+  (`_body_link_targets`), Vertragstest in `test_graph.py`.
 - **F28 — `library_status` reduziert Nicht-Graph-Warnings auf einen nackten
   Zaehler (2026-08-25, Beobachtung, REMOTE-Instanz 0.26.1, RESOLVED
   2026-08-25 (0.27.0)).**

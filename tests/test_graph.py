@@ -36,3 +36,19 @@ def test_build_universe_all_readable_unchanged(tmp_path):
         assert payload["metric"] == metric
         assert sorted(node["id"] for node in payload["nodes"]) == ["/a", "/b"]
         assert payload["edges"] == [{"source": "/a", "target": "/b"}]
+
+
+def test_build_universe_ignores_code_span_and_fence_links(tmp_path):
+    """F27 follow-up: links inside inline code spans or fenced blocks are
+    example markup and must not become graph edges; prose links still do."""
+    backend = LibraryBackend(tmp_path / "lib", actor="test", git_enabled=False)
+    backend.init_bundle()
+    backend.create_concept(
+        "/a.md",
+        {"title": "A", "type": "Note"},
+        "See [B](/b.md).\n`[C](/c.md)`\n```\n[C](/c.md)\n```\n",
+    )
+    backend.create_concept("/b.md", {"title": "B", "type": "Note"}, "B body.\n")
+    backend.create_concept("/c.md", {"title": "C", "type": "Note"}, "C body.\n")
+    payload = build_universe(backend)
+    assert payload["edges"] == [{"source": "/a", "target": "/b"}]

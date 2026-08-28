@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from athenaeum.config import Settings
 from athenaeum.library import frontmatter as fm_mod
+from athenaeum.library.md_spans import iter_code_segments
 from athenaeum.webui import deps
 
 router = APIRouter()
@@ -30,6 +31,22 @@ router = APIRouter()
 _LINK_RE = re.compile(r"\[[^\]]*\]\((/[^)\s]+\.md)\)")
 
 _RESERVED = {"index.md", "log.md"}
+
+
+def _body_link_targets(body: str) -> list[str]:
+    """Absolute .md link targets from prose regions of ``body``.
+
+    F27 follow-up: links inside inline code spans or fenced code blocks are
+    example markup, not document relationships — same segmentation guard as
+    ``library.links.extract_body_links`` (via ``md_spans.iter_code_segments``).
+    """
+    targets: list[str] = []
+    for is_code, text in iter_code_segments(body):
+        if is_code:
+            continue
+        targets.extend(_LINK_RE.findall(text))
+    return targets
+
 
 # CS-17: bound on folder nesting accepted by the graph walk. A tree deeper
 # than this is pathological and rejected with a clear 400 instead of failing
@@ -165,7 +182,7 @@ def build_universe(backend: object, metric: str = "link_density") -> dict:
         segments = [seg for seg in concept_id.split("/") if seg]
         timestamps.append(_metric_timestamp(fm))
         raw_generated.append(_metric_value_raw(fm))
-        edges_out.append({t for t in _LINK_RE.findall(body) if t in known})
+        edges_out.append({t for t in _body_link_targets(body) if t in known})
         nodes.append(
             {
                 "id": concept_id,
