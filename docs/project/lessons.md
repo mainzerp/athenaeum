@@ -355,7 +355,8 @@
   `links_after` meldet geschriebene Konzepte ohne eingehende Links
   deterministisch im Store/Update-Ergebnis.
 - **F21 — request_knowledge-Antwort enthielt Roh-Tool-Traces + falsche
-  Coverage-Gaps (2026-08-04, Beobachtung, REMOTE-Instanz 0.20.0, UNRESOLVED).**
+  Coverage-Gaps (2026-08-04, Beobachtung, REMOTE-Instanz 0.20.0, RESOLVED
+  2026-08-19 — siehe "F21 RESOLVED"-Eintrag weiter unten).**
   Session-Start-Query (OKF/Curator/Librarian/Provenance) lieferte eine
   Antwort, die rohe Zwischen-Tool-Calls als JSON-Blobs einbettete
   (`{"path": "/athenaeum/versions/v0.4.2.md"}` -> "File not found",
@@ -372,7 +373,8 @@
   bei File-not-found Pfadform variieren, nicht Coverage-Gap melden"
   pinnen.
 - **F22 — `links_after` meldet unbacklinked trotz behaupteter Verlinkung
-  (2026-08-04, Beobachtung, REMOTE-Instanz 0.20.0, UNRESOLVED).** Der
+  (2026-08-04, Beobachtung, REMOTE-Instanz 0.20.0, RESOLVED 2026-08-19 —
+  siehe "F22 RESOLVED"-Eintrag weiter unten).** Der
   v0.21.0-Abschluss-Store (`/athenaeum/versions/v0.21.0`) behauptete in
   der Summary "linked it from existing version v0.20.0 and the
   store-extensions lessons" — das deterministische `links_after` zeigte
