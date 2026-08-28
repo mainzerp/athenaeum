@@ -574,7 +574,8 @@
   des Fixes): `webui/graph.py` hat einen eigenen Display-only-Regex mit
   derselben False-Positive-Klasse.
 - **F28 — `library_status` reduziert Nicht-Graph-Warnings auf einen nackten
-  Zaehler (2026-08-25, Beobachtung, REMOTE-Instanz 0.26.1, UNRESOLVED).**
+  Zaehler (2026-08-25, Beobachtung, REMOTE-Instanz 0.26.1, RESOLVED
+  2026-08-25 (0.27.0)).**
   Nach dem F27-Link-Fix zeigte `library_status` `warnings: 10` — aber
   `backend.status()` (backend.py:404) listet nur `orphans` und
   `broken_links` einzeln auf; alle uebrigen Warnings
@@ -589,3 +590,7 @@
   itemisierte, geboundete Liste (analog orphans/broken_links, z. B.
   first-N mit Pfad + Code) ins Status-Result; MCP-Vertrag additiv
   erweitern, keine Prompt-Aenderung noetig.
+  Resolution: `status()` liefert jetzt `health.warnings_by_code`
+  (vollstaendiges {code: count}) und `health.warning_items` (erste 50
+  Validate-Eintraege verbatim, `MAX_STATUS_WARNINGS`); Zaehler bleiben
+  ungekuerzt, MCP-Vertrag additiv erweitert.

@@ -10,7 +10,7 @@ import pytest
 from athenaeum.librarian.tools import dispatch
 from athenaeum.library import escape_guard as escape_guard_mod
 from athenaeum.library import frontmatter as fm_mod
-from athenaeum.library.backend import LibraryBackend, provision_library
+from athenaeum.library.backend import MAX_STATUS_WARNINGS, LibraryBackend, provision_library
 from athenaeum.library.frontmatter import split_document
 from athenaeum.library.gittool import GitError
 
@@ -482,7 +482,14 @@ def test_status_healthy_bundle(tmp_path):
     assert status["healthy"] is True
     assert status["stats"]["concepts"] == 0
     assert set(status["stats"]) == {"concepts", "directories", "versions", "last_write"}
-    assert set(status["health"]) == {"orphans", "broken_links", "warnings", "errors"}
+    assert set(status["health"]) == {
+        "orphans",
+        "broken_links",
+        "warnings",
+        "errors",
+        "warnings_by_code",
+        "warning_items",
+    }
 
 
 def test_status_reports_orphans_and_broken(tmp_path):
@@ -493,6 +500,50 @@ def test_status_reports_orphans_and_broken(tmp_path):
     assert status["healthy"] is False
     assert status["health"]["orphans"] == [{"id": "/a", "title": "Alpha"}]
     assert status["health"]["broken_links"] == [{"source": "/b.md", "target": "/missing.md"}]
+
+
+def test_status_warnings_by_code_counts(tmp_path):
+    backend = make_backend(tmp_path)
+    # /a: no title/description -> 2x missing-recommended; no links -> orphan.
+    # /b: fully recommended fields, no links -> orphan only.
+    backend.create_concept("/a.md", {"type": "Concept"}, "body\n")
+    backend.create_concept("/b.md", {"type": "Concept", "title": "B", "description": "b"}, "body\n")
+    status = backend.status()
+    by_code = status["health"]["warnings_by_code"]
+    assert by_code == {"missing-recommended": 2, "orphan": 2}
+    assert sum(by_code.values()) == status["health"]["warnings"]
+
+
+def test_status_warning_items_verbatim_and_ordered(tmp_path):
+    backend = make_backend(tmp_path)
+    backend.create_concept("/a.md", {"type": "Concept"}, "body\n")
+    backend.create_concept("/b.md", {"type": "Concept", "title": "B", "description": "b"}, "body\n")
+    status = backend.status()
+    expected = backend.validate()["warnings"][:MAX_STATUS_WARNINGS]
+    assert len(expected) >= 2
+    assert status["health"]["warning_items"] == expected
+    for entry in status["health"]["warning_items"]:
+        assert {"path", "code", "message"} <= set(entry)
+
+
+def test_status_warning_items_capped(tmp_path, monkeypatch):
+    monkeypatch.setattr("athenaeum.library.backend.MAX_STATUS_WARNINGS", 3)
+    backend = make_backend(tmp_path)
+    # Each concept: 2x missing-recommended + 1x orphan = 3 warnings, 6 total.
+    backend.create_concept("/a.md", {"type": "Concept"}, "body\n")
+    backend.create_concept("/b.md", {"type": "Concept"}, "body\n")
+    status = backend.status()
+    assert len(status["health"]["warning_items"]) == 3
+    assert status["health"]["warnings"] == 6  # untruncated total despite the cap
+    assert sum(status["health"]["warnings_by_code"].values()) == status["health"]["warnings"]
+
+
+def test_status_zero_warnings_shape(tmp_path):
+    backend = make_backend(tmp_path)
+    status = backend.status()
+    assert status["health"]["warnings"] == 0
+    assert status["health"]["warnings_by_code"] == {}
+    assert status["health"]["warning_items"] == []
 
 
 def test_link_health_counts_inbound_and_outbound(tmp_path):

@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 _SUGGEST_CANDIDATE_LIMIT = 2000  # cap the candidate walk for typo suggestions
 
+MAX_STATUS_WARNINGS = 50  # cap the itemized warning list in status(); counts stay complete
+
 # Per-root write locks shared by every LibraryBackend instance in this
 # process: several backends can target one library root (WebUI builds fresh
 # backends per request), so the compound write serializes on the resolved
@@ -424,6 +426,9 @@ class LibraryBackend:
             for w in warnings
             if w["code"] == "broken-link"
         ]
+        warnings_by_code: dict[str, int] = {}
+        for w in warnings:
+            warnings_by_code[w["code"]] = warnings_by_code.get(w["code"], 0) + 1
         concepts = list(links_mod.iter_concept_files(self.root))
         directories = [
             d
@@ -451,6 +456,8 @@ class LibraryBackend:
                 "broken_links": broken,
                 "warnings": len(warnings),
                 "errors": len(errors),
+                "warnings_by_code": warnings_by_code,
+                "warning_items": warnings[:MAX_STATUS_WARNINGS],
             },
             "healthy": not errors and not orphans and not broken,
         }

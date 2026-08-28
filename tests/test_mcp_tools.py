@@ -187,7 +187,14 @@ class FakeBackend:
                 "versions": 0,
                 "last_write": None,
             },
-            "health": {"orphans": [], "broken_links": [], "warnings": 0, "errors": 0},
+            "health": {
+                "orphans": [],
+                "broken_links": [],
+                "warnings": 0,
+                "errors": 0,
+                "warnings_by_code": {},
+                "warning_items": [],
+            },
             "healthy": self.healthy,
         }
 
@@ -483,7 +490,14 @@ async def test_library_status_works_without_llm_config(tmp_path, monkeypatch):
         result = await client.call_tool("library_status", {})
     data = result.data
     assert set(data["stats"]) == {"concepts", "directories", "versions", "last_write"}
-    assert set(data["health"]) == {"orphans", "broken_links", "warnings", "errors"}
+    assert set(data["health"]) == {
+        "orphans",
+        "broken_links",
+        "warnings",
+        "errors",
+        "warnings_by_code",
+        "warning_items",
+    }
     assert data["healthy"] is True
 
 
