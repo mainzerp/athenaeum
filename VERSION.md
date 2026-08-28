@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.27.0**
+Current version: **0.27.1**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,16 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.27.1
+
+F27 follow-up (`0d35696`): the relations graph (`/api/graph/universe`,
+Sunburst view) no longer extracts display edges from markdown links inside
+inline code spans or fenced code blocks. `_LINK_RE` extraction now runs
+through the shared `iter_code_segments` guard (`_body_link_targets`), the
+same segmentation contract as `library.links` — example markup in code no
+longer draws phantom edges. Display-only change; contract test in
+test_graph.py.
 
 ### 0.27.0
 
