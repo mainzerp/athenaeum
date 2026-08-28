@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.28.0**
+Current version: **0.29.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,44 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.29.0
+
+Document-view UI overhaul (`/library/tree` page), implemented as three
+packages from the UI_REVIEW analysis:
+
+- Interaction fixes (`35120b0`): Back/Forward now works for in-page document
+  navigation (pushState/popstate; URL updates only after a successful load);
+  Ctrl/Cmd/Shift+click on tree entries opens a native new tab again; failed
+  folder expansions, document loads, and diff previews surface as toasts
+  instead of failing silently (failed expansions are retryable without
+  reload); loading indicators on the document card and expanders, with
+  AbortController cancellation of superseded fetches; unsaved-edit guard
+  (confirm on navigate-away); tab title follows the selected document;
+  current tree entry gets a distinct background pill; client-side caches for
+  document and diff payloads; valid list nesting in the tree (htmx
+  `outerHTML` swap); empty folders show an `(empty)` placeholder.
+- Tree rework (`4d5264a`): deep-linked documents are revealed in the tree —
+  ancestor folders render expanded server-side and the selection scrolls
+  into view (no programmatic expander clicks, per the ui-tree-rework
+  lesson); folders collapse/re-expand on chevron or folder-name click with
+  zero network requests after first load; accessibility pass
+  (`aria-expanded`, labeled history slider, `aria-live` history label,
+  labeled ticks with enlarged hit areas); sticky, independently scrollable
+  tree pane; inline-diff strikethrough scoped to flow text (code/tables stay
+  readable); code blocks use a light palette in light mode (Monokai stays in
+  dark mode).
+- Performance + hardening (`c04380c`): `list_dir` caches parsed frontmatter
+  keyed by (mtime, size) — repeated tree loads/expansions no longer re-read
+  every markdown file; inline-diff renders cached per (path, sha, HEAD);
+  timeline payloads capped at 200 commits (`timeline_truncated` flag) and
+  the tick row capped at ~60 dots; the doc-view minimap is clickable
+  (GraphSunburst `onSelect`); relative `.md` links inside documents resolve
+  in-page; htmx 2.0.4 is vendored (byte-verified against the previously
+  pinned SRI hash) — no CDN dependency; `/api/graph/universe` supports
+  ETag/`Cache-Control: no-cache` revalidation (304 on repeat loads);
+  unexpected exceptions in edit/restore/delete redirect with a flash instead
+  of a raw 500; the renderer escape invariant is pinned by a contract test.
 
 ### 0.28.0
 
