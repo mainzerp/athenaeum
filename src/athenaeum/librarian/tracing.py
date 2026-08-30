@@ -6,6 +6,9 @@ A ``TraceSession`` is opened per MCP tool call, set into ``_trace_var``, and
 fed by ``Librarian._dispatch_tracked``; a ``RequestTelemetry`` is minted per
 request, set into ``_telemetry_var``, and fed by ``Librarian._run``. Both
 ContextVars mirror the ``_identity_var`` mechanism in athenaeum.identity.
+Each trace records the original request payload (``request``, strings
+truncated to ``MAX_REQUEST``, ``null`` when never set) and the final answer
+(``answer``, truncated to ``MAX_ANSWER``) as top-level fields.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ MAX_STR = 500  # recorded arg strings are truncated to this length
 MAX_ITEMS = 50  # cap for shaped result lists (hits/entries/broken)
 MAX_ERR = 500  # recorded error strings are truncated to this length
 MAX_ANSWER = 2000  # recorded final-answer text is truncated to this length
+MAX_REQUEST = 2000  # recorded request-payload strings are truncated to this length
 
 _TRACE_ID_RE = re.compile(r"^[0-9A-Za-z-]+$")
 
@@ -152,6 +156,17 @@ def _summarize_value(value: Any) -> Any:
     return value
 
 
+def _truncate_request_value(value: Any) -> Any:
+    """Recursively truncate request-payload strings to MAX_REQUEST."""
+    if isinstance(value, str):
+        return _truncate(value, MAX_REQUEST)
+    if isinstance(value, dict):
+        return {key: _truncate_request_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_truncate_request_value(item) for item in value]
+    return value
+
+
 def _shape_result(name: str, args: dict, result: Any) -> Any:
     """Per-tool result shaping (T3): bodies dropped, hit paths kept intact."""
     if name == "read_document" and isinstance(result, dict):
@@ -204,7 +219,9 @@ class TraceSession:
 
     The file is written only when at least one event was recorded or LLM
     telemetry exists (D3: no file for a healthy maintain no-op, and
-    ``library_status`` never opens a session).
+    ``library_status`` never opens a session). The original request payload
+    (``set_request``) and final answer (``set_answer``) are recorded as
+    top-level ``request``/``answer`` fields (``null`` when never set).
     """
 
     def __init__(
@@ -229,10 +246,16 @@ class TraceSession:
         self._closed = False
         self._pending_llm_ms: float | None = None
         self._answer: str | None = None
+        self._request: dict | None = None
 
     def set_answer(self, text: str) -> None:
         """Record the request's final answer text (truncated to MAX_ANSWER)."""
         self._answer = _truncate(text, MAX_ANSWER)
+
+    def set_request(self, request: dict) -> None:
+        """Record a copy of the original request payload (strings truncated to
+        MAX_REQUEST). Callers pass refs for binary data (images), never raw bytes."""
+        self._request = {key: _truncate_request_value(value) for key, value in request.items()}
 
     def set_pending_llm_ms(self, llm_ms: float) -> None:
         """Queue the wall time of the LLM call whose response triggered the
@@ -300,6 +323,7 @@ class TraceSession:
             "outcome": self._outcome or "ok",
             "error": self._error,
             "answer": self._answer,
+            "request": self._request,
             "llm": llm,
             "events": list(self._events),
         }

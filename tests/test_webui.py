@@ -2343,6 +2343,9 @@ def test_trace_replay_page_and_api(env):
     assert "list_dir" in response.text
     assert "openai / m" in response.text  # llm badge
     assert "15 tokens" in response.text
+    # backward-compat pin: old traces without request/answer render unchanged
+    assert "<h2>Request</h2>" not in response.text
+    assert "<h2>Answer</h2>" not in response.text
 
     response = client.get("/api/traces/20260728T180036Z-a1b2c3d4")
     assert response.status_code == 200
@@ -2376,6 +2379,71 @@ def test_trace_replay_page_shows_llm_timing(env):
     data = response.json()
     assert data["llm"]["llm_ms_total"] == 6300.0
     assert data["events"][0]["llm_ms"] == 6123.4
+
+
+def test_trace_replay_page_shows_request_and_answer(env):
+    """New-shape traces render the Request and Answer cards; the answer is
+    markdown-rendered server-side (raw markdown stays in the JSON API)."""
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    make_trace(
+        data_root,
+        user["id"],
+        request={"query": "what is alpha?", "context": None},
+        answer="**Alpha** is a concept.",
+    )
+    login(client, "alice", "pw")
+
+    response = client.get("/library/traces/20260728T180036Z-a1b2c3d4")
+    assert response.status_code == 200
+    assert "<h2>Request</h2>" in response.text
+    assert "what is alpha?" in response.text
+    assert "<h2>Answer</h2>" in response.text
+    assert "<strong>Alpha</strong>" in response.text  # markdown-rendered, not raw
+
+    response = client.get("/api/traces/20260728T180036Z-a1b2c3d4")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["request"]["query"] == "what is alpha?"
+    assert data["answer"].startswith("**Alpha**")
+
+
+def test_trace_replay_page_shows_store_request(env):
+    """store_knowledge traces render the content as a pre block plus the small
+    fields as key/value lines; None fields are skipped; images are refs."""
+    client, _, data_root = env
+    user = make_user(data_root, "alice", "pw")
+    make_trace(
+        data_root,
+        user["id"],
+        tool="store_knowledge",
+        request={
+            "content": "line one\nline two",
+            "kind_hint": "lessons",
+            "relates_to": ["athenaeum"],
+            "topic_hint": None,
+            "images": [
+                {
+                    "filename": "a.png",
+                    "media_type": "image/png",
+                    "bytes": 3,
+                    "sha256": "ab" * 32,
+                    "asset": "/.athenaeum/assets/abab-a.png",
+                }
+            ],
+        },
+    )
+    login(client, "alice", "pw")
+
+    response = client.get("/library/traces/20260728T180036Z-a1b2c3d4")
+    assert response.status_code == 200
+    assert "<h2>Request</h2>" in response.text
+    assert "line one\nline two" in response.text  # pre block content
+    assert "kind_hint" in response.text
+    assert "lessons" in response.text
+    assert "/.athenaeum/assets/abab-a.png" in response.text
+    # topic_hint is None and skipped; the label appears nowhere else on the page
+    assert "topic_hint:" not in response.text
 
 
 def test_traces_missing_and_invalid_id_404(env):

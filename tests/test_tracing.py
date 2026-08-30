@@ -17,6 +17,7 @@ from athenaeum.librarian.tracing import (
     MAX_ANSWER,
     MAX_ERR,
     MAX_ITEMS,
+    MAX_REQUEST,
     MAX_STR,
     RequestTelemetry,
     TraceSession,
@@ -217,6 +218,45 @@ def test_session_answer_absent_when_unset(tmp_path):
 
     data = read_trace(tmp_path, trace_id)
     assert data["answer"] is None
+
+
+def test_session_request_recorded_truncated(tmp_path):
+    """The original request payload lands in the trace, strings truncated to
+    MAX_REQUEST at every nesting level; other values pass through unchanged."""
+    session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "store_knowledge", "agent-x")
+    session.set_request(
+        {
+            "content": "x" * 5000,
+            "kind_hint": "lessons",
+            "relates_to": ["athenaeum", "y" * 5000],
+            "topic_hint": None,
+            "nested": {"deep": ["z" * 5000], "count": 3},
+        }
+    )
+    session.record("list_dir", {"path": "/"}, [], None, 0.1)
+    session.finish("ok")
+    trace_id = session.close()
+
+    truncated_x = "x" * MAX_REQUEST + "…[truncated]"
+    truncated_y = "y" * MAX_REQUEST + "…[truncated]"
+    truncated_z = "z" * MAX_REQUEST + "…[truncated]"
+    data = read_trace(tmp_path, trace_id)
+    assert data["request"]["content"] == truncated_x
+    assert data["request"]["kind_hint"] == "lessons"
+    assert data["request"]["relates_to"] == ["athenaeum", truncated_y]
+    assert data["request"]["topic_hint"] is None
+    assert data["request"]["nested"] == {"deep": [truncated_z], "count": 3}
+
+
+def test_session_request_absent_when_unset(tmp_path):
+    """Without set_request the trace carries a top-level request of None."""
+    session = TraceSession(tmp_path, "20260728T180000Z-aaaabbbb", "request_knowledge", "agent-x")
+    session.record("list_dir", {"path": "/"}, [], None, 0.1)
+    session.finish("ok")
+    trace_id = session.close()
+
+    data = read_trace(tmp_path, trace_id)
+    assert data["request"] is None
 
 
 def test_session_records_pending_llm_ms(tmp_path):

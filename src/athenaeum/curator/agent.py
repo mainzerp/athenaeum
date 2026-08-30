@@ -33,6 +33,7 @@ from athenaeum.librarian.base import (
 )
 from athenaeum.librarian.gate import KIND_CURATOR
 from athenaeum.librarian.llm import LLMConfig, LLMProvider, create_provider
+from athenaeum.librarian.tracing import current_trace
 from athenaeum.library.payloads import PayloadStore
 
 if TYPE_CHECKING:
@@ -126,6 +127,9 @@ class Curator(BaseAgent):
         *,
         agent_label: str | None = None,
     ) -> dict:
+        session = current_trace()
+        if session is not None:
+            session.set_request({"instructions": instructions})
         async with self._run_gate.acquire(self.config.user_id, KIND_CURATOR, wait=False):
             self._maybe_embed_reconcile()
             status = await asyncio.to_thread(self.backend.status)
@@ -334,6 +338,9 @@ class Curator(BaseAgent):
         *,
         agent_label: str | None = None,
     ) -> dict:
+        session = current_trace()
+        if session is not None:
+            session.set_request({"instructions": instructions})
         async with self._run_gate.acquire(self.config.user_id, KIND_CURATOR, wait=False):
             self._maybe_embed_reconcile()
             # F25 stock repair: deterministic content-hygiene sweep BEFORE the findings

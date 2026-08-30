@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from athenaeum.config import Settings
 from athenaeum.librarian.tracing import TraceStore
-from athenaeum.webui import deps
+from athenaeum.webui import deps, markdown_render
 
 router = APIRouter()
 
@@ -50,7 +50,10 @@ def trace_page(
         return deps.login_redirect(conn)
     user, store = ctx
     trace = _read_trace(store, trace_id)
-    return deps.templates.TemplateResponse(request, "trace.html", {"user": user, "trace": trace})
+    answer_html = markdown_render.render_markdown(trace["answer"]) if trace.get("answer") else None
+    return deps.templates.TemplateResponse(
+        request, "trace.html", {"user": user, "trace": trace, "answer_html": answer_html}
+    )
 
 
 @router.get("/api/traces/{trace_id}")

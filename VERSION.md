@@ -1,6 +1,6 @@
 # Athenaeum — Version
 
-Current version: **0.29.0**
+Current version: **0.30.0**
 
 Versioning follows Semantic Versioning (SemVer): `MAJOR.MINOR.PATCH`.
 
@@ -17,6 +17,22 @@ The version must stay in sync across:
 - `pyproject.toml` — `version`
 
 ## Version History
+
+### 0.30.0
+
+Trace replay request/answer visibility:
+
+- Trace files gain a top-level `request` field recording the original tool
+  arguments (strings truncated to 2 KB via `MAX_REQUEST`; `store_knowledge`
+  images as content-addressed refs, never raw bytes; `null` when never set).
+  Recorded by the librarian handlers (`request_knowledge`, `store_knowledge`,
+  `update_knowledge`) and the curator handlers (`library_maintain`,
+  `library_curate`), including scheduler runs.
+- The WebUI trace replay page renders the original request and the generated
+  answer as guarded cards; the answer is markdown-rendered server-side (same
+  renderer as the document view). Old traces without `request`/`answer`
+  render unchanged; the `/api/traces/<id>` JSON keeps the raw markdown
+  (`3c2c767`).
 
 ### 0.29.0
 

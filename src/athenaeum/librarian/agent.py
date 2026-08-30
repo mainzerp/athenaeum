@@ -167,6 +167,9 @@ class Librarian(BaseAgent):
         *,
         agent_label: str | None = None,
     ) -> dict:
+        session = current_trace()
+        if session is not None:
+            session.set_request({"query": query, "context": context})
         async with self._run_gate.acquire(self.config.user_id, KIND_LIBRARIAN, wait=False):
             self._maybe_embed_reconcile()
             task = (
@@ -308,6 +311,7 @@ class Librarian(BaseAgent):
         # the exit rewrite (same request_id, atomic overwrite) carries the
         # final outcome. Best-effort: archive failures never fail the store.
         payloads = PayloadStore(self.root, keep=self.config.payload_keep)
+        image_refs = _payload_image_refs(images)
         record: dict[str, Any] = {
             "request_id": mint_request_id(),
             "tool": "store_knowledge",
@@ -322,11 +326,22 @@ class Librarian(BaseAgent):
                 "kind_hint": kind_hint,
                 "relates_to": relates_to,
                 "topic_hint": topic_hint,
-                "images": _payload_image_refs(images),
+                "images": image_refs,
             },
             "stored": [],
         }
         await self._archive_payload(payloads, record)
+        session = current_trace()
+        if session is not None:
+            session.set_request(
+                {
+                    "content": content,
+                    "kind_hint": kind_hint,
+                    "relates_to": relates_to,
+                    "topic_hint": topic_hint,
+                    "images": image_refs,
+                }
+            )
         try:
             async with self._run_gate.acquire(self.config.user_id, KIND_LIBRARIAN, wait=False):
                 self._maybe_embed_reconcile()
@@ -399,6 +414,9 @@ class Librarian(BaseAgent):
         requested_by: str | None = None,
         via: str | None = None,
     ) -> dict:
+        session = current_trace()
+        if session is not None:
+            session.set_request({"instruction": instruction, "relates_to": relates_to})
         async with self._run_gate.acquire(self.config.user_id, KIND_LIBRARIAN, wait=False):
             self._maybe_embed_reconcile()
             related = await self._related_section(instruction)
