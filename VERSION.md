@@ -32,7 +32,7 @@ Trace replay request/answer visibility:
   answer as guarded cards; the answer is markdown-rendered server-side (same
   renderer as the document view). Old traces without `request`/`answer`
   render unchanged; the `/api/traces/<id>` JSON keeps the raw markdown
-  (`3c2c767`).
+  (`50f76f9`).
 
 ### 0.29.0
 
